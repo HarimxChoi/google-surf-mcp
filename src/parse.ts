@@ -1,4 +1,4 @@
-// Pure parsing of a Google SERP DOM. Self-contained — no module imports, only
+// Pure parsing of a Google SERP DOM. Self-contained, no module imports, only
 // browser globals (document, URL, Set, Array). Reused two ways:
 //  - Production: passed to playwright's page.evaluate (serialized + run in page).
 //  - Tests: called against a JSDOM document patched onto globalThis.
