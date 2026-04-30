@@ -1,7 +1,9 @@
 node_modules/
 build/
 chrome-profiles/
+.tools/
 *.log
 .DS_Store
 .env
 *.local
+.mcp-publisher

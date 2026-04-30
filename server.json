@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.HarimxChoi/google-surf-mcp",
+  "description": "Google search via Playwright with a warm Chrome profile. No API key, no proxies.",
+  "repository": {
+    "url": "https://github.com/HarimxChoi/google-surf-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "google-surf-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "CHROME_PATH",
+          "description": "Absolute path to the Chrome binary. Auto-detected on Windows/macOS/Linux when omitted.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_PROFILE_ROOT",
+          "description": "Directory for the warm Chrome profile. Defaults to ~/.google-surf-mcp.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_LOCALE",
+          "description": "Browser locale, e.g. en-US.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_TZ",
+          "description": "IANA timezone, e.g. America/New_York. Defaults to system timezone.",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
