@@ -10,11 +10,12 @@ interface Worker {
 
 export class SearchPool {
   private workers: Worker[] = [];
+  private waiters: Array<(w: Worker) => void> = [];
   private size: number;
   private warmed = false;
 
   constructor(size = 4) {
-    this.size = size;
+    this.size = Math.max(1, size);
   }
 
   async warm(): Promise<void> {
@@ -35,9 +36,7 @@ export class SearchPool {
 
   async runMany(queries: string[], limit = 10): Promise<{ query: string; results: SearchResult[]; error?: string }[]> {
     if (!this.warmed) await this.warm();
-
-    const tasks = queries.map(q => () => this.runOne(q, limit));
-    return Promise.all(tasks.map(t => t()));
+    return Promise.all(queries.map(q => this.runOne(q, limit)));
   }
 
   private async runOne(query: string, limit: number) {
@@ -49,22 +48,27 @@ export class SearchPool {
     } catch (e) {
       return { query, results: [], error: (e as Error).message };
     } finally {
-      w.busy = false;
+      this.release(w);
     }
   }
 
-  private async acquire(): Promise<Worker> {
-    while (true) {
-      const free = this.workers.find(w => !w.busy);
-      if (free) {
-        free.busy = true;
-        return free;
-      }
-      await new Promise(r => setTimeout(r, 50));
+  private acquire(): Promise<Worker> {
+    const free = this.workers.find(w => !w.busy);
+    if (free) {
+      free.busy = true;
+      return Promise.resolve(free);
     }
+    return new Promise<Worker>(resolve => this.waiters.push(resolve));
+  }
+
+  private release(w: Worker) {
+    const next = this.waiters.shift();
+    if (next) next(w);
+    else w.busy = false;
   }
 
   async close(): Promise<void> {
+    this.waiters = [];
     await Promise.all(this.workers.map(w => w.ctx.close().catch(() => {})));
     this.workers = [];
     this.warmed = false;

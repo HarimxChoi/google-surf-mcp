@@ -13,24 +13,38 @@ import { SearchPool } from './pool.js';
 import type { BrowserContext } from 'playwright';
 
 const NAME = 'google-surf-mcp';
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
+const REQUEST_TIMEOUT_MS = 30_000;
+const POOL_SIZE = 4;
 
-let sequentialCtx: BrowserContext | null = null;
+let ctxPromise: Promise<BrowserContext> | null = null;
 let pool: SearchPool | null = null;
 
-async function getSequentialCtx(): Promise<BrowserContext> {
-  if (sequentialCtx) return sequentialCtx;
-  sequentialCtx = await launch({ profileDir: PROFILE_MAIN, headless: true });
-  const page = await getPage(sequentialCtx);
-  await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
-  return sequentialCtx;
+function getSequentialCtx(): Promise<BrowserContext> {
+  return ctxPromise ??= (async () => {
+    const c = await launch({ profileDir: PROFILE_MAIN, headless: true });
+    const p = await getPage(c);
+    await p.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    return c;
+  })();
 }
 
 async function shutdown() {
-  await sequentialCtx?.close().catch(() => {});
+  const cp = ctxPromise;
+  ctxPromise = null;
+  if (cp) {
+    const c = await cp.catch(() => null);
+    await c?.close().catch(() => {});
+  }
   await pool?.close();
-  sequentialCtx = null;
   pool = null;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
 }
 
 const server = new Server(
@@ -39,8 +53,9 @@ const server = new Server(
 );
 
 server.onerror = e => console.error('[mcp]', e);
-process.on('SIGINT', async () => { await shutdown(); process.exit(0); });
-process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
+process.on('SIGINT', () => { shutdown().finally(() => process.exit(0)); });
+process.on('SIGTERM', () => { shutdown().finally(() => process.exit(0)); });
+process.stdin.on('end', () => { shutdown().finally(() => process.exit(0)); });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -62,7 +77,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          queries: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8, description: 'Queries' },
+          queries: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 10, description: 'Queries' },
           limit: { type: 'number', minimum: 1, maximum: 20, description: 'Max results per query' },
         },
         required: ['queries'],
@@ -90,7 +105,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     try {
       const ctx = await getSequentialCtx();
       const page = await getPage(ctx);
-      const results = await search(page, query, limit);
+      const results = await withTimeout(search(page, query, limit), REQUEST_TIMEOUT_MS, 'search');
       return {
         content: [{
           type: 'text',
@@ -112,8 +127,8 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      pool ??= new SearchPool(Math.min(queries.length, 4));
-      const results = await pool.runMany(queries, limit);
+      pool ??= new SearchPool(POOL_SIZE);
+      const results = await withTimeout(pool.runMany(queries, limit), REQUEST_TIMEOUT_MS * 2, 'search_parallel');
       return {
         content: [{
           type: 'text',

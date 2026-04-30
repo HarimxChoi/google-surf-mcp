@@ -1,4 +1,4 @@
-import { launch, getPage, PROFILE_MAIN, profileExists } from './browser.js';
+import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked } from './browser.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const TIMEOUT_MIN = 10;
@@ -12,7 +12,7 @@ async function bootstrap() {
     try {
       const page = await getPage(ctx);
       await page.goto('https://www.google.com/search?q=test', { waitUntil: 'domcontentloaded', timeout: 15_000 });
-      const blocked = page.url().includes('/sorry/');
+      const blocked = isBlocked(page.url());
       if (!blocked) {
         console.error('ok');
         return;

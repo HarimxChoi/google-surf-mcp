@@ -91,3 +91,5 @@ export async function cloneProfile(workerIndex: number): Promise<string> {
 export function profileExists(): boolean {
   return existsSync(PROFILE_MAIN);
 }
+
+export const isBlocked = (url: string) => url.includes('/sorry/');

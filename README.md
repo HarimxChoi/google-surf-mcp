@@ -1,33 +1,36 @@
 # google-surf-mcp
 
-MCP server for Google search. No API key. Playwright with a warm Chrome profile.
+Google search MCP. No API key. Just works.
 
-## Why
+## What
 
-Free Google search MCPs out there mostly don't work in 2026 — Google blocks them in seconds. After ~30 failed attempts I found two things matter:
+Plug it into any MCP client and you get Google search as a tool. CAPTCHA solving isn't built in — but the server is designed so a transient block doesn't crash it, and the next call goes through.
 
-1. Remove `--enable-automation` from Chrome's launch args. Playwright sets it by default. Stealth plugins don't touch it. Google checks it first.
-2. Use a warm persistent profile. Cold profiles get CAPTCHA'd. A profile that ran one real search in visible mode never gets blocked again in headless.
-
-With those two: ~2s per query, parallel works, no keys, no proxies.
+One-time install needs a ~1s profile warm-up (see Install).
 
 ## Numbers
 
 | | result |
 |---|---|
-| sequential, warm | ~2s/query |
-| parallel x4 | ~9s wall |
-| parallel x10 | ~16s wall |
-| cold profile | CAPTCHA every time |
-| `--enable-automation` left on | CAPTCHA every time |
+| sequential | ~2s/query |
+| parallel x4 | ~2s wall |
+| parallel x10 | ~5s wall |
+
+Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware and network.
+
+## Stack
+
+- Playwright + persistent Chrome profile
+- `playwright-extra` stealth
+- Resource-blocked images / media / fonts for speed
+- One-shot profile bootstrap before first run
 
 ## Install
 
 Requires Node 18+ and Google Chrome (or Chromium) on the system.
 
 ```bash
-npx google-surf-mcp --help   # nothing yet, just to pull the package
-npx google-surf-mcp           # actual MCP — register in client config
+npx google-surf-mcp   # actual MCP — register in client config
 ```
 
 Or local clone:
@@ -46,9 +49,9 @@ Override paths if needed:
 CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 ```
 
-## Claude Code config
+## Config
 
-`~/.claude.json`:
+Example for Claude Code (`~/.claude.json`):
 
 ```json
 {
@@ -76,7 +79,7 @@ Or with a local clone:
 ## Tools
 
 - `search(query, limit?)` — single query, ~2s
-- `search_parallel(queries[], limit?)` — pool of 4, max 8 queries per call
+- `search_parallel(queries[], limit?)` — pool of 4, max 10 queries per call
 
 ## Env vars
 

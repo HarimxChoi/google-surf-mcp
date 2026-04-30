@@ -23,8 +23,12 @@
     "mcp",
     "model-context-protocol",
     "google",
+    "google-search",
     "search",
+    "web-search",
+    "serp",
     "playwright",
+    "headless-browser",
     "claude"
   ],
   "author": "harimxchoi",
@@ -39,7 +43,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.20.0",
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
