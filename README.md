@@ -4,11 +4,11 @@ Google search MCP. No API key. Just works.
 
 ## What
 
-Plug it into any MCP client and you get Google search as a tool. CAPTCHA solving isn't built in — but the server is designed so a transient block doesn't crash it, and the next call goes through.
+Plug it into any MCP client and you get Google search as a tool. CAPTCHA solving isn't built in but the server is designed so a transient block doesn't crash it, and the next call goes through.
 
 One-time install needs a ~1s profile warm-up (see Install).
 
-Designed for local use. Not suitable for stateless / serverless deployment — the warm profile is the whole point.
+Designed for local use. Not suitable for stateless / serverless deployment.
 
 ## Numbers
 
@@ -17,7 +17,6 @@ Designed for local use. Not suitable for stateless / serverless deployment — t
 | sequential | ~2s/query (first call ~4s, includes setup) |
 | parallel x4 | ~2s wall |
 | parallel x10 | ~5s wall |
-| extract (single page) | ~1–3s |
 | search_extract x5 | ~7s wall (search + 5 parallel extracts) |
 
 Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware and network.
