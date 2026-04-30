@@ -1,10 +1,11 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "MCP server for Google search via warm Chrome profile. No API key.",
   "type": "module",
   "bin": {
-    "google-surf-mcp": "./build/index.js"
+    "google-surf-mcp": "build/index.js"
   },
   "files": [
     "build",
