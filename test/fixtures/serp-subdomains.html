@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html><body>
+<div id="search">
+  <div class="g">
+    <a href="https://cloud.google.com/pricing"><h3>Google Cloud Pricing</h3></a>
+    <div class="VwiC3b">Subdomain — should NOT be filtered.</div>
+  </div>
+  <div class="g">
+    <a href="https://www.google.com/maps"><h3>Google Maps</h3></a>
+    <div class="VwiC3b">Bare www.google.com — SHOULD be filtered.</div>
+  </div>
+  <div class="g">
+    <a href="https://groups.google.com/g/foo"><h3>Google Groups</h3></a>
+    <div class="VwiC3b">Subdomain — should pass through.</div>
+  </div>
+  <div class="g">
+    <a href="https://support.google.com/help"><h3>Google Support</h3></a>
+    <div class="VwiC3b">Subdomain — should pass through.</div>
+  </div>
+  <div class="g">
+    <a href="https://accounts.google.com/signin"><h3>Sign in</h3></a>
+    <div class="VwiC3b">Accounts — SHOULD be filtered.</div>
+  </div>
+</div>
+</body></html>

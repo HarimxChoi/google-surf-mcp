@@ -1,11 +1,18 @@
 import type { BrowserContext } from 'playwright';
 import { launch, cloneProfile, getPage } from './browser.js';
 import { search } from './search.js';
+import { extract, type ExtractResult } from './extract.js';
 import type { SearchResult } from './types.js';
 
 interface Worker {
   ctx: BrowserContext;
   busy: boolean;
+}
+
+export interface PoolSearchResult {
+  query: string;
+  results: SearchResult[];
+  error?: string;
 }
 
 export class SearchPool {
@@ -34,12 +41,13 @@ export class SearchPool {
     this.warmed = true;
   }
 
-  async runMany(queries: string[], limit = 10): Promise<{ query: string; results: SearchResult[]; error?: string }[]> {
+  async runMany(queries: string[], limit = 10): Promise<PoolSearchResult[]> {
     if (!this.warmed) await this.warm();
-    return Promise.all(queries.map(q => this.runOne(q, limit)));
+    return Promise.all(queries.map(q => this.searchOne(q, limit)));
   }
 
-  private async runOne(query: string, limit: number) {
+  async searchOne(query: string, limit: number): Promise<PoolSearchResult> {
+    if (!this.warmed) await this.warm();
     const w = await this.acquire();
     try {
       const page = await getPage(w.ctx);
@@ -47,6 +55,16 @@ export class SearchPool {
       return { query, results };
     } catch (e) {
       return { query, results: [], error: (e as Error).message };
+    } finally {
+      this.release(w);
+    }
+  }
+
+  async extractOne(url: string, maxChars: number, navTimeoutMs?: number): Promise<ExtractResult> {
+    if (!this.warmed) await this.warm();
+    const w = await this.acquire();
+    try {
+      return await extract(w.ctx, url, maxChars, navTimeoutMs);
     } finally {
       this.release(w);
     }

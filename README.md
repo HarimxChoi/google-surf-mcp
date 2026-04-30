@@ -8,13 +8,17 @@ Plug it into any MCP client and you get Google search as a tool. CAPTCHA solving
 
 One-time install needs a ~1s profile warm-up (see Install).
 
+Designed for local use. Not suitable for stateless / serverless deployment — the warm profile is the whole point.
+
 ## Numbers
 
 | | result |
 |---|---|
-| sequential | ~2s/query |
+| sequential | ~2s/query (first call ~4s, includes setup) |
 | parallel x4 | ~2s wall |
 | parallel x10 | ~5s wall |
+| extract (single page) | ~1–3s |
+| search_extract x5 | ~7s wall (search + 5 parallel extracts) |
 
 Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware and network.
 
@@ -24,6 +28,7 @@ Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware an
 - `playwright-extra` stealth
 - Resource-blocked images / media / fonts for speed
 - One-shot profile bootstrap before first run
+- Mozilla Readability + Turndown for article extraction
 
 ## Install
 
@@ -78,8 +83,12 @@ Or with a local clone:
 
 ## Tools
 
-- `search(query, limit?)` — single query, ~2s
-- `search_parallel(queries[], limit?)` — pool of 4, max 10 queries per call
+- `search(query, limit?)` — single query, ~2s. Returns title / url / snippet.
+- `search_parallel(queries[], limit?)` — pool of 4, max 10 queries per call.
+- `extract(url, max_chars?)` — fetch a URL, return article markdown (Readability with text fallback). Failures return `{ error }`, never throw.
+- `search_extract(query, limit?, max_chars?)` — search + parallel extract in one call. Returns SERP results enriched with full article content. Per-page failures are isolated.
+
+`extract` and `search_extract` make this MCP a one-stop shop for "search and read" workflows — your client gets actual page content, not just snippets.
 
 ## Env vars
 

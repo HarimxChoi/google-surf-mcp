@@ -7,3 +7,4 @@ chrome-profiles/
 .env
 *.local
 .mcp-publisher
+.mcp.json
