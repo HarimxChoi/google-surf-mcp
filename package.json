@@ -1,27 +1,47 @@
 {
   "name": "google-surf-mcp",
   "version": "0.1.0",
-  "description": "MCP server — Google search via warm Playwright profile, no API key",
-  "private": true,
+  "description": "MCP server for Google search via warm Chrome profile. No API key.",
   "type": "module",
   "bin": {
     "google-surf-mcp": "./build/index.js"
   },
   "files": [
-    "build"
+    "build",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
     "prepare": "npm run build",
     "watch": "tsc --watch",
-    "bootstrap": "node build/bootstrap.js"
+    "bootstrap": "node build/bootstrap.js",
+    "start": "node build/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "google",
+    "search",
+    "playwright",
+    "claude"
+  ],
+  "author": "harimxchoi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HarimxChoi/google-surf-mcp.git"
+  },
+  "homepage": "https://github.com/HarimxChoi/google-surf-mcp#readme",
+  "bugs": "https://github.com/HarimxChoi/google-surf-mcp/issues",
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "zod": "^3.23.8"
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
   "devDependencies": {
     "@types/node": "^20.17.10",

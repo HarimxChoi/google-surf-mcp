@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { rm, cp } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { platform, homedir } from 'node:os';
+import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium as chromiumExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -11,10 +12,37 @@ chromiumExtra.use(StealthPlugin());
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
-export const PROFILE_MAIN = resolve(ROOT, 'chrome-profiles/main');
-export const PROFILE_WORKER = (i: number) => resolve(ROOT, `chrome-profiles/w${i}`);
+const PROFILE_ROOT = process.env.SURF_PROFILE_ROOT || join(homedir(), '.google-surf-mcp');
+export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
+export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${i}`);
 
-const REAL_CHROME = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+function detectChrome(): string {
+  if (process.env.CHROME_PATH && existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
+  const candidates: Record<string, string[]> = {
+    win32: [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ],
+    darwin: [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    ],
+    linux: [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium',
+    ],
+  };
+  for (const p of candidates[platform()] || []) if (existsSync(p)) return p;
+  throw new Error('Chrome not found. Install Chrome or set CHROME_PATH env.');
+}
+
+const SYSTEM_TZ = (() => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return 'UTC'; }
+})();
 
 export interface LaunchOpts {
   profileDir: string;
@@ -22,16 +50,12 @@ export interface LaunchOpts {
 }
 
 export async function launch({ profileDir, headless = true }: LaunchOpts): Promise<BrowserContext> {
-  if (!existsSync(REAL_CHROME)) {
-    throw new Error(`Chrome not found at ${REAL_CHROME}. Set CHROME_PATH env.`);
-  }
-
   const ctx = await chromiumExtra.launchPersistentContext(profileDir, {
-    executablePath: REAL_CHROME,
+    executablePath: detectChrome(),
     headless,
     viewport: { width: 1366, height: 768 },
-    locale: 'en-US',
-    timezoneId: 'Asia/Seoul',
+    locale: process.env.SURF_LOCALE || 'en-US',
+    timezoneId: process.env.SURF_TZ || SYSTEM_TZ,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--disable-blink-features=AutomationControlled',

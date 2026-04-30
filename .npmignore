@@ -1,0 +1,10 @@
+src/
+chrome-profiles/
+node_modules/
+.git/
+.gitignore
+.github/
+*.log
+*.local
+.env*
+tsconfig.json
