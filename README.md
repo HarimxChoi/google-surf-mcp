@@ -34,7 +34,7 @@ Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware an
 Requires Node 18+ and Google Chrome (or Chromium) on the system.
 
 ```bash
-npx google-surf-mcp   # actual MCP — register in client config
+npx google-surf-mcp   # actual MCP - register in client config
 ```
 
 Or local clone:
@@ -82,12 +82,12 @@ Or with a local clone:
 
 ## Tools
 
-- `search(query, limit?)` — single query, ~2s. Returns title / url / snippet.
-- `search_parallel(queries[], limit?)` — pool of 4, max 10 queries per call.
-- `extract(url, max_chars?)` — fetch a URL, return article markdown (Readability with text fallback). Failures return `{ error }`, never throw.
-- `search_extract(query, limit?, max_chars?)` — search + parallel extract in one call. Returns SERP results enriched with full article content. Per-page failures are isolated.
+- `search(query, limit?)` - single query, ~2s. Returns title / url / snippet.
+- `search_parallel(queries[], limit?)` - pool of 4, max 10 queries per call.
+- `extract(url, max_chars?)` - fetch a URL, return article markdown (Readability with text fallback). Failures return `{ error }`, never throw.
+- `search_extract(query, limit?, max_chars?)` - search + parallel extract in one call. Returns SERP results enriched with full article content. Per-page failures are isolated.
 
-`extract` and `search_extract` make this MCP a one-stop shop for "search and read" workflows — your client gets actual page content, not just snippets.
+`extract` and `search_extract` make this MCP a one-stop shop for "search and read" workflows - your client gets actual page content, not just snippets.
 
 ## Env vars
 
