@@ -1,5 +1,7 @@
 # google-surf-mcp
 
+✨Anti-Bot Search MCP: No API Key✨
+
 Google search MCP. No API key. Just works.
 
 ## What
