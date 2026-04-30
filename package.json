@@ -1,0 +1,30 @@
+{
+  "name": "google-surf-mcp",
+  "version": "0.1.0",
+  "description": "MCP server — Google search via warm Playwright profile, no API key",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "google-surf-mcp": "./build/index.js"
+  },
+  "files": [
+    "build"
+  ],
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "prepare": "npm run build",
+    "watch": "tsc --watch",
+    "bootstrap": "node build/bootstrap.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "playwright": "^1.59.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "typescript": "^5.3.3"
+  }
+}
