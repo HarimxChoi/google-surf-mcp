@@ -128,7 +128,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'search',
-      description: 'Google search. Returns title/url/snippet per result. ~2s/query after the first.',
+      description: 'Single Google search. Returns title/url/snippet per result. ~2s/query (first call ~4s, includes setup). On CAPTCHA, a visible Chrome window opens for the human to solve, then the call retries.',
       inputSchema: {
         type: 'object',
         properties: {

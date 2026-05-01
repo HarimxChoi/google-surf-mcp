@@ -4,6 +4,8 @@
 
 English | [한국어](./README.ko.md)
 
+[![google-surf-mcp MCP server](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp)
+
 ![demo](./assets/demo.gif)
 
 > Demo only. Actual searches run **headless** by default (no visible browser). Set `SURF_HEADLESS=false` to make Chrome visible like in the clip above.
