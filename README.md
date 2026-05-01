@@ -63,9 +63,9 @@ Override paths if needed:
 CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 ```
 
-## Config
+## Use with Claude Code
 
-Example for Claude Code (`~/.claude.json`):
+Paste this into your `~/.claude.json`:
 
 ```json
 {
@@ -78,7 +78,11 @@ Example for Claude Code (`~/.claude.json`):
 }
 ```
 
-Or with a local clone:
+Restart Claude Code. Done. `search`, `search_parallel`, `extract`, `search_extract` are now available.
+
+For other MCP clients, use the same JSON shape in their config file.
+
+Local clone variant:
 ```json
 {
   "mcpServers": {

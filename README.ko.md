@@ -63,9 +63,9 @@ npm run bootstrap
 CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 ```
 
-## Config
+## Claude Code에서 사용
 
-Claude Code 예시 (`~/.claude.json`):
+`~/.claude.json`에 이거 붙여넣기:
 
 ```json
 {
@@ -77,6 +77,10 @@ Claude Code 예시 (`~/.claude.json`):
   }
 }
 ```
+
+Claude Code 재시작. 끝. `search`, `search_parallel`, `extract`, `search_extract` 도구가 바로 사용 가능합니다.
+
+다른 MCP 클라이언트도 같은 JSON 구조 그대로 (config 파일 경로만 다름).
 
 로컬 클론 사용 시:
 ```json
