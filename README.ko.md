@@ -10,10 +10,10 @@
 
 무료 Google 검색 MCP가 전부 안 돼서 직접 만든 도구.
 
-✅ 실제로 작동 (무료 MCP 6개 테스트, 전부 fail)
-✅ 4개 도구: `search` / `search_parallel` / `extract` / `search_extract`
-✅ API 키 / 프록시 / 솔버 X
-✅ CAPTCHA 자동 복구 (Chrome 창 떠서 사람이 풀면 자동 재시도)
+✅ 실제로 작동 (무료 MCP 6개 테스트, 전부 fail)  
+✅ 4개 도구: `search` / `search_parallel` / `extract` / `search_extract`  
+✅ API 키 / 프록시 / 솔버 X  
+✅ CAPTCHA 자동 복구 (Chrome 창 떠서 사람이 풀면 자동 재시도)  
 
 ## How
 
