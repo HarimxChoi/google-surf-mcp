@@ -6,19 +6,21 @@
 
 ![demo](./assets/demo.gif)
 
-> 데모 영상은 시각화용이고, 실제 사용은 기본 **headless**로 동작합니다 (Chrome 창 안 보임). 영상처럼 보이게 하려면 `SURF_HEADLESS=false` 설정.
+> 실제 사용은 기본 **headless**로 동작합니다 (Chrome 창 안 보임). 영상처럼 보이게 하려면 `SURF_HEADLESS=false` 설정.
 
-Google 검색 MCP. API 키 없음. 그냥 작동.
+무료 Google 검색 MCP가 전부 안 돼서 직접 만든 도구.
 
-## What
+✅ 실제로 작동 (무료 MCP 6개 테스트, 전부 fail)
+✅ 4개 도구: `search` / `search_parallel` / `extract` / `search_extract`
+✅ API 키 / 프록시 / 솔버 X
+✅ CAPTCHA 자동 복구 (Chrome 창 떠서 사람이 풀면 자동 재시도)
 
-어떤 MCP 클라이언트든 꽂으면 Google 검색을 도구로 쓸 수 있습니다.
+## How
 
-CAPTCHA 솔버는 없습니다. 어느 도구에서든 CAPTCHA가 뜨면 보이는 Chrome 창이 자동으로 열려서 사람이 한 번 풀게 합니다. 각 풀이가 프로필의 Google 평판을 유지시킵니다. 지속가능하고 윤리적인 사용을 위한 설계.
+MCP 클라이언트에 설정시 Google 검색 도구로 사용 가능. anti-bot은 warm Chrome profile + stealth로 처리. 
+CAPTCHA 풀이는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운영).
 
-설치 시 1회 ~1초 프로필 워밍업 필요 (Install 참고).
-
-로컬 사용 전제. stateless / serverless 환경엔 부적합. warm 프로필이 핵심이라.
+첫 설치 시 ~1초 프로필 워밍업 필요. 로컬 전용 (stateless 환경 부적합, warm 프로필이 핵심).
 
 ## Numbers
 
@@ -56,7 +58,7 @@ npm install
 npm run bootstrap
 ```
 
-`bootstrap`은 Chrome 창을 띄웁니다. 그 안에서 Google 검색 한 번 돌리고 닫으면 프로필 워밍 완료.
+`bootstrap`은 Chrome 창을 띄웁니다. Google 검색 한번 해준 후, 닫으면 프로필 워밍 완료.
 
 경로 오버라이드:
 ```bash
@@ -78,7 +80,7 @@ CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 }
 ```
 
-Claude Code 재시작. 끝. `search`, `search_parallel`, `extract`, `search_extract` 도구가 바로 사용 가능합니다.
+Claude Code 재시작.
 
 다른 MCP 클라이언트도 같은 JSON 구조 그대로 (config 파일 경로만 다름).
 
@@ -118,7 +120,7 @@ Claude Code 재시작. 끝. `search`, `search_parallel`, `extract`, `search_extr
 
 - CAPTCHA: 4개 도구 어느 곳에서든 자동으로 Chrome 창이 열림. 한 번 풀고 그 안에서 검색 한 번 돌리면 호출이 자동 재시도되며 이어집니다. fail-fast로 가려면 디스플레이 없는 환경에서 실행.
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정.
-- 셀렉터 깨짐: Google이 클래스명 바꿈. PR 환영.
+- 셀렉터 깨짐: Google이 클래스명 바꿈. PR 환영합니다.
 
 ## License
 
