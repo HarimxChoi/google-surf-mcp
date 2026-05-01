@@ -6,7 +6,9 @@ Google search MCP. No API key. Just works.
 
 ## What
 
-Plug it into any MCP client and you get Google search as a tool. CAPTCHA solving isn't built in but the server is designed so a transient block doesn't crash it, and the next call goes through.
+Plug it into any MCP client and you get Google search as a tool.
+
+No CAPTCHA solver. When CAPTCHA fires on any tool, a Chrome window opens for a human to solve. Each solve preserves the profile's reputation with Google. Built for sustainable, ethical use.
 
 One-time install needs a ~1s profile warm-up (see Install).
 
