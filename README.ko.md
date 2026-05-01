@@ -8,7 +8,7 @@
 
 > 실제 사용은 기본 **headless**로 동작합니다 (Chrome 창 안 보임). 영상처럼 보이게 하려면 `SURF_HEADLESS=false` 설정.
 
-무료 Google 검색 MCP가 전부 안 돼서 직접 만든 도구.
+무료 Google 검색 MCP가 전부 안 돼서 직접 만든 MCP
 
 ✅ 실제로 작동 (무료 MCP 6개 테스트, 전부 fail)  
 ✅ 4개 도구: `search` / `search_parallel` / `extract` / `search_extract`  
