@@ -19,12 +19,12 @@ export async function search(page: Page, query: string, limit = 10): Promise<Sea
   if (!onResultsPage) {
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 15_000 });
     if (isBlocked(page.url())) throw new CaptchaError('home');
-    await sleep(rand(300, 600));
+    await sleep(rand(80, 160));
   }
 
   const sb = page.locator('textarea[name="q"], input[name="q"]').first();
   await sb.click();
-  await sleep(rand(80, 150));
+  await sleep(rand(30, 70));
 
   if (onResultsPage) {
     await page.keyboard.press(SELECT_ALL);
@@ -32,9 +32,9 @@ export async function search(page: Page, query: string, limit = 10): Promise<Sea
   }
 
   for (const ch of query) {
-    await page.keyboard.type(ch, { delay: rand(30, 50) });
+    await page.keyboard.type(ch, { delay: rand(8, 20) });
   }
-  await sleep(rand(100, 200));
+  await sleep(rand(50, 110));
   await page.keyboard.press('Enter');
 
   try {

@@ -53,6 +53,9 @@ export async function extract(
       return { url, error: `http ${resp.status()}` };
     }
 
+    // SPA settle: wait briefly for JS-rendered content
+    await page.waitForTimeout(500);
+
     await page.addScriptTag({ path: READABILITY_PATH }).catch(() => {});
 
     const article = await page.evaluate(() => {

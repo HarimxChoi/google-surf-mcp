@@ -14,15 +14,21 @@ import { withCaptchaFallback } from './captchaRecover.js';
 import type { BrowserContext } from 'playwright';
 
 const NAME = 'google-surf-mcp';
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXTRACT_BATCH_TIMEOUT_MS = 60_000;
 const POOL_SIZE = 4;
 const DEFAULT_EXTRACT_MAX_CHARS = 8_000;
 const SEARCH_EXTRACT_DEFAULT_LIMIT = 5;
+const IDLE_CLOSE_MS = Number(process.env.SURF_IDLE_CLOSE_MS) || 30_000;
 
 let ctxPromise: Promise<BrowserContext> | null = null;
 let pool: SearchPool | null = null;
+
+let seqActive = 0;
+let poolActive = 0;
+let seqIdleTimer: ReturnType<typeof setTimeout> | null = null;
+let poolIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 function getSequentialCtx(): Promise<BrowserContext> {
   return ctxPromise ??= (async () => {
@@ -56,7 +62,46 @@ async function resetPool(): Promise<void> {
   pool = null;
 }
 
+function clearSeqIdle() {
+  if (seqIdleTimer) { clearTimeout(seqIdleTimer); seqIdleTimer = null; }
+}
+function clearPoolIdle() {
+  if (poolIdleTimer) { clearTimeout(poolIdleTimer); poolIdleTimer = null; }
+}
+
+async function trackSeq<T>(op: () => Promise<T>): Promise<T> {
+  clearSeqIdle();
+  seqActive++;
+  try { return await op(); }
+  finally {
+    seqActive--;
+    if (seqActive === 0) {
+      seqIdleTimer = setTimeout(() => {
+        seqIdleTimer = null;
+        if (seqActive === 0) closeSequential().catch(() => {});
+      }, IDLE_CLOSE_MS);
+    }
+  }
+}
+
+async function trackPool<T>(op: () => Promise<T>): Promise<T> {
+  clearPoolIdle();
+  poolActive++;
+  try { return await op(); }
+  finally {
+    poolActive--;
+    if (poolActive === 0) {
+      poolIdleTimer = setTimeout(() => {
+        poolIdleTimer = null;
+        if (poolActive === 0) resetPool().catch(() => {});
+      }, IDLE_CLOSE_MS);
+    }
+  }
+}
+
 async function shutdown() {
+  clearSeqIdle();
+  clearPoolIdle();
   await closeSequential();
   await pool?.close();
   pool = null;
@@ -151,14 +196,14 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const results = await withCaptchaFallback(
+      const results = await trackSeq(() => withCaptchaFallback(
         async () => {
           const ctx = await getSequentialCtx();
           const page = await getPage(ctx);
           return await withTimeout(search(page, query, limit), REQUEST_TIMEOUT_MS, 'search');
         },
         closeSequential,
-      );
+      ));
       return {
         content: [{
           type: 'text',
@@ -180,13 +225,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const results = await withCaptchaFallback(
+      const results = await trackPool(() => withCaptchaFallback(
         async () => {
           const p = await ensurePool();
           return await withTimeout(p.runMany(queries, limit), REQUEST_TIMEOUT_MS * 2, 'search_parallel');
         },
         resetPool,
-      );
+      ));
       return {
         content: [{
           type: 'text',
@@ -205,13 +250,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const result = await withCaptchaFallback(
+      const result = await trackPool(() => withCaptchaFallback(
         async () => {
           const p = await ensurePool();
           return await withTimeout(p.extractOne(url, maxChars), REQUEST_TIMEOUT_MS, 'extract');
         },
         resetPool,
-      );
+      ));
       return {
         content: [{
           type: 'text',
@@ -231,7 +276,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const data = await withCaptchaFallback(
+      const data = await trackPool(() => withCaptchaFallback(
         async () => {
           const p = await ensurePool();
           const sr = await withTimeout(p.searchOne(query, limit), REQUEST_TIMEOUT_MS, 'search_extract:search');
@@ -257,7 +302,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
           return { results: enriched as Array<Record<string, unknown>>, searchError: undefined as string | undefined };
         },
         resetPool,
-      );
+      ));
       return {
         content: [{
           type: 'text',

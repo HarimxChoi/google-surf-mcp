@@ -71,11 +71,38 @@ export class SearchPool {
     }
   }
 
-  private acquire(): Promise<Worker> {
+  private isContextAlive(ctx: BrowserContext): boolean {
+    try {
+      ctx.pages();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async rebuildWorker(idx: number): Promise<Worker> {
+    const dir = await cloneProfile(idx);
+    const ctx = await launch({ profileDir: dir });
+    const page = await getPage(ctx);
+    await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    return { ctx, busy: false };
+  }
+
+  private async acquire(): Promise<Worker> {
     const free = this.workers.find(w => !w.busy);
     if (free) {
       free.busy = true;
-      return Promise.resolve(free);
+      if (this.isContextAlive(free.ctx)) return free;
+      const idx = this.workers.indexOf(free);
+      try {
+        const fresh = await this.rebuildWorker(idx);
+        fresh.busy = true;
+        this.workers[idx] = fresh;
+        return fresh;
+      } catch (e) {
+        free.busy = false;
+        throw new Error(`pool worker ${idx} rebuild failed: ${(e as Error).message}`);
+      }
     }
     return new Promise<Worker>(resolve => this.waiters.push(resolve));
   }

@@ -34,7 +34,7 @@ export function parseResults(max: number): ParsedResult[] {
     out.push({
       title: (t.textContent || '').trim(),
       url,
-      description: (sn?.textContent || '').trim().slice(0, 240),
+      description: (sn?.textContent || '').trim().slice(0, 600),
     });
     if (out.length >= max) break;
   }

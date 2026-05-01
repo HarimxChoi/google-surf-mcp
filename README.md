@@ -102,6 +102,7 @@ Or with a local clone:
 | `SURF_LOCALE` | `en-US` | browser locale |
 | `SURF_TZ` | system tz | e.g. `America/New_York` |
 | `SURF_HEADLESS` | `true` | set `false` to run Chrome visibly (demos / debugging). CAPTCHA auto-recovery always runs visible regardless. |
+| `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 
 ## Troubleshooting
 
