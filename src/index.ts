@@ -14,7 +14,7 @@ import { withCaptchaFallback } from './captchaRecover.js';
 import type { BrowserContext } from 'playwright';
 
 const NAME = 'google-surf-mcp';
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXTRACT_BATCH_TIMEOUT_MS = 60_000;
 const POOL_SIZE = 4;
@@ -49,6 +49,11 @@ async function ensurePool(): Promise<SearchPool> {
   pool = new SearchPool(POOL_SIZE);
   await pool.warm();
   return pool;
+}
+
+async function resetPool(): Promise<void> {
+  await pool?.close();
+  pool = null;
 }
 
 async function shutdown() {
@@ -175,8 +180,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const p = await ensurePool();
-      const results = await withTimeout(p.runMany(queries, limit), REQUEST_TIMEOUT_MS * 2, 'search_parallel');
+      const results = await withCaptchaFallback(
+        async () => {
+          const p = await ensurePool();
+          return await withTimeout(p.runMany(queries, limit), REQUEST_TIMEOUT_MS * 2, 'search_parallel');
+        },
+        resetPool,
+      );
       return {
         content: [{
           type: 'text',
@@ -195,8 +205,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const p = await ensurePool();
-      const result = await withTimeout(p.extractOne(url, maxChars), REQUEST_TIMEOUT_MS, 'extract');
+      const result = await withCaptchaFallback(
+        async () => {
+          const p = await ensurePool();
+          return await withTimeout(p.extractOne(url, maxChars), REQUEST_TIMEOUT_MS, 'extract');
+        },
+        resetPool,
+      );
       return {
         content: [{
           type: 'text',
@@ -216,38 +231,44 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const p = await ensurePool();
-      const sr = await withTimeout(p.searchOne(query, limit), REQUEST_TIMEOUT_MS, 'search_extract:search');
-      if (sr.error || !sr.results.length) {
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ query, results: [], error: sr.error, elapsed_ms: Date.now() - t0 }, null, 2),
-          }],
-          isError: !!sr.error,
-        };
-      }
-      const enriched = await withTimeout(
-        Promise.all(sr.results.map(async r => {
-          const ex = await p.extractOne(r.url, maxChars);
-          return {
-            title: r.title,
-            url: r.url,
-            description: r.description,
-            content: ex.content,
-            excerpt: ex.excerpt,
-            length: ex.length,
-            error: ex.error,
-          };
-        })),
-        EXTRACT_BATCH_TIMEOUT_MS,
-        'search_extract:extract',
+      const data = await withCaptchaFallback(
+        async () => {
+          const p = await ensurePool();
+          const sr = await withTimeout(p.searchOne(query, limit), REQUEST_TIMEOUT_MS, 'search_extract:search');
+          if (!sr.results.length) {
+            return { results: [] as Array<Record<string, unknown>>, searchError: sr.error };
+          }
+          const enriched = await withTimeout(
+            Promise.all(sr.results.map(async r => {
+              const ex = await p.extractOne(r.url, maxChars);
+              return {
+                title: r.title,
+                url: r.url,
+                description: r.description,
+                content: ex.content,
+                excerpt: ex.excerpt,
+                length: ex.length,
+                error: ex.error,
+              };
+            })),
+            EXTRACT_BATCH_TIMEOUT_MS,
+            'search_extract:extract',
+          );
+          return { results: enriched as Array<Record<string, unknown>>, searchError: undefined as string | undefined };
+        },
+        resetPool,
       );
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({ query, results: enriched, elapsed_ms: Date.now() - t0 }, null, 2),
+          text: JSON.stringify({
+            query,
+            results: data.results,
+            ...(data.searchError ? { error: data.searchError } : {}),
+            elapsed_ms: Date.now() - t0,
+          }, null, 2),
         }],
+        ...(data.searchError && data.results.length === 0 ? { isError: true } : {}),
       };
     } catch (e) {
       return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };

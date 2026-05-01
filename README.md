@@ -103,8 +103,7 @@ Or with a local clone:
 
 ## Troubleshooting
 
-- CAPTCHA on `search`: a visible Chrome window opens automatically. Solve the CAPTCHA, do one search inside, profile is re-warmed and the original call retries. If you want to disable this and just fail-fast, run with no display attached.
-- CAPTCHA on `search_parallel` / `search_extract`: no auto-recovery yet. Re-run `npm run bootstrap` manually.
+- CAPTCHA: a visible Chrome window opens automatically (works for all 4 tools). Solve it once, do one search inside, the call retries and continues. To fail-fast instead, run with no display attached.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
 - Stale selectors: Google rotates classes. PRs welcome.
 

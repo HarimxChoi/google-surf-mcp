@@ -1,6 +1,6 @@
 import type { BrowserContext } from 'playwright';
 import { launch, cloneProfile, getPage } from './browser.js';
-import { search } from './search.js';
+import { search, CaptchaError } from './search.js';
 import { extract, type ExtractResult } from './extract.js';
 import type { SearchResult } from './types.js';
 
@@ -54,6 +54,7 @@ export class SearchPool {
       const results = await search(page, query, limit);
       return { query, results };
     } catch (e) {
+      if (e instanceof CaptchaError) throw e;
       return { query, results: [], error: (e as Error).message };
     } finally {
       this.release(w);
