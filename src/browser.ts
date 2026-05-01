@@ -49,10 +49,14 @@ export interface LaunchOpts {
   headless?: boolean;
 }
 
-export async function launch({ profileDir, headless = true }: LaunchOpts): Promise<BrowserContext> {
+export async function launch({ profileDir, headless }: LaunchOpts): Promise<BrowserContext> {
+  // Precedence: explicit param > SURF_HEADLESS env > default true.
+  const effectiveHeadless = headless !== undefined
+    ? headless
+    : process.env.SURF_HEADLESS === 'false' ? false : true;
   const ctx = await chromiumExtra.launchPersistentContext(profileDir, {
     executablePath: detectChrome(),
-    headless,
+    headless: effectiveHeadless,
     viewport: { width: 1366, height: 768 },
     locale: process.env.SURF_LOCALE || 'en-US',
     timezoneId: process.env.SURF_TZ || SYSTEM_TZ,

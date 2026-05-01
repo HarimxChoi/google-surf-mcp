@@ -99,12 +99,14 @@ Or with a local clone:
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | where the warm profile lives |
 | `SURF_LOCALE` | `en-US` | browser locale |
 | `SURF_TZ` | system tz | e.g. `America/New_York` |
+| `SURF_HEADLESS` | `true` | set `false` to run Chrome visibly (demos / debugging). CAPTCHA auto-recovery always runs visible regardless. |
 
 ## Troubleshooting
 
-- CAPTCHA error → re-run `npm run bootstrap`
-- "Chrome not found" → install Chrome or set `CHROME_PATH`
-- Stale selectors → Google rotates classes; PRs welcome
+- CAPTCHA on `search`: a visible Chrome window opens automatically. Solve the CAPTCHA, do one search inside, profile is re-warmed and the original call retries. If you want to disable this and just fail-fast, run with no display attached.
+- CAPTCHA on `search_parallel` / `search_extract`: no auto-recovery yet. Re-run `npm run bootstrap` manually.
+- "Chrome not found": install Chrome or set `CHROME_PATH`.
+- Stale selectors: Google rotates classes. PRs welcome.
 
 ## License
 

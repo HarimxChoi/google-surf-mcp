@@ -32,7 +32,7 @@ export class SearchPool {
     );
     this.workers = await Promise.all(
       dirs.map(async d => {
-        const ctx = await launch({ profileDir: d, headless: true });
+        const ctx = await launch({ profileDir: d });
         const page = await getPage(ctx);
         await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
         return { ctx, busy: false };
