@@ -1,0 +1,15 @@
+node_modules
+build
+.git
+.github
+test
+assets
+*.log
+.DS_Store
+.env
+*.local
+.mcp.json
+.mcp-publisher
+demo-*.mjs
+chrome-profiles
+.npmrc
