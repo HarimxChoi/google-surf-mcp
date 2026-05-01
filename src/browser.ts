@@ -50,7 +50,7 @@ export interface LaunchOpts {
 }
 
 export async function launch({ profileDir, headless }: LaunchOpts): Promise<BrowserContext> {
-  // Precedence: explicit param > SURF_HEADLESS env > default true.
+  // param > env > default
   const effectiveHeadless = headless !== undefined
     ? headless
     : process.env.SURF_HEADLESS === 'false' ? false : true;

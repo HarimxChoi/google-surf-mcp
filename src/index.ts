@@ -10,7 +10,7 @@ import {
 import { launch, getPage, PROFILE_MAIN, profileExists } from './browser.js';
 import { search, CaptchaError } from './search.js';
 import { SearchPool } from './pool.js';
-import { recoverFromCaptcha } from './captchaRecover.js';
+import { withCaptchaFallback } from './captchaRecover.js';
 import type { BrowserContext } from 'playwright';
 
 const NAME = 'google-surf-mcp';
@@ -44,7 +44,7 @@ async function closeSequential(): Promise<void> {
 
 async function ensurePool(): Promise<SearchPool> {
   if (pool) return pool;
-  // Pool warm() clones main profile dir to workers; main must be free.
+  // pool clones main; release lock first
   await closeSequential();
   pool = new SearchPool(POOL_SIZE);
   await pool.warm();
@@ -145,37 +145,26 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     const limit = Math.min(Math.max(Number(args?.limit) || 10, 1), 20);
 
     const t0 = Date.now();
-    let recovered = false;
-    while (true) {
-      try {
-        const ctx = await getSequentialCtx();
-        const page = await getPage(ctx);
-        const results = await withTimeout(search(page, query, limit), REQUEST_TIMEOUT_MS, 'search');
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ query, results, elapsed_ms: Date.now() - t0 }, null, 2),
-          }],
-        };
-      } catch (e) {
-        if (e instanceof CaptchaError && !recovered) {
-          recovered = true;
-          await closeSequential();
-          try {
-            await recoverFromCaptcha();
-            continue;
-          } catch (recErr) {
-            return {
-              content: [{ type: 'text', text: `Error: CAPTCHA recovery failed (${(recErr as Error).message}). Re-bootstrap: npm run bootstrap` }],
-              isError: true,
-            };
-          }
-        }
-        const msg = e instanceof CaptchaError
-          ? `CAPTCHA hit. Re-bootstrap: npm run bootstrap`
-          : (e as Error).message;
-        return { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true };
-      }
+    try {
+      const results = await withCaptchaFallback(
+        async () => {
+          const ctx = await getSequentialCtx();
+          const page = await getPage(ctx);
+          return await withTimeout(search(page, query, limit), REQUEST_TIMEOUT_MS, 'search');
+        },
+        closeSequential,
+      );
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ query, results, elapsed_ms: Date.now() - t0 }, null, 2),
+        }],
+      };
+    } catch (e) {
+      const msg = e instanceof CaptchaError
+        ? `CAPTCHA hit. Re-bootstrap: npm run bootstrap`
+        : (e as Error).message;
+      return { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true };
     }
   }
 

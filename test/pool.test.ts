@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SearchPool } from '../src/pool.js';
 
-// Probe the pool's promise-queue acquire/release without launching real Chrome.
-// Pre-populate fake workers and call private methods through `as any`.
+// no real chrome; mocks worker objects directly
 describe('SearchPool acquire/release queue', () => {
   it('queues acquires when all workers are busy and unblocks on release', async () => {
     const pool = new SearchPool(2);
