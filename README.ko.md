@@ -20,7 +20,7 @@
 MCP 클라이언트에 설정시 Google 검색 도구로 사용 가능. anti-bot은 warm Chrome profile + stealth로 처리. 
 CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운영).
 
-첫 설치 시 ~1초 프로필 워밍업 필요. 로컬 전용 (stateless 환경 부적합, warm 프로필이 핵심).
+첫 설치 시 ~1초 프로필 워밍업 필요. 로컬 전용 (stateless 환경 부적합)
 
 ## Numbers
 
