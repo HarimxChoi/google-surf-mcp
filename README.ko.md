@@ -18,7 +18,7 @@
 ## How
 
 MCP 클라이언트에 설정시 Google 검색 도구로 사용 가능. anti-bot은 warm Chrome profile + stealth로 처리. 
-CAPTCHA 풀이는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운영).
+CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운영).
 
 첫 설치 시 ~1초 프로필 워밍업 필요. 로컬 전용 (stateless 환경 부적합, warm 프로필이 핵심).
 
@@ -31,13 +31,13 @@ CAPTCHA 풀이는 사람이 직접 함 (프로필 평판 유지 → 지속가능
 | parallel x10 | ~5s wall |
 | search_extract x5 | ~7s wall (검색 + 5개 병렬 추출) |
 
-워크스테이션 1Gbps 환경 측정. 하드웨어/네트워크에 따라 다름.
+워크스테이션 1Gbps 환경에서 측정
 
 ## Stack
 
 - Playwright + 영구 Chrome 프로필
 - `playwright-extra` stealth
-- 이미지 / 미디어 / 폰트 차단 (속도용)
+- 이미지 / 미디어 / 폰트 차단 (속도)
 - 첫 실행 전 1회 프로필 부트스트랩
 - Mozilla Readability + Turndown으로 본문 추출
 
@@ -118,7 +118,7 @@ Claude Code 재시작.
 
 ## Troubleshooting
 
-- CAPTCHA: 4개 도구 어느 곳에서든 자동으로 Chrome 창이 열림. 한 번 풀고 그 안에서 검색 한 번 돌리면 호출이 자동 재시도되며 이어집니다. fail-fast로 가려면 디스플레이 없는 환경에서 실행.
+- CAPTCHA: 4개 도구 어느 곳에서든 자동으로 Chrome 창이 열림. 한 번 풀고 그 안에서 검색 한 번한 후 호출이 자동 재시도되며 이어집니다.
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정.
 - 셀렉터 깨짐: Google이 클래스명 바꿈. PR 환영합니다.
 
