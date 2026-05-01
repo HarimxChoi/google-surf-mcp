@@ -10,6 +10,12 @@ English | [한국어](./README.ko.md)
 
 Google search MCP. No API key. Just works.
 
+- ✅ Actually works (tested 6 free Google search MCPs, all failed)
+- ✅ Search + URL extract in one MCP (replaces the usual search MCP + fetch MCP combo)
+- ✅ 4 tools: `search` / `search_parallel` / `extract` / `search_extract`
+- ✅ No API key, no proxies, no solver
+- ✅ Auto CAPTCHA recovery (Chrome opens, human solves once, call retries)
+
 ## What
 
 Plug it into any MCP client and you get Google search as a tool.
@@ -101,7 +107,7 @@ Local clone variant:
 - `extract(url, max_chars?)` - fetch a URL, return article markdown (Readability with text fallback). Failures return `{ error }`, never throw.
 - `search_extract(query, limit?, max_chars?)` - search + parallel extract in one call. Returns SERP results enriched with full article content. Per-page failures are isolated.
 
-`extract` and `search_extract` make this MCP a one-stop shop for "search and read" workflows - your client gets actual page content, not just snippets.
+`search_extract` is the killer one: SERP + full article content in a single call. Replaces the usual "search MCP + URL fetcher MCP" combo most agents stitch together.
 
 ## Env vars
 
