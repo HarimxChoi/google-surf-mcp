@@ -5,7 +5,8 @@ import { SearchPool } from '../src/pool.js';
 describe('SearchPool acquire/release queue', () => {
   it('queues acquires when all workers are busy and unblocks on release', async () => {
     const pool = new SearchPool(2);
-    const fakeCtx = {} as never;
+    // mock ctx must satisfy isContextAlive() → ctx.pages() returns array
+    const fakeCtx = { pages: () => [] } as never;
     (pool as any).workers = [
       { ctx: fakeCtx, busy: false },
       { ctx: fakeCtx, busy: false },
