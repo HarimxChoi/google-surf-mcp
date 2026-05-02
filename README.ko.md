@@ -107,7 +107,7 @@ Claude Code 재시작.
 - `extract(url, max_chars?)` - URL 가져와서 본문 마크다운 반환 (Readability + 텍스트 fallback). 실패는 `{ error }` 반환, throw 안 함.
 - `search_extract(query, limit?, max_chars?)` - 검색 + 병렬 추출 한 번에. SERP 결과에 본문 마크다운 붙여서 반환. 페이지별 실패 격리.
 
-`extract` + `search_extract`는 "검색하고 읽기" 워크플로우를 한 호출로 끝냄. 클라이언트가 snippet이 아니라 실제 본문을 받습니다.
+`extract` + `search_extract`는 "검색하고 읽기" 워크플로우를 한 호출로 클라이언트가 snippet이 아니라 실제 본문을 받습니다.
 
 ## Env vars
 
