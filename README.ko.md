@@ -8,7 +8,7 @@
 
 ![demo](./assets/demo.gif)
 
-> 실제 사용은 기본 **headless**로 동작합니다 (Chrome 창 안 보임). 영상처럼 보이게 하려면 `SURF_HEADLESS=false` 설정.
+> 실제 사용은 기본 **headless**로 동작합니다 (Chrome 창 안 보임). 영상처럼 보이게 하려면 `SURF_HEADLESS=false` 설정
 
 무료 Google 검색 MCP가 전부 안 돼서 직접 만든 MCP
 
@@ -21,10 +21,10 @@
 
 ## How
 
-MCP 클라이언트에 설정시 Google 검색 도구로 사용 가능. anti-bot은 warm Chrome profile + stealth로 처리. 
-CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운영).
+MCP 클라이언트에 설정시 Google 검색 도구로 사용 가능, anti-bot은 warm Chrome profile + stealth로 처리  
+CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운영)
 
-첫 설치 시 ~1초 프로필 워밍업 필요. 로컬 전용 (stateless 환경 부적합)
+첫 설치 시 ~1초 프로필 워밍업 필요, 로컬 전용 (stateless 환경 부적합)
 
 ## Numbers
 
@@ -62,7 +62,7 @@ npm install
 npm run bootstrap
 ```
 
-`bootstrap`은 Chrome 창을 띄웁니다. Google 검색 한번 해준 후, 닫으면 프로필 워밍 완료.
+`bootstrap`은 Chrome 창을 띄웁니다. Google 검색 한번 해준 후, 닫으면 프로필 워밍 완료
 
 경로 오버라이드:
 ```bash
