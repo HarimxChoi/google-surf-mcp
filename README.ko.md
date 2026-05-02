@@ -123,13 +123,13 @@ Claude Code 재시작
 
 ## Troubleshooting
 
-- CAPTCHA: 4개 도구 어느 곳에서든 자동으로 Chrome 창이 열림. 한 번 풀고 그 안에서 검색 한 번한 후 호출이 자동 재시도되며 이어집니다.
+- CAPTCHA: 4개 도구 어느 곳에서든 자동으로 Chrome 창이 열림. 한 번 풀고 그 안에서 검색 한 번한 후 호출이 자동 재시도되며 이어집니다
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정
 - 셀렉터 깨짐: Google이 클래스명 바꿈. PR 환영합니다
 
 ## Changelog
 
-[CHANGELOG.md](./CHANGELOG.md) 참고.
+[CHANGELOG.md](./CHANGELOG.md)
 
 ## License
 
