@@ -1,4 +1,4 @@
-import { launch, getPage, PROFILE_MAIN } from './browser.js';
+import { launch, getPage, PROFILE_MAIN, isBlocked } from './browser.js';
 import { CaptchaError } from './search.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -10,7 +10,9 @@ export async function recoverFromCaptcha(timeoutMs = 120_000): Promise<void> {
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (page.url().includes('/search?')) {
+      const u = page.url();
+      // real /search? page, not /sorry/?continue=...search?... false-positive
+      if (u.includes('/search?') && !isBlocked(u)) {
         await sleep(2000);
         return;
       }

@@ -5,7 +5,12 @@ export interface ParsedResult {
   description: string;
 }
 
-export function parseResults(max: number): ParsedResult[] {
+export interface ParseOutput {
+  results: ParsedResult[];
+  h3Count: number;
+}
+
+export function parseResults(max: number): ParseOutput {
   const SKIP_HOSTS = new Set([
     'www.google.com',
     'accounts.google.com',
@@ -13,11 +18,17 @@ export function parseResults(max: number): ParsedResult[] {
     'translate.google.com',
   ]);
   const seen = new Set<string>();
-  const out: ParsedResult[] = [];
+  const results: ParsedResult[] = [];
+  const h3Count = document.querySelectorAll('h3').length;
   const blocks = document.querySelectorAll(
     'div.g, div[data-snc], div[data-hveid], div[jscontroller], div.MjjYud, div.tF2Cxc',
   );
   for (const el of Array.from(blocks)) {
+    // skip sponsored / ads (top, bottom, inline)
+    if (
+      el.matches('[data-text-ad], [data-pcu]') ||
+      el.closest('#tads, #tadsb, #bottomads, [aria-label*="Sponsored" i]')
+    ) continue;
     const t = el.querySelector('h3');
     const a = el.querySelector('a[href^="http"]') as HTMLAnchorElement | null;
     if (!t || !a) continue;
@@ -31,12 +42,12 @@ export function parseResults(max: number): ParsedResult[] {
       el.querySelector('[data-sncf="1"]') ||
       el.querySelector('.VwiC3b') ||
       el.querySelector('div[style*="-webkit-line-clamp"]');
-    out.push({
+    results.push({
       title: (t.textContent || '').trim(),
       url,
       description: (sn?.textContent || '').trim().slice(0, 600),
     });
-    if (out.length >= max) break;
+    if (results.length >= max) break;
   }
-  return out;
+  return { results, h3Count };
 }

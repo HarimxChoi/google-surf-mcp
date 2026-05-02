@@ -17,6 +17,7 @@ Google search MCP. No API key. Just works.
 - ✅ 4 tools: `search` / `search_parallel` / `extract` / `search_extract`
 - ✅ No API key, no proxies, no solver
 - ✅ Auto CAPTCHA recovery (Chrome opens, human solves once, call retries)
+- ✅ SSRF guard on `extract` (blocks `localhost`, private IPs, AWS metadata by default)
 
 ## What
 
@@ -32,10 +33,10 @@ Designed for local use. Not suitable for stateless / serverless deployment.
 
 | | result |
 |---|---|
-| sequential | ~2s/query (first call ~4s, includes setup) |
-| parallel x4 | ~2s wall |
-| parallel x10 | ~5s wall |
-| search_extract x5 | ~7s wall (search + 5 parallel extracts) |
+| sequential | ~1.5s/query (first call ~4s, includes setup) |
+| parallel x4 | ~1.5s wall (first call ~9s, includes pool warm) |
+| parallel x10 | ~4.5s wall |
+| search_extract x5 | ~5s wall (search + 5 parallel extracts) |
 
 Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware and network.
 
@@ -104,7 +105,7 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?)` - single query, ~2s. Returns title / url / snippet.
+- `search(query, limit?)` - single query, ~1.5s. Returns title / url / snippet. Sponsored ads filtered out.
 - `search_parallel(queries[], limit?)` - pool of 4, max 10 queries per call.
 - `extract(url, max_chars?)` - fetch a URL, return article markdown (Readability with text fallback). Failures return `{ error }`, never throw.
 - `search_extract(query, limit?, max_chars?)` - search + parallel extract in one call. Returns SERP results enriched with full article content. Per-page failures are isolated.
@@ -120,13 +121,18 @@ Local clone variant:
 | `SURF_LOCALE` | `en-US` | browser locale |
 | `SURF_TZ` | system tz | e.g. `America/New_York` |
 | `SURF_HEADLESS` | `true` | set `false` to run Chrome visibly (demos / debugging). CAPTCHA auto-recovery always runs visible regardless. |
-| `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
+| `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
+| `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
 
 ## Troubleshooting
 
 - CAPTCHA: a visible Chrome window opens automatically (works for all 4 tools). Solve it once, do one search inside, the call retries and continues. To fail-fast instead, run with no display attached.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
 - Stale selectors: Google rotates classes. PRs welcome.
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md).
 
 ## License
 

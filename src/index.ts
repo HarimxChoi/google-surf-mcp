@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from 'node:module';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -13,61 +14,113 @@ import { SearchPool } from './pool.js';
 import { withCaptchaFallback } from './captchaRecover.js';
 import type { BrowserContext } from 'playwright';
 
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json') as { name: string; version: string };
 const NAME = 'google-surf-mcp';
-const VERSION = '0.3.2';
+const VERSION = pkg.version;
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXTRACT_BATCH_TIMEOUT_MS = 60_000;
 const POOL_SIZE = 4;
 const DEFAULT_EXTRACT_MAX_CHARS = 8_000;
 const SEARCH_EXTRACT_DEFAULT_LIMIT = 5;
-const IDLE_CLOSE_MS = Number(process.env.SURF_IDLE_CLOSE_MS) || 30_000;
 
+function parseIdleMs(): number {
+  const raw = process.env.SURF_IDLE_CLOSE_MS;
+  if (raw === undefined) return 30_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 30_000;
+}
+const IDLE_CLOSE_MS = parseIdleMs(); // 0 disables idle auto-close
+
+// sequential ctx lifecycle
 let ctxPromise: Promise<BrowserContext> | null = null;
-let pool: SearchPool | null = null;
+let ctxClosing: Promise<void> | null = null;
 
+function getSequentialCtx(): Promise<BrowserContext> {
+  // wait for in-progress close, avoid profile lock race
+  if (ctxClosing) return ctxClosing.then(() => getSequentialCtx());
+  if (ctxPromise) return ctxPromise;
+  const p = (async () => {
+    const c = await launch({ profileDir: PROFILE_MAIN });
+    const page = await getPage(c);
+    await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    return c;
+  })();
+  ctxPromise = p;
+  // failed launch must not be cached forever
+  p.catch(() => { if (ctxPromise === p) ctxPromise = null; });
+  return p;
+}
+
+function closeSequential(): Promise<void> {
+  if (ctxClosing) return ctxClosing;
+  const cp = ctxPromise;
+  ctxPromise = null;
+  if (!cp) return Promise.resolve();
+  ctxClosing = (async () => {
+    try {
+      const c = await cp.catch(() => null);
+      await c?.close().catch(() => {});
+    } finally {
+      ctxClosing = null;
+    }
+  })();
+  return ctxClosing;
+}
+
+// pool lifecycle
+let pool: SearchPool | null = null;
+let poolPromise: Promise<SearchPool> | null = null;
+let poolClosing: Promise<void> | null = null;
+
+function ensurePool(): Promise<SearchPool> {
+  if (poolClosing) return poolClosing.then(() => ensurePool());
+  if (pool) return Promise.resolve(pool);
+  if (poolPromise) return poolPromise;
+  poolPromise = (async () => {
+    try {
+      // pool clones MAIN profile; release sequential lock first
+      await closeSequential();
+      const p = new SearchPool(POOL_SIZE);
+      try {
+        await p.warm();
+      } catch (e) {
+        await p.close().catch(() => {});
+        throw e;
+      }
+      pool = p;
+      return p;
+    } finally {
+      poolPromise = null;
+    }
+  })();
+  return poolPromise;
+}
+
+async function resetPool(): Promise<void> {
+  if (poolClosing) return poolClosing;
+  // wait for warm so close sees real state
+  if (poolPromise) {
+    try { await poolPromise; } catch { /* warm failed; pool stays null */ }
+  }
+  const cur = pool;
+  pool = null;
+  if (!cur) return;
+  poolClosing = (async () => {
+    try { await cur.close(); }
+    finally { poolClosing = null; }
+  })();
+  return poolClosing;
+}
+
+// ref-counted idle auto-close
 let seqActive = 0;
 let poolActive = 0;
 let seqIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let poolIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
-function getSequentialCtx(): Promise<BrowserContext> {
-  return ctxPromise ??= (async () => {
-    const c = await launch({ profileDir: PROFILE_MAIN });
-    const p = await getPage(c);
-    await p.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
-    return c;
-  })();
-}
-
-async function closeSequential(): Promise<void> {
-  const cp = ctxPromise;
-  ctxPromise = null;
-  if (cp) {
-    const c = await cp.catch(() => null);
-    await c?.close().catch(() => {});
-  }
-}
-
-async function ensurePool(): Promise<SearchPool> {
-  if (pool) return pool;
-  // pool clones main; release lock first
-  await closeSequential();
-  pool = new SearchPool(POOL_SIZE);
-  await pool.warm();
-  return pool;
-}
-
-async function resetPool(): Promise<void> {
-  await pool?.close();
-  pool = null;
-}
-
-function clearSeqIdle() {
-  if (seqIdleTimer) { clearTimeout(seqIdleTimer); seqIdleTimer = null; }
-}
-function clearPoolIdle() {
-  if (poolIdleTimer) { clearTimeout(poolIdleTimer); poolIdleTimer = null; }
-}
+function clearSeqIdle() { if (seqIdleTimer) { clearTimeout(seqIdleTimer); seqIdleTimer = null; } }
+function clearPoolIdle() { if (poolIdleTimer) { clearTimeout(poolIdleTimer); poolIdleTimer = null; } }
 
 async function trackSeq<T>(op: () => Promise<T>): Promise<T> {
   clearSeqIdle();
@@ -75,7 +128,7 @@ async function trackSeq<T>(op: () => Promise<T>): Promise<T> {
   try { return await op(); }
   finally {
     seqActive--;
-    if (seqActive === 0) {
+    if (seqActive === 0 && IDLE_CLOSE_MS > 0) {
       seqIdleTimer = setTimeout(() => {
         seqIdleTimer = null;
         if (seqActive === 0) closeSequential().catch(() => {});
@@ -90,7 +143,7 @@ async function trackPool<T>(op: () => Promise<T>): Promise<T> {
   try { return await op(); }
   finally {
     poolActive--;
-    if (poolActive === 0) {
+    if (poolActive === 0 && IDLE_CLOSE_MS > 0) {
       poolIdleTimer = setTimeout(() => {
         poolIdleTimer = null;
         if (poolActive === 0) resetPool().catch(() => {});
@@ -102,6 +155,11 @@ async function trackPool<T>(op: () => Promise<T>): Promise<T> {
 async function shutdown() {
   clearSeqIdle();
   clearPoolIdle();
+  // drain in-flight ops, avoid killing ctx mid-search
+  const drainStart = Date.now();
+  while ((seqActive > 0 || poolActive > 0) && Date.now() - drainStart < 10_000) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
   await closeSequential();
   await pool?.close();
   pool = null;
@@ -152,7 +210,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'extract',
-      description: 'Fetch a URL and return clean article markdown. Uses Mozilla Readability with a text fallback. Best-effort: failures return { error } instead of throwing.',
+      description: 'Fetch a URL and return clean article markdown. Uses Mozilla Readability with a text fallback. Best-effort: failures return { error } instead of throwing. Private/loopback addresses blocked unless SURF_ALLOW_PRIVATE=true.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -211,8 +269,9 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         }],
       };
     } catch (e) {
+      console.error('[google-surf-mcp] search error:', e);
       const msg = e instanceof CaptchaError
-        ? `CAPTCHA hit. Re-bootstrap: npm run bootstrap`
+        ? `CAPTCHA recovery failed. Solve in opened browser or run: npm run bootstrap`
         : (e as Error).message;
       return { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true };
     }
@@ -239,6 +298,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         }],
       };
     } catch (e) {
+      console.error('[google-surf-mcp] search_parallel error:', e);
       return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
@@ -250,20 +310,21 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
     const t0 = Date.now();
     try {
-      const result = await trackPool(() => withCaptchaFallback(
-        async () => {
-          const p = await ensurePool();
-          return await withTimeout(p.extractOne(url, maxChars), REQUEST_TIMEOUT_MS, 'extract');
-        },
-        resetPool,
-      ));
+      // extract never throws CaptchaError, no fallback needed
+      const result = await trackPool(async () => {
+        const p = await ensurePool();
+        return await withTimeout(p.extractOne(url, maxChars), REQUEST_TIMEOUT_MS, 'extract');
+      });
+      const failed = !!result.error && !result.content;
       return {
         content: [{
           type: 'text',
           text: JSON.stringify({ ...result, elapsed_ms: Date.now() - t0 }, null, 2),
         }],
+        ...(failed ? { isError: true } : {}),
       };
     } catch (e) {
+      console.error('[google-surf-mcp] extract error:', e);
       return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
@@ -316,6 +377,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         ...(data.searchError && data.results.length === 0 ? { isError: true } : {}),
       };
     } catch (e) {
+      console.error('[google-surf-mcp] search_extract error:', e);
       return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }

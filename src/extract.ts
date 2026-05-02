@@ -38,12 +38,47 @@ const NAV_SELECTORS = [
   '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]', '[role="complementary"]',
 ];
 
+// SSRF guard: block private/internal addresses unless SURF_ALLOW_PRIVATE=true.
+// Pattern-only (no DNS resolve), covers literal IPs in URL.
+// Env-only by design: per-call arg would let LLM bypass via prompt injection.
+const PRIVATE_PATTERNS = [
+  /^https?:\/\/127\./i,
+  /^https?:\/\/10\./,
+  /^https?:\/\/169\.254\./,
+  /^https?:\/\/192\.168\./,
+  /^https?:\/\/172\.(1[6-9]|2\d|3[01])\./,
+  /^https?:\/\/0\./,
+  /^https?:\/\/\[?::1\]?/i,
+  /^https?:\/\/\[?(fc|fd|fe80)/i,
+];
+
+const PRIVATE_HOSTS = new Set(['localhost', '0.0.0.0', '::1']);
+
+export function checkUrl(url: string): string | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return 'invalid url'; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return `unsupported protocol: ${u.protocol}`;
+  }
+  if (process.env.SURF_ALLOW_PRIVATE === 'true') return null;
+  if (PRIVATE_HOSTS.has(u.hostname.toLowerCase())) {
+    return 'private/internal address blocked';
+  }
+  if (PRIVATE_PATTERNS.some((r) => r.test(url))) {
+    return 'private/internal address blocked';
+  }
+  return null;
+}
+
 export async function extract(
   ctx: BrowserContext,
   url: string,
   maxChars = 8_000,
   navTimeoutMs = 10_000,
 ): Promise<ExtractResult> {
+  const checkErr = checkUrl(url);
+  if (checkErr) return { url, error: checkErr };
+
   let page: Page | null = null;
   try {
     page = await ctx.newPage();

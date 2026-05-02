@@ -21,18 +21,24 @@ describe('parseResults', () => {
   it('parses a basic SERP into title/url/description', () => {
     loadDom(fixture('serp-basic.html'));
     const out = parseResults(10);
-    expect(out).toHaveLength(3);
-    expect(out[0]).toMatchObject({
+    expect(out.results).toHaveLength(3);
+    expect(out.results[0]).toMatchObject({
       title: 'Example Article One',
       url: 'https://example.com/article-one',
     });
-    expect(out[0].description).toContain('First example article snippet');
+    expect(out.results[0].description).toContain('First example article snippet');
+  });
+
+  it('returns h3Count alongside results for parser-stale detection', () => {
+    loadDom(fixture('serp-basic.html'));
+    const out = parseResults(10);
+    expect(out.h3Count).toBeGreaterThanOrEqual(3);
   });
 
   it('keeps google.com subdomains, drops bare www/accounts.google.com', () => {
     loadDom(fixture('serp-subdomains.html'));
     const out = parseResults(10);
-    const urls = out.map(r => r.url);
+    const urls = out.results.map(r => r.url);
     expect(urls).toContain('https://cloud.google.com/pricing');
     expect(urls).toContain('https://groups.google.com/g/foo');
     expect(urls).toContain('https://support.google.com/help');
@@ -40,8 +46,21 @@ describe('parseResults', () => {
     expect(urls).not.toContain('https://accounts.google.com/signin');
   });
 
-  it('returns empty array on a SERP with no result blocks', () => {
+  it('returns empty results array on a SERP with no result blocks', () => {
     loadDom(fixture('serp-empty.html'));
-    expect(parseResults(10)).toEqual([]);
+    const out = parseResults(10);
+    expect(out.results).toEqual([]);
+    expect(out.h3Count).toBe(0);
+  });
+
+  it('filters out sponsored ads (top, bottom, inline)', () => {
+    loadDom(fixture('serp-with-ads.html'));
+    const out = parseResults(10);
+    const urls = out.results.map(r => r.url);
+    expect(urls).not.toContain('https://sponsor-top.example.com/ad');
+    expect(urls).not.toContain('https://sponsor-bottom.example.com/ad');
+    expect(urls).not.toContain('https://sponsor-inline.example.com/ad');
+    // organic still present
+    expect(urls).toContain('https://organic.example.com/page');
   });
 });

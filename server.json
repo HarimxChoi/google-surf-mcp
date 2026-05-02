@@ -6,12 +6,12 @@
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "0.3.2",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -37,6 +37,24 @@
         {
           "name": "SURF_TZ",
           "description": "IANA timezone, e.g. America/New_York. Defaults to system timezone.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_HEADLESS",
+          "description": "Set to 'false' to run Chrome visibly (demos/debugging). Defaults to true. CAPTCHA recovery always runs visible regardless.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_IDLE_CLOSE_MS",
+          "description": "Idle ms before closing the sequential ctx and pool. 0 disables idle auto-close. Defaults to 30000.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_ALLOW_PRIVATE",
+          "description": "Set to 'true' to allow extract on private/loopback addresses (localhost, 10.x, 192.168.x, 169.254.x, etc). Default blocks them as an SSRF guard.",
           "isRequired": false,
           "format": "string"
         }

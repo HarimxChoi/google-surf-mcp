@@ -17,6 +17,7 @@
 ✅ 4개 도구: `search` / `search_parallel` / `extract` / `search_extract`  
 ✅ API 키 / 프록시 / 솔버 X  
 ✅ CAPTCHA 자동 복구 (Chrome 창 떠서 사람이 풀면 자동 재시도)  
+✅ `extract` SSRF 차단 (`localhost`, 사설 IP, AWS metadata 기본 차단)  
 
 ## How
 
@@ -29,10 +30,10 @@ CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운
 
 | | 결과 |
 |---|---|
-| sequential | ~2s/query (첫 호출은 ~4s, 셋업 포함) |
-| parallel x4 | ~2s wall |
-| parallel x10 | ~5s wall |
-| search_extract x5 | ~7s wall (검색 + 5개 병렬 추출) |
+| sequential | ~1.5s/query (첫 호출은 ~4s, 셋업 포함) |
+| parallel x4 | ~1.5s wall (첫 호출은 ~9s, pool warm 포함) |
+| parallel x10 | ~4.5s wall |
+| search_extract x5 | ~5s wall (검색 + 5개 병렬 추출) |
 
 워크스테이션 1Gbps 환경에서 측정
 
@@ -101,7 +102,7 @@ Claude Code 재시작.
 
 ## Tools
 
-- `search(query, limit?)` - 단일 검색, ~2초. title / url / snippet 반환.
+- `search(query, limit?)` - 단일 검색, ~1.5초. title / url / snippet 반환. 스폰서 광고 자동 제외.
 - `search_parallel(queries[], limit?)` - 4-워커 풀. 호출당 최대 10개 쿼리.
 - `extract(url, max_chars?)` - URL 가져와서 본문 마크다운 반환 (Readability + 텍스트 fallback). 실패는 `{ error }` 반환, throw 안 함.
 - `search_extract(query, limit?, max_chars?)` - 검색 + 병렬 추출 한 번에. SERP 결과에 본문 마크다운 붙여서 반환. 페이지별 실패 격리.
@@ -117,13 +118,18 @@ Claude Code 재시작.
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |
 | `SURF_TZ` | 시스템 tz | 예: `America/New_York` |
 | `SURF_HEADLESS` | `true` | `false`로 설정 시 Chrome 보이게 동작 (데모 / 디버깅용). CAPTCHA 자동 복구는 항상 보이게 동작. |
-| `SURF_IDLE_CLOSE_MS` | `30000` | sequential ctx와 pool을 idle 후 닫는 ms. 낮으면 빠른 정리, 높으면 띄엄띄엄 호출에 캐시 유지. |
+| `SURF_IDLE_CLOSE_MS` | `30000` | sequential ctx와 pool을 idle 후 닫는 ms. `0`이면 비활성화. 낮으면 빠른 정리, 높으면 띄엄띄엄 호출에 캐시 유지. |
+| `SURF_ALLOW_PRIVATE` | `false` | `true`로 설정 시 `extract`가 사설/loopback 주소(`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x` 등) 접근 허용. 기본은 SSRF 차단으로 막음. |
 
 ## Troubleshooting
 
 - CAPTCHA: 4개 도구 어느 곳에서든 자동으로 Chrome 창이 열림. 한 번 풀고 그 안에서 검색 한 번한 후 호출이 자동 재시도되며 이어집니다.
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정.
 - 셀렉터 깨짐: Google이 클래스명 바꿈. PR 환영합니다.
+
+## Changelog
+
+[CHANGELOG.md](./CHANGELOG.md) 참고.
 
 ## License
 

@@ -8,3 +8,5 @@ chrome-profiles/
 *.local
 .mcp-publisher
 .mcp.json
+demo-*.mjs
+eval-*.md

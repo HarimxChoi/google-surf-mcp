@@ -11,5 +11,6 @@ assets
 .mcp.json
 .mcp-publisher
 demo-*.mjs
+eval-*.md
 chrome-profiles
 .npmrc

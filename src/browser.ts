@@ -1,24 +1,21 @@
 import { existsSync } from 'node:fs';
 import { rm, cp } from 'node:fs/promises';
 import { platform, homedir } from 'node:os';
-import { dirname, resolve, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve, join } from 'node:path';
 import { chromium as chromiumExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserContext, Page } from 'playwright';
 
 chromiumExtra.use(StealthPlugin());
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = resolve(__dirname, '..');
-
 const PROFILE_ROOT = process.env.SURF_PROFILE_ROOT || join(homedir(), '.google-surf-mcp');
 export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
 export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${i}`);
 
 function detectChrome(): string {
-  if (process.env.CHROME_PATH && existsSync(process.env.CHROME_PATH)) {
-    return process.env.CHROME_PATH;
+  if (process.env.CHROME_PATH) {
+    if (existsSync(process.env.CHROME_PATH)) return process.env.CHROME_PATH;
+    throw new Error(`CHROME_PATH set but not found: ${process.env.CHROME_PATH}`);
   }
   const candidates: Record<string, string[]> = {
     win32: [
