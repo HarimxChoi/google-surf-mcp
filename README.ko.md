@@ -47,7 +47,7 @@ CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운
 
 ## Install
 
-Node 18+, 시스템에 Google Chrome (또는 Chromium) 필요.
+Node 18+, 시스템에 Google Chrome (또는 Chromium) 필요
 
 ```bash
 npx google-surf-mcp   # 실제 MCP, 클라이언트 config에 등록
