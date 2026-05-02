@@ -38,7 +38,7 @@ Designed for local use. Not suitable for stateless / serverless deployment.
 | parallel x10 | ~4.5s wall |
 | search_extract x5 | ~5s wall (search + 5 parallel extracts) |
 
-Measured on a workstation with a 1Gb/s connection. Numbers vary with hardware and network.
+Measured on a workstation with a 1Gb/s connection.
 
 ## Stack
 
