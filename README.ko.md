@@ -15,7 +15,7 @@
 ✅ 실제로 작동 (무료 MCP 6개 테스트, 전부 fail)  
 ✅ 1개 MCP로 검색 + 본문 추출 (기존: search MCP + fetch/URL MCP 2개 조합)  
 ✅ 4개 도구: `search` / `search_parallel` / `extract` / `search_extract`  
-✅ API 키 / 프록시 / 솔버 X  
+✅ API 키 / 프록시 / 솔버 X   
 ✅ CAPTCHA 자동 복구 (Chrome 창 떠서 사람이 풀면 자동 재시도)  
 ✅ `extract` SSRF 차단 (`localhost`, 사설 IP, AWS metadata 기본 차단)  
 
