@@ -102,7 +102,7 @@ Claude Code 재시작
 
 ## Tools
 
-- `search(query, limit?)` - 단일 검색, ~1.5초. title / url / snippet 반환. 스폰서 광고 자동 제외.
+- `search(query, limit?)` - 단일 검색, ~1.5초. title / url / snippet 반환. 스폰서 광고 자동 제외
 - `search_parallel(queries[], limit?)` - 4-워커 풀. 호출당 최대 10개 쿼리.
 - `extract(url, max_chars?)` - URL 가져와서 본문 마크다운 반환 (Readability + 텍스트 fallback). 실패는 `{ error }` 반환, throw 안 함.
 - `search_extract(query, limit?, max_chars?)` - 검색 + 병렬 추출 한 번에. SERP 결과에 본문 마크다운 붙여서 반환. 페이지별 실패 격리.
