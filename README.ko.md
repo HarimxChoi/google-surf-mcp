@@ -86,7 +86,7 @@ CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 
 Claude Code 재시작.
 
-다른 MCP 클라이언트도 같은 JSON 구조 그대로 (config 파일 경로만 다름).
+다른 MCP 클라이언트도 같은 JSON 구조 그대로 (config 파일 경로만 다름)
 
 로컬 클론 사용 시:
 ```json
