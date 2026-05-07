@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/harimxchoi-google-surf-mcp-badge.png)](https://mseep.ai/app/harimxchoi-google-surf-mcp)
+
 # google-surf-mcp
 
 ✨Anti-Bot Search MCP: No API Key✨
