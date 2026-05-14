@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.6]
+
+### Fixed
+- **CHROME_PATH checked lazily**: existence is validated at browser launch instead of at startup, so the server starts and answers `tools/list` even when `CHROME_PATH` is unset or points to a missing binary.
+- **Cross-platform `prepare` script**: was Unix-only (`2>/dev/null || true`), which broke `npm install` on Windows.
+- **Cache write retry**: `set()` retries on transient Windows rename errors (`EPERM`/`EBUSY`/`EACCES`) and treats a persistent failure as a cache miss instead of throwing.
+
+### Changed
+- README: npm version + downloads badges.
+
 ## [0.4.5]
 
 ### Added
