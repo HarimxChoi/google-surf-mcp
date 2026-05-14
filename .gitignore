@@ -10,3 +10,5 @@ chrome-profiles/
 .mcp.json
 demo-*.mjs
 eval-*.md
+RELEASE-PLAN.md
+V0.5-REVIEW-AND-DECISIONS.md

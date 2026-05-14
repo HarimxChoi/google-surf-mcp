@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.4.0",
+  "version": "0.4.5",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "MCP server for Google search via warm Chrome profile. No API key.",
   "type": "module",
@@ -14,12 +14,13 @@
   ],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
-    "prepare": "npm run build",
+    "prepare": "npm run build && git config core.hooksPath .githooks 2>/dev/null || true",
     "watch": "tsc --watch",
     "bootstrap": "node build/bootstrap.js",
     "start": "node build/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint:nokr": "sh scripts/check-no-korean.sh"
   },
   "keywords": [
     "mcp",
@@ -50,7 +51,8 @@
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "turndown": "^7.2.4"
+    "turndown": "^7.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",

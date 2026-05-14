@@ -2,11 +2,18 @@ import { existsSync } from 'node:fs';
 import { rm, cp } from 'node:fs/promises';
 import { platform, homedir } from 'node:os';
 import { resolve, join } from 'node:path';
+import { chromium as chromiumBare } from 'playwright';
 import { chromium as chromiumExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserContext, Page } from 'playwright';
 
-chromiumExtra.use(StealthPlugin());
+let stealthPluginRegistered = false;
+function ensureStealth() {
+  if (!stealthPluginRegistered) {
+    chromiumExtra.use(StealthPlugin());
+    stealthPluginRegistered = true;
+  }
+}
 
 const PROFILE_ROOT = process.env.SURF_PROFILE_ROOT || join(homedir(), '.google-surf-mcp');
 export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
@@ -44,25 +51,54 @@ const SYSTEM_TZ = (() => {
 export interface LaunchOpts {
   profileDir: string;
   headless?: boolean;
+  // false = bare playwright (cascade default); true = stealth plugin fallback.
+  stealth?: boolean;
+  // Required when running behind a MITM HTTPS proxy (cloud sandboxes).
+  insecureTls?: boolean;
+  // Required for chromium under non-root cgroups (most cloud sandboxes).
+  noSandbox?: boolean;
 }
 
-export async function launch({ profileDir, headless }: LaunchOpts): Promise<BrowserContext> {
-  // param > env > default
-  const effectiveHeadless = headless !== undefined
-    ? headless
+function readBoolEnv(name: string, defaultVal: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined) return defaultVal;
+  return v.toLowerCase() === 'true';
+}
+
+export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
+  const cloudMode = readBoolEnv('SURF_CLOUD_MODE', false);
+  const useStealth = opts.stealth ?? readBoolEnv('SURF_USE_STEALTH', true);
+  const insecureTls = opts.insecureTls ?? readBoolEnv('SURF_INSECURE_TLS', cloudMode);
+  const noSandbox = opts.noSandbox ?? readBoolEnv('SURF_NO_SANDBOX', cloudMode);
+
+  const effectiveHeadless = opts.headless !== undefined
+    ? opts.headless
     : process.env.SURF_HEADLESS === 'false' ? false : true;
-  const ctx = await chromiumExtra.launchPersistentContext(profileDir, {
+
+  if (useStealth) ensureStealth();
+  const driver = useStealth ? chromiumExtra : chromiumBare;
+
+  const args = [
+    '--disable-blink-features=AutomationControlled',
+    '--no-default-browser-check',
+    '--no-first-run',
+    '--fingerprinting-canvas-image-data-noise',
+    '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+    '--force-webrtc-ip-handling-policy',
+    ...(noSandbox ? ['--no-sandbox'] : []),
+    ...(insecureTls ? ['--ignore-certificate-errors'] : []),
+    ...(cloudMode ? ['--disable-dev-shm-usage'] : []), // cloud /dev/shm too small for Chromium
+  ];
+
+  const ctx = await driver.launchPersistentContext(profileFor(opts.profileDir), {
     executablePath: detectChrome(),
     headless: effectiveHeadless,
     viewport: { width: 1366, height: 768 },
     locale: process.env.SURF_LOCALE || 'en-US',
     timezoneId: process.env.SURF_TZ || SYSTEM_TZ,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-default-browser-check',
-      '--no-first-run',
-    ],
+    ignoreHTTPSErrors: insecureTls,
+    args,
   });
 
   await ctx.route('**/*', route => {
@@ -74,18 +110,29 @@ export async function launch({ profileDir, headless }: LaunchOpts): Promise<Brow
   return ctx;
 }
 
+function profileFor(profileDir: string): string {
+  return profileDir;
+}
+
 export async function getPage(ctx: BrowserContext): Promise<Page> {
   return ctx.pages()[0] ?? (await ctx.newPage());
+}
+
+const SINGLETON_FILES = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+
+// A leftover lock is always stale here: the server owns the only instance.
+export async function clearProfileLocks(profileDir: string): Promise<void> {
+  for (const f of SINGLETON_FILES) {
+    const p = resolve(profileDir, f);
+    if (existsSync(p)) await rm(p, { force: true }).catch(() => {});
+  }
 }
 
 export async function cloneProfile(workerIndex: number): Promise<string> {
   const dst = PROFILE_WORKER(workerIndex);
   if (existsSync(dst)) await rm(dst, { recursive: true, force: true });
   await cp(PROFILE_MAIN, dst, { recursive: true, force: true });
-  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-    const p = resolve(dst, f);
-    if (existsSync(p)) await rm(p, { force: true }).catch(() => {});
-  }
+  await clearProfileLocks(dst);
   return dst;
 }
 
