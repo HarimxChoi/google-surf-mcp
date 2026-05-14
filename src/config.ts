@@ -59,11 +59,7 @@ function parseHumanlike(v: string | undefined): 'off' | 'background' | 'inline' 
 }
 
 function parseChromePath(v: string | undefined): string | undefined {
-  if (!v) return undefined;
-  if (!existsSync(v)) {
-    throw new Error(`CHROME_PATH set but not found: ${v}`);
-  }
-  return v;
+  return v || undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {

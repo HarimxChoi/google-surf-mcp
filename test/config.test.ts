@@ -43,10 +43,9 @@ describe('loadConfig', () => {
     expect(loadConfig({ SURF_IDLE_CLOSE_MS: '0' }).idleCloseMs).toBe(0);
   });
 
-  it('throws when CHROME_PATH is set but file missing', () => {
-    expect(() =>
-      loadConfig({ CHROME_PATH: '/nonexistent/chrome/binary' })
-    ).toThrow(/CHROME_PATH set but not found/);
+  it('checked lazily at launch', () => {
+    const c = loadConfig({ CHROME_PATH: '/nonexistent/chrome/binary' });
+    expect(c.chromePath).toBe('/nonexistent/chrome/binary');
   });
 
   it('cloud mode defaults: insecureTls + noSandbox auto-on', () => {
