@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
-    "prepare": "npm run build && git config core.hooksPath .githooks 2>/dev/null || true",
+    "prepare": "npm run build",
     "watch": "tsc --watch",
     "bootstrap": "node build/bootstrap.js",
     "start": "node build/index.js",
