@@ -6,12 +6,12 @@
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "0.4.51",
+  "version": "0.4.6",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "0.4.51",
+      "version": "0.4.6",
       "transport": {
         "type": "stdio"
       },

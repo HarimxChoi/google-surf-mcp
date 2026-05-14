@@ -11,6 +11,20 @@ interface CacheEntry<T> {
   expiresAt: number | null;
   key: string;
 }
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
+
+async function renameWithRetry(from: string, to: string, attempts = 5): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? '';
+      if (i >= attempts - 1 || !TRANSIENT_RENAME_CODES.has(code)) throw e;
+      await new Promise((r) => setTimeout(r, 10 * (i + 1)));
+    }
+  }
+}
 
 export class UnifiedCache {
   constructor(private root: string, private maxEntries = 1000) {
@@ -36,7 +50,7 @@ export class UnifiedCache {
       const raw = await readFile(path, 'utf-8');
       const entry: CacheEntry<T> = JSON.parse(raw);
       if (entry.expiresAt !== null && entry.expiresAt < Date.now()) {
-        await unlink(path).catch(() => {});
+        await unlink(path).catch(() => { });
         return null;
       }
       // Hash-prefix collision guard.
@@ -64,10 +78,11 @@ export class UnifiedCache {
     };
     try {
       await writeFile(tmpPath, JSON.stringify(entry), 'utf-8');
-      await rename(tmpPath, path);
+      await renameWithRetry(tmpPath, path);
     } catch (e) {
-      // Concurrent writes can race the temp file; only re-throw real disk errors.
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      await unlink(tmpPath).catch(() => { });
+      const code = (e as NodeJS.ErrnoException).code ?? '';
+      if (code !== 'ENOENT' && !TRANSIENT_RENAME_CODES.has(code)) throw e;
     }
     await this.evictIfOverCap(namespace);
   }
@@ -85,12 +100,12 @@ export class UnifiedCache {
     const live = stats.filter((s): s is { p: string; mtime: number } => s !== null);
     live.sort((a, b) => a.mtime - b.mtime);
     const excess = live.length - this.maxEntries;
-    await Promise.all(live.slice(0, excess).map((s) => unlink(s.p).catch(() => {})));
+    await Promise.all(live.slice(0, excess).map((s) => unlink(s.p).catch(() => { })));
   }
 
   async delete(namespace: CacheNamespace, key: string): Promise<void> {
     const path = this.filePath(namespace, key);
-    await unlink(path).catch(() => {});
+    await unlink(path).catch(() => { });
   }
 
   async clear(namespace: CacheNamespace): Promise<number> {
@@ -99,7 +114,7 @@ export class UnifiedCache {
     try {
       const files = await readdir(dir);
       await Promise.all(files.map(async (f) => {
-        await unlink(join(dir, f)).catch(() => {});
+        await unlink(join(dir, f)).catch(() => { });
         count++;
       }));
     } catch { /* dir not exist */ }
