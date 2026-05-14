@@ -5,6 +5,7 @@
 English | [한국어](./README.ko.md)
 
 [![google-surf-mcp MCP server](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp)
+[![npm version](https://img.shields.io/npm/v/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 
 ![demo](./assets/demo.gif)
 
