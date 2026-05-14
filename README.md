@@ -14,7 +14,7 @@ Google search MCP. No API key. Just works.
 
 - ✅ Actually works (tested 6 free Google search MCPs, all failed)
 - ✅ Search + URL extract in one MCP (replaces the usual search MCP + fetch MCP combo)
-- ✅ 4 tools: `search` / `search_parallel` / `extract` / `search_extract`
+- ✅ 5 tools: `search` / `search_parallel` / `extract` / `search_extract` / `health`
 - ✅ No API key, no proxies, no solver
 - ✅ Auto CAPTCHA recovery (Chrome opens, human solves once, call retries)
 - ✅ SSRF guard on `extract` (blocks `localhost`, private IPs, AWS metadata by default)
@@ -27,7 +27,7 @@ No CAPTCHA solver. When CAPTCHA fires on any tool, a Chrome window opens for a h
 
 One-time install needs a ~1s profile warm-up (see Install).
 
-Designed for local use. Not suitable for stateless / serverless deployment.
+Designed for local use. For headless / serverless environments set `SURF_CLOUD_MODE=true` (fail-fast on CAPTCHA, worker pool disabled).
 
 ## Numbers
 
@@ -43,7 +43,7 @@ Measured on a workstation with a 1Gb/s connection.
 ## Stack
 
 - Playwright + persistent Chrome profile
-- `playwright-extra` stealth
+- `playwright-extra` stealth as a cascade fallback tier
 - Resource-blocked images / media / fonts for speed
 - One-shot profile bootstrap before first run
 - Mozilla Readability + Turndown for article extraction
@@ -87,7 +87,7 @@ Paste this into your `~/.claude.json`:
 }
 ```
 
-Restart Claude Code. Done. `search`, `search_parallel`, `extract`, `search_extract` are now available.
+Restart Claude Code. Done. `search`, `search_parallel`, `extract`, `search_extract`, `health` are now available.
 
 For other MCP clients, use the same JSON shape in their config file.
 
@@ -105,10 +105,11 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?)` - single query, ~1.5s. Returns title / url / snippet. Sponsored ads filtered out.
+- `search(query, limit?)` - single query, ~1.5s. Returns title / url / snippet. Sponsored ads filtered out. Results cached 24h (`SURF_CACHE_TTL_SEARCH_MS=0` to bypass).
 - `search_parallel(queries[], limit?)` - pool of 4, max 10 queries per call.
 - `extract(url, max_chars?)` - fetch a URL, return article markdown (Readability with text fallback). Failures return `{ error }`, never throw.
 - `search_extract(query, limit?, max_chars?)` - search + parallel extract in one call. Returns SERP results enriched with full article content. Per-page failures are isolated.
+- `health()` - server status: cascade mode, rate-limiter usage, cache size, config. Call it if searches start failing or returning empty.
 
 `search_extract` is the killer one: SERP + full article content in a single call. Replaces the usual "search MCP + URL fetcher MCP" combo most agents stitch together.
 
@@ -123,10 +124,20 @@ Local clone variant:
 | `SURF_HEADLESS` | `true` | set `false` to run Chrome visibly (demos / debugging). CAPTCHA auto-recovery always runs visible regardless. |
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 | `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
+| `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |
+| `SURF_CASCADE_DISABLED` | `false` | pin a single stealth mode instead of the 3-tier cascade |
+| `SURF_USE_STEALTH` | `true` | initial stealth tier — only consulted when `SURF_CASCADE_DISABLED=true` |
+| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` / `inline` — opt-in humanlike browsing behavior |
+| `SURF_RATE_LIMIT_PER_MIN` | `10` | internal cap on Google-facing requests per minute |
+| `SURF_CACHE_TTL_SEARCH_MS` | `86400000` | search cache TTL (24h); `0` disables caching |
+| `SURF_CACHE_MAX_ENTRIES` | `1000` | LRU cap per cache namespace |
+| `SURF_CACHE_ROOT` | `<profile>/cache` | cache directory |
+| `SURF_INSECURE_TLS` | `=SURF_CLOUD_MODE` | `--ignore-certificate-errors` (auto-on in cloud mode) |
+| `SURF_NO_SANDBOX` | `=SURF_CLOUD_MODE` | `--no-sandbox` (auto-on in cloud mode) |
 
 ## Troubleshooting
 
-- CAPTCHA: a visible Chrome window opens automatically (works for all 4 tools). Solve it once, do one search inside, the call retries and continues. To fail-fast instead, run with no display attached.
+- CAPTCHA: a visible Chrome window opens automatically (all tools). Solve it once, do one search inside, the call retries and continues. To fail-fast instead (no human available), set `SURF_CLOUD_MODE=true`.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
 - Stale selectors: Google rotates classes. PRs welcome.
 

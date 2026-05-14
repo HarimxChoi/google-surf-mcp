@@ -1,0 +1,5 @@
+#!/bin/sh
+# Block Korean text in staged src/*.ts files (see scripts/check-no-korean.sh).
+files=$(git diff --cached --name-only --diff-filter=ACM | grep '^src/.*\.ts$' || true)
+[ -z "$files" ] && exit 0
+exec sh "$(git rev-parse --show-toplevel)/scripts/check-no-korean.sh" $files

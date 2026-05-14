@@ -21,11 +21,17 @@ export interface PoolSearchResult {
 }
 
 export class SearchPool {
+  // Bound rebuild attempts and waiter wait time so a fully-dead pool cannot
+  // hang acquires indefinitely.
+  private static readonly MAX_REBUILD_FAILURES = 5;
+  private static readonly WAITER_TIMEOUT_MS = 60_000;
+
   private workers: Worker[] = [];
   private waiters: Waiter[] = [];
   private size: number;
   private warmed = false;
   private closing = false;
+  private rebuildFailureCount = 0;
 
   constructor(size = 4) {
     this.size = Math.max(1, size);
@@ -107,6 +113,11 @@ export class SearchPool {
 
   private async acquire(): Promise<Worker> {
     if (this.closing) throw new Error('pool closing');
+    if (this.rebuildFailureCount >= SearchPool.MAX_REBUILD_FAILURES) {
+      throw new Error(
+        `pool: rebuild failure limit (${SearchPool.MAX_REBUILD_FAILURES}) reached, all workers may be dead`,
+      );
+    }
     // try size+1 times to find a live free worker, rebuild dead ones inline
     let attempts = 0;
     while (attempts++ < this.size + 1) {
@@ -119,14 +130,35 @@ export class SearchPool {
         const fresh = await this.rebuildWorker(idx);
         fresh.busy = true;
         this.workers[idx] = fresh;
+        this.rebuildFailureCount = 0; // success → reset
         return fresh;
       } catch {
         free.busy = false;
+        this.rebuildFailureCount++;
+        if (this.rebuildFailureCount >= SearchPool.MAX_REBUILD_FAILURES) {
+          throw new Error('pool: rebuild failure limit reached during acquire');
+        }
         // dead and unrebuildable, try next free worker
       }
     }
     return new Promise<Worker>((resolve, reject) => {
-      this.waiters.push({ resolve, reject });
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        timeoutHandle = null;
+        // remove from waiters array
+        const idx = this.waiters.findIndex(w => w.reject === wrappedReject);
+        if (idx >= 0) this.waiters.splice(idx, 1);
+        reject(new Error(`pool: waiter timeout after ${SearchPool.WAITER_TIMEOUT_MS}ms`));
+      }, SearchPool.WAITER_TIMEOUT_MS);
+
+      const wrappedResolve = (w: Worker) => {
+        if (timeoutHandle) { clearTimeout(timeoutHandle); timeoutHandle = null; }
+        resolve(w);
+      };
+      const wrappedReject = (e: Error) => {
+        if (timeoutHandle) { clearTimeout(timeoutHandle); timeoutHandle = null; }
+        reject(e);
+      };
+      this.waiters.push({ resolve: wrappedResolve, reject: wrappedReject });
     });
   }
 

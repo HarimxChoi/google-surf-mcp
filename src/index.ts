@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
-import { launch, getPage, PROFILE_MAIN, profileExists } from './browser.js';
+import { z } from 'zod';
+import { launch, getPage, PROFILE_MAIN, profileExists, clearProfileLocks } from './browser.js';
 import { search, CaptchaError } from './search.js';
 import { SearchPool } from './pool.js';
-import { withCaptchaFallback } from './captchaRecover.js';
+import { recoverFromCaptcha } from './captchaRecover.js';
+import { withTimeout } from './timeout.js';
+import {
+  searchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
+  initDeps, type Deps,
+} from './agent.js';
+import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
 
 const require = createRequire(import.meta.url);
@@ -21,8 +22,6 @@ const VERSION = pkg.version;
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXTRACT_BATCH_TIMEOUT_MS = 60_000;
 const POOL_SIZE = 4;
-const DEFAULT_EXTRACT_MAX_CHARS = 8_000;
-const SEARCH_EXTRACT_DEFAULT_LIMIT = 5;
 
 function parseIdleMs(): number {
   const raw = process.env.SURF_IDLE_CLOSE_MS;
@@ -30,25 +29,46 @@ function parseIdleMs(): number {
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : 30_000;
 }
-const IDLE_CLOSE_MS = parseIdleMs(); // 0 disables idle auto-close
+const IDLE_CLOSE_MS = parseIdleMs();
 
 // sequential ctx lifecycle
 let ctxPromise: Promise<BrowserContext> | null = null;
 let ctxClosing: Promise<void> | null = null;
+let ctxMode: StealthMode | null = null;
 
-function getSequentialCtx(): Promise<BrowserContext> {
-  // wait for in-progress close, avoid profile lock race
-  if (ctxClosing) return ctxClosing.then(() => getSequentialCtx());
-  if (ctxPromise) return ctxPromise;
-  const p = (async () => {
-    const c = await launch({ profileDir: PROFILE_MAIN });
+async function launchAndWarm(mode: StealthMode): Promise<BrowserContext> {
+  const c = await launch({ profileDir: PROFILE_MAIN, stealth: mode === 'on' });
+  try {
     const page = await getPage(c);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
     return c;
+  } catch (e) {
+    await c.close().catch(() => {});
+    throw e;
+  }
+}
+
+function getSequentialCtx(mode: StealthMode = 'off'): Promise<BrowserContext> {
+  if (ctxClosing) return ctxClosing.then(() => getSequentialCtx(mode));
+  // If a ctx exists but with a different stealth mode, close and rebuild.
+  if (ctxPromise && ctxMode !== null && ctxMode !== mode) {
+    return closeSequential().then(() => getSequentialCtx(mode));
+  }
+  if (ctxPromise) return ctxPromise;
+  const p = (async () => {
+    try {
+      return await launchAndWarm(mode);
+    } catch {
+      // Stale lock from a crashed Chromium fails the first launch; clear + retry once.
+      await clearProfileLocks(PROFILE_MAIN);
+      return await launchAndWarm(mode);
+    }
   })();
   ctxPromise = p;
-  // failed launch must not be cached forever
-  p.catch(() => { if (ctxPromise === p) ctxPromise = null; });
+  ctxMode = mode;
+  p.catch(() => {
+    if (ctxPromise === p) { ctxPromise = null; ctxMode = null; }
+  });
   return p;
 }
 
@@ -56,6 +76,7 @@ function closeSequential(): Promise<void> {
   if (ctxClosing) return ctxClosing;
   const cp = ctxPromise;
   ctxPromise = null;
+  ctxMode = null;
   if (!cp) return Promise.resolve();
   ctxClosing = (async () => {
     try {
@@ -72,23 +93,24 @@ function closeSequential(): Promise<void> {
 let pool: SearchPool | null = null;
 let poolPromise: Promise<SearchPool> | null = null;
 let poolClosing: Promise<void> | null = null;
+let poolMode: StealthMode | null = null;
 
-function ensurePool(): Promise<SearchPool> {
-  if (poolClosing) return poolClosing.then(() => ensurePool());
+function ensurePool(mode: StealthMode = 'off'): Promise<SearchPool> {
+  if (poolClosing) return poolClosing.then(() => ensurePool(mode));
+  // Pool reflects current cascade mode; rebuild on transition.
+  if (pool && poolMode !== null && poolMode !== mode) {
+    return resetPool().then(() => ensurePool(mode));
+  }
   if (pool) return Promise.resolve(pool);
   if (poolPromise) return poolPromise;
   poolPromise = (async () => {
     try {
-      // pool clones MAIN profile; release sequential lock first
       await closeSequential();
       const p = new SearchPool(POOL_SIZE);
-      try {
-        await p.warm();
-      } catch (e) {
-        await p.close().catch(() => {});
-        throw e;
-      }
+      try { await p.warm(); }
+      catch (e) { await p.close().catch(() => {}); throw e; }
       pool = p;
+      poolMode = mode;
       return p;
     } finally {
       poolPromise = null;
@@ -99,12 +121,12 @@ function ensurePool(): Promise<SearchPool> {
 
 async function resetPool(): Promise<void> {
   if (poolClosing) return poolClosing;
-  // wait for warm so close sees real state
   if (poolPromise) {
-    try { await poolPromise; } catch { /* warm failed; pool stays null */ }
+    try { await poolPromise; } catch { /* */ }
   }
   const cur = pool;
   pool = null;
+  poolMode = null;
   if (!cur) return;
   poolClosing = (async () => {
     try { await cur.close(); }
@@ -155,7 +177,6 @@ async function trackPool<T>(op: () => Promise<T>): Promise<T> {
 async function shutdown() {
   clearSeqIdle();
   clearPoolIdle();
-  // drain in-flight ops, avoid killing ctx mid-search
   const drainStart = Date.now();
   while ((seqActive > 0 || poolActive > 0) && Date.now() - drainStart < 10_000) {
     await new Promise((r) => setTimeout(r, 50));
@@ -165,226 +186,247 @@ async function shutdown() {
   pool = null;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
-    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
-  });
+
+// Cascade state is process-level so seq + pool share it.
+const baseDeps = initDeps();
+
+function buildDeps(): Deps {
+  const acquireSeqCtx = async (mode: StealthMode) => {
+    return await trackSeq(() => getSequentialCtx(mode));
+  };
+
+  const acquirePool = async (mode: StealthMode) => {
+    const p = await trackPool(() => ensurePool(mode));
+    return {
+      runMany: (queries: string[], limit: number) =>
+        trackPool(() => withTimeout(
+          p.runMany(queries, limit),
+          REQUEST_TIMEOUT_MS * 2,
+          'search_parallel',
+          resetPool,
+        )),
+      extractOne: (url: string, maxChars: number) =>
+        trackPool(() => withTimeout(
+          p.extractOne(url, maxChars),
+          REQUEST_TIMEOUT_MS,
+          'extract',
+        )),
+      searchOne: (query: string, limit: number) =>
+        trackPool(() => withTimeout(
+          p.searchOne(query, limit),
+          REQUEST_TIMEOUT_MS,
+          'search_extract:search',
+          resetPool,
+        )),
+    };
+  };
+
+  // Tier-3 in local mode: release contexts then open headed Chrome for human.
+  const recoverHuman = async () => {
+    await Promise.all([
+      resetPool().catch(() => {}),
+      closeSequential().catch(() => {}),
+    ]);
+    await recoverFromCaptcha();
+  };
+
+  return {
+    ...baseDeps,
+    acquireSeqCtx,
+    acquirePool,
+    closeSeq: closeSequential,
+    resetPool,
+    recoverHuman,
+  };
 }
 
-const server = new Server(
-  { name: NAME, version: VERSION },
-  { capabilities: { tools: {} } },
-);
 
-server.onerror = e => console.error('[mcp]', e);
+const server = new McpServer({ name: NAME, version: VERSION });
+server.server.onerror = (e: unknown) => console.error('[mcp]', e);
+
 process.on('SIGINT', () => { shutdown().finally(() => process.exit(0)); });
 process.on('SIGTERM', () => { shutdown().finally(() => process.exit(0)); });
 process.stdin.on('end', () => { shutdown().finally(() => process.exit(0)); });
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'search',
-      description: 'Single Google search. Returns title/url/snippet per result. ~2s/query (first call ~4s, includes setup). On CAPTCHA, a visible Chrome window opens for the human to solve, then the call retries.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query' },
-          limit: { type: 'number', minimum: 1, maximum: 20, description: 'Max results (default 10)' },
-        },
-        required: ['query'],
-      },
-    },
-    {
-      name: 'search_parallel',
-      description: 'Run multiple Google searches in parallel (pool of 4). Returns title/url/snippet per result. First call adds 5–10s setup.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          queries: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 10, description: 'Queries' },
-          limit: { type: 'number', minimum: 1, maximum: 20, description: 'Max results per query' },
-        },
-        required: ['queries'],
-      },
-    },
-    {
-      name: 'extract',
-      description: 'Fetch a URL and return clean article markdown. Uses Mozilla Readability with a text fallback. Best-effort: failures return { error } instead of throwing. Private/loopback addresses blocked unless SURF_ALLOW_PRIVATE=true.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'URL to fetch' },
-          max_chars: { type: 'number', minimum: 200, maximum: 50000, description: 'Truncate content to this many chars (default 8000)' },
-        },
-        required: ['url'],
-      },
-    },
-    {
-      name: 'search_extract',
-      description: 'Google search + parallel content extraction. Returns SERP results enriched with article markdown. Slower than search (extra ~2–5s) but gives you actual page content, not just snippets. Per-page failures are isolated (returned as { error } in that result).',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query' },
-          limit: { type: 'number', minimum: 1, maximum: 10, description: 'Number of results to extract (default 5)' },
-          max_chars: { type: 'number', minimum: 200, maximum: 20000, description: 'Truncate each result content (default 8000)' },
-        },
-        required: ['query'],
-      },
-    },
-  ],
-}));
+const SearchInput = {
+  query: z.string().min(1).max(400).describe('Google search query. Use site: filters and quotes for exact match.'),
+  limit: z.number().int().min(1).max(20).default(10).describe('Max results (default 10).'),
+};
 
-server.setRequestHandler(CallToolRequestSchema, async req => {
+const SearchParallelInput = {
+  queries: z.array(z.string()).min(1).max(10).describe('2-10 queries to run concurrently.'),
+  limit: z.number().int().min(1).max(20).default(10).describe('Max results per query.'),
+};
+
+const ExtractInput = {
+  url: z.string().describe('Public http(s) URL. Loopback/private IPs blocked unless SURF_ALLOW_PRIVATE=true.'),
+  max_chars: z.number().int().min(200).max(50_000).default(8_000).describe('Truncate body to this many chars (default 8000).'),
+};
+
+const SearchExtractInput = {
+  query: z.string().min(1).max(400).describe('Search query.'),
+  limit: z.number().int().min(1).max(10).default(5).describe('Number of results to extract (default 5, max 10).'),
+  max_chars: z.number().int().min(200).max(20_000).default(8_000).describe('Truncate each result body (default 8000).'),
+};
+
+// All-optional + `error` field: one schema validates success and error payloads.
+const ResultItem = z.object({
+  title: z.string(),
+  url: z.string(),
+  description: z.string(),
+});
+const ErrorInfoShape = z.object({
+  code: z.string(),
+  message: z.string(),
+  retryable: z.boolean(),
+  retry_after_ms: z.number().optional(),
+  user_action: z.string().optional(),
+});
+const MetaShape = z.record(z.string(), z.unknown());
+
+const SearchOutput = {
+  query: z.string().optional(),
+  results: z.array(ResultItem).optional(),
+  elapsed_ms: z.number().optional(),
+  meta: MetaShape.optional(),
+  error: ErrorInfoShape.optional(),
+};
+
+const SearchParallelOutput = {
+  results: z.array(z.object({
+    query: z.string(),
+    results: z.array(ResultItem),
+    error: z.string().optional(),
+  })).optional(),
+  elapsed_ms: z.number().optional(),
+  meta: MetaShape.optional(),
+  error: ErrorInfoShape.optional(),
+};
+
+const ExtractOutput = {
+  url: z.string().optional(),
+  title: z.string().optional(),
+  content: z.string().optional(),
+  excerpt: z.string().optional(),
+  length: z.number().optional(),
+  elapsed_ms: z.number().optional(),
+  error: z.union([z.string(), ErrorInfoShape]).optional(),
+  meta: MetaShape.optional(),
+};
+
+const SearchExtractOutput = {
+  query: z.string().optional(),
+  results: z.array(z.object({
+    title: z.string(),
+    url: z.string(),
+    description: z.string(),
+    content: z.string().optional(),
+    excerpt: z.string().optional(),
+    length: z.number().optional(),
+    error: z.string().optional(),
+  })).optional(),
+  elapsed_ms: z.number().optional(),
+  meta: MetaShape.optional(),
+  error: ErrorInfoShape.optional(),
+};
+
+const HealthOutput = {
+  version: z.string().optional(),
+  cascade: MetaShape.optional(),
+  rateLimiter: MetaShape.optional(),
+  cache: MetaShape.optional(),
+  config: MetaShape.optional(),
+  error: ErrorInfoShape.optional(),
+};
+
+server.registerTool('search', {
+  title: 'Google Search',
+  description:
+    'Single Google search -> title/url/snippet per result. Results are cached 24h, ' +
+    'so repeating a query is free -- prefer re-querying over caching results yourself. ' +
+    'For latest/today/breaking queries set SURF_CACHE_TTL_SEARCH_MS=0 to bypass the cache. ' +
+    'Default limit 10 (max 20). First call ~4s (Chromium warmup), then ~2s. ' +
+    'On CAPTCHA a visible Chrome opens for a human to solve (shared-IP protection); ' +
+    'SURF_CLOUD_MODE=true makes it fail-fast instead.',
+  inputSchema: SearchInput,
+  outputSchema: SearchOutput,
+  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+}, async (args: { query: string; limit: number }) => {
   if (!profileExists()) {
-    throw new McpError(
-      ErrorCode.InternalError,
-      `Profile not initialized. Run: npm run bootstrap`,
-    );
+    return { content: [{ type: 'text', text: 'Error [PROFILE_MISSING]: Profile not initialized. Run: npm run bootstrap' }], isError: true };
   }
+  return await searchTool(args, buildDeps());
+});
 
-  const args = req.params.arguments as Record<string, unknown> | undefined;
-  const name = req.params.name;
-
-  if (name === 'search') {
-    const query = String(args?.query || '').trim();
-    if (!query) throw new McpError(ErrorCode.InvalidParams, 'query required');
-    const limit = Math.min(Math.max(Number(args?.limit) || 10, 1), 20);
-
-    const t0 = Date.now();
-    try {
-      const results = await trackSeq(() => withCaptchaFallback(
-        async () => {
-          const ctx = await getSequentialCtx();
-          const page = await getPage(ctx);
-          return await withTimeout(search(page, query, limit), REQUEST_TIMEOUT_MS, 'search');
-        },
-        closeSequential,
-      ));
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({ query, results, elapsed_ms: Date.now() - t0 }, null, 2),
-        }],
-      };
-    } catch (e) {
-      console.error('[google-surf-mcp] search error:', e);
-      const msg = e instanceof CaptchaError
-        ? `CAPTCHA recovery failed. Solve in opened browser or run: npm run bootstrap`
-        : (e as Error).message;
-      return { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true };
-    }
+server.registerTool('search_parallel', {
+  title: 'Google Search Parallel',
+  description:
+    'Run 2-10 Google searches concurrently. Use to compare multiple angles in one call. ' +
+    'Each query counts against the internal rate limit (~10/min) -- do not loop this for bulk scraping. ' +
+    'First call adds 5-10s pool warmup. Per-query failures are isolated in the results array. ' +
+    'Disabled in cloud mode.',
+  inputSchema: SearchParallelInput,
+  outputSchema: SearchParallelOutput,
+  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+}, async (args: { queries: string[]; limit: number }) => {
+  if (!profileExists()) {
+    return { content: [{ type: 'text', text: 'Error [PROFILE_MISSING]: Profile not initialized. Run: npm run bootstrap' }], isError: true };
   }
+  return await searchParallelTool(args, buildDeps());
+});
 
-  if (name === 'search_parallel') {
-    const queries = (args?.queries as string[] || []).map(q => String(q).trim()).filter(Boolean);
-    if (queries.length === 0) throw new McpError(ErrorCode.InvalidParams, 'queries required');
-    const limit = Math.min(Math.max(Number(args?.limit) || 10, 1), 20);
-
-    const t0 = Date.now();
-    try {
-      const results = await trackPool(() => withCaptchaFallback(
-        async () => {
-          const p = await ensurePool();
-          return await withTimeout(p.runMany(queries, limit), REQUEST_TIMEOUT_MS * 2, 'search_parallel');
-        },
-        resetPool,
-      ));
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({ results, elapsed_ms: Date.now() - t0 }, null, 2),
-        }],
-      };
-    } catch (e) {
-      console.error('[google-surf-mcp] search_parallel error:', e);
-      return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };
-    }
+server.registerTool('extract', {
+  title: 'Extract Article Content',
+  description:
+    'Fetch one public URL -> clean article text via Mozilla Readability. ' +
+    'Use when you already have a URL and need its body. Not a search tool and not rate-limited. ' +
+    'Best-effort: failures return an errorInfo instead of throwing.',
+  inputSchema: ExtractInput,
+  outputSchema: ExtractOutput,
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+}, async (args: { url: string; max_chars: number }) => {
+  if (!profileExists()) {
+    return { content: [{ type: 'text', text: 'Error [PROFILE_MISSING]: Profile not initialized. Run: npm run bootstrap' }], isError: true };
   }
+  return await extractTool(args, buildDeps());
+});
 
-  if (name === 'extract') {
-    const url = String(args?.url || '').trim();
-    if (!url) throw new McpError(ErrorCode.InvalidParams, 'url required');
-    const maxChars = Math.min(Math.max(Number(args?.max_chars) || DEFAULT_EXTRACT_MAX_CHARS, 200), 50_000);
-
-    const t0 = Date.now();
-    try {
-      // extract never throws CaptchaError, no fallback needed
-      const result = await trackPool(async () => {
-        const p = await ensurePool();
-        return await withTimeout(p.extractOne(url, maxChars), REQUEST_TIMEOUT_MS, 'extract');
-      });
-      const failed = !!result.error && !result.content;
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({ ...result, elapsed_ms: Date.now() - t0 }, null, 2),
-        }],
-        ...(failed ? { isError: true } : {}),
-      };
-    } catch (e) {
-      console.error('[google-surf-mcp] extract error:', e);
-      return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };
-    }
+server.registerTool('search_extract', {
+  title: 'Search + Parallel Extract',
+  description:
+    'One-shot Google search + parallel extract of the top results -- the SERP enriched with article text. ' +
+    'Slower (~5-15s) and far more tokens than `search` alone; use only when you actually need the bodies. ' +
+    'Per-page extract failures are isolated. Disabled in cloud mode.',
+  inputSchema: SearchExtractInput,
+  outputSchema: SearchExtractOutput,
+  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+}, async (args: { query: string; limit: number; max_chars: number }) => {
+  if (!profileExists()) {
+    return { content: [{ type: 'text', text: 'Error [PROFILE_MISSING]: Profile not initialized. Run: npm run bootstrap' }], isError: true };
   }
+  return await searchExtractTool(args, buildDeps());
+});
 
-  if (name === 'search_extract') {
-    const query = String(args?.query || '').trim();
-    if (!query) throw new McpError(ErrorCode.InvalidParams, 'query required');
-    const limit = Math.min(Math.max(Number(args?.limit) || SEARCH_EXTRACT_DEFAULT_LIMIT, 1), 10);
-    const maxChars = Math.min(Math.max(Number(args?.max_chars) || DEFAULT_EXTRACT_MAX_CHARS, 200), 20_000);
-
-    const t0 = Date.now();
-    try {
-      const data = await trackPool(() => withCaptchaFallback(
-        async () => {
-          const p = await ensurePool();
-          const sr = await withTimeout(p.searchOne(query, limit), REQUEST_TIMEOUT_MS, 'search_extract:search');
-          if (!sr.results.length) {
-            return { results: [] as Array<Record<string, unknown>>, searchError: sr.error };
-          }
-          const enriched = await withTimeout(
-            Promise.all(sr.results.map(async r => {
-              const ex = await p.extractOne(r.url, maxChars);
-              return {
-                title: r.title,
-                url: r.url,
-                description: r.description,
-                content: ex.content,
-                excerpt: ex.excerpt,
-                length: ex.length,
-                error: ex.error,
-              };
-            })),
-            EXTRACT_BATCH_TIMEOUT_MS,
-            'search_extract:extract',
-          );
-          return { results: enriched as Array<Record<string, unknown>>, searchError: undefined as string | undefined };
-        },
-        resetPool,
-      ));
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            query,
-            results: data.results,
-            ...(data.searchError ? { error: data.searchError } : {}),
-            elapsed_ms: Date.now() - t0,
-          }, null, 2),
-        }],
-        ...(data.searchError && data.results.length === 0 ? { isError: true } : {}),
-      };
-    } catch (e) {
-      console.error('[google-surf-mcp] search_extract error:', e);
-      return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }], isError: true };
-    }
-  }
-
-  throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${req.params.name}`);
+server.registerTool('health', {
+  title: 'MCP Health Check',
+  description:
+    'MCP server status: cascade mode + transitions, rate-limiter usage, cache size, config. ' +
+    'Call this if searches start failing or returning empty -- check cascade.totalCaptchas and ' +
+    'rateLimiter.queueSize, and reduce search volume if they are high.',
+  inputSchema: {},
+  outputSchema: HealthOutput,
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+}, async () => {
+  return await healthTool(buildDeps());
 });
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`[${NAME}@${VERSION}] running on stdio`);
+
+// Background pre-warm so the first tool call skips Chromium cold-start.
+if (profileExists() && !baseDeps.config.cloudMode) {
+  getSequentialCtx().catch((e) => {
+    console.error('[google-surf-mcp] pre-warm failed (will retry on first call):', e?.message ?? e);
+  });
+}

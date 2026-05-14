@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { SearchResult } from './types.js';
 import { isBlocked } from './browser.js';
-import { parseResults, type ParseOutput } from './parse.js';
+import { parseResults, type LegacyParseOutput } from './parse.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -17,11 +17,11 @@ export class CaptchaError extends Error {
 export async function search(page: Page, query: string, limit = 10): Promise<SearchResult[]> {
   const url = page.url();
   const onResultsPage = url.includes('/search?');
-  // skip redundant goto: launch already navigated home, second nav races subresources → ERR_ABORTED
+  // Exact match: /imghp, /finance/..., /preferences etc. lack the search
+  // textarea and would time out the click below.
   const onHome =
-    url.startsWith('https://www.google.com/') &&
-    !url.includes('/search?') &&
-    !url.includes('/sorry/');
+    url === 'https://www.google.com/' ||
+    url === 'https://www.google.com';
   if (!onResultsPage && !onHome) {
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 10_000 });
     await sleep(rand(80, 160));
@@ -55,7 +55,7 @@ export async function search(page: Page, query: string, limit = 10): Promise<Sea
 
   if (isBlocked(page.url())) throw new CaptchaError('after-search');
 
-  const out = (await page.evaluate(parseResults, limit)) as ParseOutput;
+  const out = (await page.evaluate(parseResults, limit)) as LegacyParseOutput;
 
   // empty results: throw if we have a reason, otherwise return []
   if (out.results.length === 0) {

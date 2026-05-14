@@ -1,0 +1,81 @@
+name: serp-repair-pipeline
+
+# Triple Gate + 3-query empirical self-healing.
+# Daily cron checks if Google SERP selectors broke and proposes draft PR.
+# Auto-merge: NEVER. Always human review.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # 매일 03:17 UTC, 다른 cron과 충돌 방지
+  workflow_dispatch: {}
+
+jobs:
+  detect-and-repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: install deps
+        run: npm ci
+
+      - name: install playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: build
+        run: npm run build
+
+      - name: bootstrap profile (auto, headed via Xvfb)
+        env:
+          DISPLAY: ':99'
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1366x768x24 &
+          sleep 2
+          npm run bootstrap-auto || true
+
+      - name: run repair pipeline
+        id: repair
+        run: node build/scripts/repair/index.js
+
+      - name: open draft PR (if decision=open)
+        if: steps.repair.outputs.should_open_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # repair pipeline이 만든 PR draft body를 사용
+          # (실제 PR 생성은 별도 step으로 — 여기선 구조만)
+          echo "PR draft generated. Manual review required."
+          echo "caution=${{ steps.repair.outputs.caution }}"
+
+      - name: open issue on failure
+        if: failure() || steps.repair.outputs.trigger == 'detected'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "SERP selector drift detected $(date +%Y-%m-%d)" \
+            --body "Repair pipeline triggered. Check workflow logs." \
+            --label "automated,parser-drift" || true
+
+      - name: upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-run-${{ github.run_id }}
+          path: |
+            build/scripts/repair/*.json
+            *.log
+          retention-days: 30
