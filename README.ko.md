@@ -4,7 +4,7 @@
 
 ✨Anti-Bot Search MCP: No API Key✨
 
-English | [한국어](./README.ko.md)
+[English](./README.md) | 한국어
 
 [![npm version](https://img.shields.io/npm/v/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
