@@ -1,4 +1,4 @@
-<img src="./assets/icon-256.png" width="128" align="right" alt="google-surf-mcp"/>
+<img src="/assets/icon-256.png" width="128" align="right" alt="google-surf-mcp"/>
 
 # google-surf-mcp
 
