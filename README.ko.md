@@ -1,11 +1,14 @@
+<img src="./assets/icon-256.png" width="128" align="right" alt="google-surf-mcp"/>
+
 # google-surf-mcp
 
 ✨Anti-Bot Search MCP: No API Key✨
 
-[English](./README.md) | 한국어
+English | [한국어](./README.ko.md)
 
 [![npm version](https://img.shields.io/npm/v/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
+[![smithery badge](https://smithery.ai/badge/2-harim-choi/google-surf-mcp)](https://smithery.ai/servers/2-harim-choi/google-surf-mcp)
 [![google-surf-mcp MCP server](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp)
 
 ![demo](./assets/demo.gif)
