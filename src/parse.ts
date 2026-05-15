@@ -35,6 +35,7 @@ export interface ParsedResult {
 
 export interface ParseOutput {
   results: ParsedResult[];
+  blockIndices: number[];
   signals: ParseSignals;
 }
 
@@ -55,6 +56,7 @@ export function parseResultsInBrowser(args: {
   ]);
   const seen = new Set<string>();
   const results: ParsedResult[] = [];
+  const blockIndices: number[] = [];
 
   const allElements = document.querySelectorAll('*');
   const h3Count = document.querySelectorAll('h3').length;
@@ -92,7 +94,9 @@ export function parseResultsInBrowser(args: {
   const READ_MORE = /\s*(?:\.{3}|…)?\s*(?:Read more|More results|더보기)\s*$/i; // i18n-data
 
   const blocks = document.querySelectorAll(args.strategy.blockSelector);
-  for (const el of Array.from(blocks)) {
+  const blocksArr = Array.from(blocks);
+  for (let i = 0; i < blocksArr.length; i++) {
+    const el = blocksArr[i];
     if (
       el.matches('[data-text-ad], [data-pcu]') ||
       el.closest(args.strategy.adFilter)
@@ -120,12 +124,14 @@ export function parseResultsInBrowser(args: {
       url,
       description: (sn?.textContent || '').trim().replace(READ_MORE, '').slice(0, 600),
     });
+    blockIndices.push(i);
 
     if (results.length >= args.max) break;
   }
 
   return {
     results,
+    blockIndices,
     signals: { h3Count, externalLinkCount, hveidCount, classTokenSize: classTokens.size, layoutSignature },
   };
 }

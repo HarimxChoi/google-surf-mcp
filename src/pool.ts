@@ -1,8 +1,8 @@
 import type { BrowserContext } from 'playwright';
 import { launch, cloneProfile, getPage } from './browser.js';
 import { search, CaptchaError } from './search.js';
-import { extract, type ExtractResult } from './extract.js';
-import type { SearchResult } from './types.js';
+import { extract, type ExtractResult, type ExtractMode } from './extract.js';
+import type { SearchResult, ResultClassification } from './types.js';
 
 interface Worker {
   ctx: BrowserContext;
@@ -17,6 +17,8 @@ interface Waiter {
 export interface PoolSearchResult {
   query: string;
   results: SearchResult[];
+  dropped?: number;
+  dropped_reasons?: ResultClassification[];
   error?: string;
 }
 
@@ -64,18 +66,18 @@ export class SearchPool {
     this.warmed = true;
   }
 
-  async runMany(queries: string[], limit = 10): Promise<PoolSearchResult[]> {
+  async runMany(queries: string[], limit = 10, opts?: { locale?: string }): Promise<PoolSearchResult[]> {
     if (!this.warmed) await this.warm();
-    return Promise.all(queries.map((q) => this.searchOne(q, limit)));
+    return Promise.all(queries.map((q) => this.searchOne(q, limit, opts)));
   }
 
-  async searchOne(query: string, limit: number): Promise<PoolSearchResult> {
+  async searchOne(query: string, limit: number, opts?: { locale?: string }): Promise<PoolSearchResult> {
     if (!this.warmed) await this.warm();
     const w = await this.acquire();
     try {
       const page = await getPage(w.ctx);
-      const results = await search(page, query, limit);
-      return { query, results };
+      const outcome = await search(page, query, limit, opts);
+      return { query, results: outcome.results, dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons };
     } catch (e) {
       if (e instanceof CaptchaError) throw e;
       return { query, results: [], error: (e as Error).message };
@@ -84,11 +86,11 @@ export class SearchPool {
     }
   }
 
-  async extractOne(url: string, maxChars: number, navTimeoutMs?: number): Promise<ExtractResult> {
+  async extractOne(url: string, maxChars: number, mode?: ExtractMode, navTimeoutMs?: number): Promise<ExtractResult> {
     if (!this.warmed) await this.warm();
     const w = await this.acquire();
     try {
-      return await extract(w.ctx, url, maxChars, navTimeoutMs);
+      return await extract(w.ctx, url, { maxChars, mode, navTimeoutMs });
     } finally {
       this.release(w);
     }

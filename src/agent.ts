@@ -11,10 +11,13 @@ import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
 } from './cascade.js';
 
+import type { ExtractMode, ExtractResult } from './extract.js';
+import type { PoolSearchResult } from './pool.js';
+
 export interface PoolHandle {
-  runMany: (queries: string[], limit: number) => Promise<Array<{ query: string; results: SearchResult[]; error?: string }>>;
-  extractOne: (url: string, maxChars: number) => Promise<{ url: string; title?: string; content?: string; excerpt?: string; length?: number; error?: string }>;
-  searchOne: (query: string, limit: number) => Promise<{ query: string; results: SearchResult[]; error?: string }>;
+  runMany: (queries: string[], limit: number, opts?: { locale?: string }) => Promise<PoolSearchResult[]>;
+  extractOne: (url: string, maxChars: number, mode?: ExtractMode) => Promise<ExtractResult>;
+  searchOne: (query: string, limit: number, opts?: { locale?: string }) => Promise<PoolSearchResult>;
 }
 
 export interface Deps {
@@ -125,10 +128,10 @@ export async function searchTool(
   try {
     await deps.limiter.acquire();
     const params = generateBehaviorParams();
-    const results = await executeSeqWithCascade(deps, async (ctx) => {
+    const outcome = await executeSeqWithCascade(deps, async (ctx) => {
       const page = (await ctx.pages())[0] ?? (await ctx.newPage());
       const behavior = new HumanlikeBehavior(params, deps.config.humanlikeMode);
-      const r = await legacySearch(page, query, limit);
+      const r = await legacySearch(page, query, limit, { locale: deps.config.locale });
       if (deps.config.humanlikeMode !== 'off') {
         await behavior.simulateBrowsing(page, []).catch(() => {});
       }
@@ -138,11 +141,13 @@ export async function searchTool(
     const meta = {
       strategy: 'legacy-v0.4',
       stealth_mode: deps.cascade.mode,
+      dropped: outcome.dropped,
+      dropped_reasons: outcome.dropped_reasons,
     };
-    await deps.cache.set('search', cacheKey, { results, meta }, deps.config.cacheTtlSearchMs);
+    await deps.cache.set('search', cacheKey, { results: outcome.results, meta }, deps.config.cacheTtlSearchMs);
 
     return formatToolResponse(
-      { query, results, elapsed_ms: Date.now() - t0 },
+      { query, results: outcome.results, elapsed_ms: Date.now() - t0 },
       undefined,
       { ...meta, cache: 'miss' },
     );
@@ -176,7 +181,7 @@ export async function searchParallelTool(
   try {
     for (let i = 0; i < queries.length; i++) await deps.limiter.acquire();
     const results = await executePoolWithCascade(deps, async (pool) => {
-      return await pool.runMany(queries, limit);
+      return await pool.runMany(queries, limit, { locale: deps.config.locale });
     });
 
     return formatToolResponse(
@@ -190,12 +195,13 @@ export async function searchParallelTool(
 }
 
 export async function extractTool(
-  input: { url: string; max_chars?: number },
+  input: { url: string; max_chars?: number; mode?: ExtractMode },
   deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const url = input.url.trim();
   const maxChars = Math.min(Math.max(input.max_chars ?? 8_000, 200), 50_000);
+  const mode: ExtractMode = input.mode ?? 'full';
 
   if (!url) {
     return formatToolResponse(null, {
@@ -206,13 +212,13 @@ export async function extractTool(
   try {
     const initialMode: StealthMode = deps.cascade.mode;
     const pool = await deps.acquirePool(initialMode);
-    const result = await pool.extractOne(url, maxChars);
+    const result = await pool.extractOne(url, maxChars, mode);
     const failed = !!result.error && !result.content;
 
     if (failed) {
       return formatToolResponse(null, {
         code: 'EXTRACT_FAILED',
-        message: result.error || 'unknown extract failure',
+        message: typeof result.error === 'string' ? result.error : 'unknown extract failure',
         retryable: true,
         retry_after_ms: 1000,
       });
@@ -227,13 +233,15 @@ export async function extractTool(
 }
 
 export async function searchExtractTool(
-  input: { query: string; limit?: number; max_chars?: number },
+  input: { query: string; limit?: number; max_chars?: number; mode?: 'full' | 'abstract' },
   deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const query = input.query.trim();
   const limit = Math.min(Math.max(input.limit ?? 5, 1), 10);
-  const maxChars = Math.min(Math.max(input.max_chars ?? 8_000, 200), 20_000);
+  const mode: ExtractMode = input.mode ?? 'abstract';
+  const defaultMax = mode === 'abstract' ? 1_500 : 8_000;
+  const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 20_000);
 
   if (!query) {
     return formatToolResponse(null, {
@@ -252,13 +260,15 @@ export async function searchExtractTool(
   try {
     await deps.limiter.acquire();
     const data = await executePoolWithCascade(deps, async (pool) => {
-      const sr = await pool.searchOne(query, limit);
+      const sr = await pool.searchOne(query, limit, { locale: deps.config.locale });
       if (!sr.results.length) return { results: [], searchError: sr.error };
       const enriched = await Promise.all(sr.results.map(async (r) => {
-        const ex = await pool.extractOne(r.url, maxChars);
+        const ex = await pool.extractOne(r.url, maxChars, mode);
         return {
           title: r.title, url: r.url, description: r.description,
-          content: ex.content, excerpt: ex.excerpt, length: ex.length, error: ex.error,
+          content: ex.content, excerpt: ex.excerpt, length: ex.length,
+          is_pdf: ex.is_pdf, page_count: ex.page_count, extraction_quality: ex.extraction_quality,
+          error: typeof ex.error === 'string' ? ex.error : undefined,
         };
       }));
       return { results: enriched, searchError: undefined as string | undefined };

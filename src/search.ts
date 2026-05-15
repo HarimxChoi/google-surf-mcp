@@ -1,9 +1,11 @@
 import type { Page } from 'playwright';
-import type { SearchResult } from './types.js';
+import type { SearchResult, ResultClassification, ParserStrategy } from './types.js';
 import { isBlocked } from './browser.js';
-import { parseResults, type LegacyParseOutput } from './parse.js';
+import { STRATEGIES, parseResultsInBrowser } from './parse.js';
+import { verifyResultsGeometricInBrowser, aggregateConfidence } from './verify.js';
+import { scoreResult } from './score.js';
 
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const SELECT_ALL = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
 
@@ -14,11 +16,69 @@ export class CaptchaError extends Error {
   }
 }
 
-export async function search(page: Page, query: string, limit = 10): Promise<SearchResult[]> {
+const DROP_CLASSIFICATIONS: ReadonlySet<ResultClassification> = new Set<ResultClassification>([
+  'sponsored', 'knowledge_panel', 'related',
+]);
+
+const EARLY_EXIT_MIN_RESULTS = 5;
+const EARLY_EXIT_MIN_CONFIDENCE = 0.7;
+
+export interface SearchOptions {
+  locale?: string;
+}
+
+export interface SearchOutcome {
+  results: SearchResult[];
+  dropped: number;
+  dropped_reasons: ResultClassification[];
+}
+
+interface StrategyCandidate {
+  strategy: ParserStrategy;
+  results: SearchResult[];
+  blockIndices: number[];
+  h3Count: number;
+  verify: ReturnType<typeof verifyResultsGeometricInBrowser>;
+  conf: number;
+}
+
+async function evaluateStrategy(
+  page: Page,
+  strategy: ParserStrategy,
+  parseMax: number,
+): Promise<StrategyCandidate> {
+  const out = await page.evaluate(parseResultsInBrowser, {
+    strategy: {
+      blockSelector: strategy.blockSelector,
+      snippetSelector: strategy.snippetSelector,
+      adFilter: strategy.adFilter,
+    },
+    max: parseMax,
+  });
+  if (out.results.length === 0) {
+    return { strategy, results: [], blockIndices: [], h3Count: out.signals.h3Count, verify: [], conf: 0 };
+  }
+  const verify = await page.evaluate(verifyResultsGeometricInBrowser, {
+    blockSelector: strategy.blockSelector,
+  });
+  return {
+    strategy,
+    results: out.results,
+    blockIndices: out.blockIndices,
+    h3Count: out.signals.h3Count,
+    verify,
+    conf: aggregateConfidence(verify),
+  };
+}
+
+export async function search(
+  page: Page,
+  query: string,
+  limit = 10,
+  opts: SearchOptions = {},
+): Promise<SearchOutcome> {
   const url = page.url();
   const onResultsPage = url.includes('/search?');
-  // Exact match: /imghp, /finance/..., /preferences etc. lack the search
-  // textarea and would time out the click below.
   const onHome =
     url === 'https://www.google.com/' ||
     url === 'https://www.google.com';
@@ -43,7 +103,6 @@ export async function search(page: Page, query: string, limit = 10): Promise<Sea
   await sleep(rand(50, 110));
   await page.keyboard.press('Enter');
 
-  // inner 5+4+4=13s, within 30s outer
   let waitErr: Error | null = null;
   try {
     await page.waitForURL(/\/search\?/, { timeout: 5_000 });
@@ -55,18 +114,62 @@ export async function search(page: Page, query: string, limit = 10): Promise<Sea
 
   if (isBlocked(page.url())) throw new CaptchaError('after-search');
 
-  const out = (await page.evaluate(parseResults, limit)) as LegacyParseOutput;
+  return await pickAndScoreResults(page, limit, {
+    locale: opts.locale,
+    waitErr,
+  });
+}
 
-  // empty results: throw if we have a reason, otherwise return []
-  if (out.results.length === 0) {
-    if (waitErr) {
-      throw new Error(`search wait failed and no results: ${waitErr.message.slice(0, 120)}`);
+export interface PickOptions {
+  locale?: string;
+  waitErr?: Error | null;
+}
+
+export async function pickAndScoreResults(
+  page: Page,
+  limit: number,
+  opts: PickOptions = {},
+): Promise<SearchOutcome> {
+  const parseMax = Math.max(limit * 2, limit + 5);
+  const candidates: StrategyCandidate[] = [];
+  for (const strategy of STRATEGIES) {
+    const cand = await evaluateStrategy(page, strategy, parseMax);
+    candidates.push(cand);
+    if (cand.results.length >= EARLY_EXIT_MIN_RESULTS && cand.conf >= EARLY_EXIT_MIN_CONFIDENCE) {
+      break;
     }
-    // h3Count >= 5 is an arbitrary threshold; tune from prod data
-    if (out.h3Count >= 5) {
-      throw new Error(`parser stale: ${out.h3Count} h3 elements but 0 results extracted`);
-    }
-    // truly empty SERP, return []
   }
-  return out.results;
+
+  const best = candidates.reduce<StrategyCandidate>((a, b) => {
+    const score = (c: StrategyCandidate) => c.results.length * (1 + c.conf);
+    return score(b) > score(a) ? b : a;
+  }, candidates[0]);
+
+  if (best.results.length === 0) {
+    if (opts.waitErr) {
+      throw new Error(`search wait failed and no results: ${opts.waitErr.message.slice(0, 120)}`);
+    }
+    const maxH3 = candidates.reduce((m, c) => Math.max(m, c.h3Count), 0);
+    if (maxH3 >= 5) {
+      throw new Error(`parser stale: ${maxH3} h3 elements but 0 results extracted by any strategy`);
+    }
+    return { results: [], dropped: 0, dropped_reasons: [] };
+  }
+
+  const locale = opts.locale ?? 'en-US';
+  const results: SearchResult[] = [];
+  const droppedSet = new Set<ResultClassification>();
+  let droppedCount = 0;
+  for (let i = 0; i < best.results.length; i++) {
+    if (results.length >= limit) break;
+    const r = best.results[i];
+    const score = scoreResult(r, best.verify[best.blockIndices[i]], { locale });
+    if (DROP_CLASSIFICATIONS.has(score.classification)) {
+      droppedCount++;
+      droppedSet.add(score.classification);
+      continue;
+    }
+    results.push(r);
+  }
+  return { results, dropped: droppedCount, dropped_reasons: Array.from(droppedSet) };
 }

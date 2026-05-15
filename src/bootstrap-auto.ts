@@ -1,16 +1,32 @@
+import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked } from './browser.js';
 
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-async function bootstrapAuto() {
-  console.error(`profile: ${PROFILE_MAIN}`);
-  if (profileExists()) {
-    console.error('profile already exists, skipping');
-    return;
-  }
+let inFlight: Promise<void> | null = null;
 
-  console.error('opening Chrome (headed) for automated bootstrap...');
-  const ctx = await launch({ profileDir: PROFILE_MAIN, headless: false });
+export interface AutoBootstrapOptions {
+  headless?: boolean;
+  log?: (msg: string) => void;
+}
+
+export function autoBootstrap(opts: AutoBootstrapOptions = {}): Promise<void> {
+  if (inFlight) return inFlight;
+  if (profileExists()) return Promise.resolve();
+  inFlight = runOnce(opts).finally(() => { inFlight = null; });
+  return inFlight;
+}
+
+async function runOnce(opts: AutoBootstrapOptions): Promise<void> {
+  const headless = opts.headless ?? (process.env.SURF_HEADLESS !== 'false');
+  const log = opts.log ?? ((m) => console.error(m));
+  log(`[bootstrap] profile: ${PROFILE_MAIN}`);
+  log(`[bootstrap] no profile found, auto-warming (headless=${headless}, ~30s)...`);
+
+  const ctx = await launch({ profileDir: PROFILE_MAIN, headless });
+  let succeeded = false;
   try {
     const page = await getPage(ctx);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -29,15 +45,27 @@ async function bootstrapAuto() {
     if (isBlocked(page.url())) throw new Error('blocked after search');
 
     await sleep(2000);
-    console.error('bootstrap-auto: search succeeded, profile warmed');
+    succeeded = true;
+    log('[bootstrap] profile warmed successfully');
   } finally {
-    await ctx.close();
+    await ctx.close().catch(() => {});
+    if (!succeeded) {
+      await rm(PROFILE_MAIN, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
-bootstrapAuto()
-  .then(() => process.exit(0))
-  .catch(e => {
-    console.error('failed:', e.message);
-    process.exit(1);
-  });
+function isInvokedDirectly(): boolean {
+  if (typeof process.argv[1] !== 'string') return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+}
+
+if (isInvokedDirectly()) {
+  autoBootstrap({ headless: true })
+    .then(() => process.exit(0))
+    .catch((e: Error) => { console.error('[bootstrap] failed:', e.message); process.exit(1); });
+}

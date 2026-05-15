@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "MCP server for Google search via warm Chrome profile. No API key.",
   "type": "module",
@@ -52,6 +52,7 @@
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "turndown": "^7.2.4",
+    "unpdf": "^1.6.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
