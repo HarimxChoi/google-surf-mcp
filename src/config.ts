@@ -24,6 +24,9 @@ export interface Config {
   insecureTls: boolean;
   noSandbox: boolean;
   cascadeDisabled: boolean;
+
+  telemetryEnabled: boolean;
+  telemetryRoot: string;
 }
 
 function parseBool(v: string | undefined, defaultVal: boolean): boolean {
@@ -88,6 +91,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     insecureTls: parseBool(env.SURF_INSECURE_TLS, cloudMode),
     noSandbox: parseBool(env.SURF_NO_SANDBOX, cloudMode),
     cascadeDisabled: parseBool(env.SURF_CASCADE_DISABLED, false),
+
+    telemetryEnabled: parseBool(env.SURF_TELEMETRY, false),
+    telemetryRoot: env.SURF_TELEMETRY_ROOT || join(profileRoot, 'telemetry'),
   };
 }
 
