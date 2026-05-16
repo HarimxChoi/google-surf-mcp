@@ -1,8 +1,10 @@
 import type { SearchResult, ResultScore, ResultClassification, GeometricVerification } from './types.js';
 
+// "Ad/Ads" must look like a SERP label: standalone, or at the start/end of
+// the field, or before a typographic separator. Skips "Google Ads API docs".
 const AD_MARKERS_BY_LOCALE: Record<string, RegExp> = {
-  en: /\b(sponsored|ads?)\b/i,
-  ko: /광고|스폰서/, // i18n-data
+  en: /\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-—]|\s*$)/i,
+  ko: /광고|스폰서/,
   ja: /広告|スポンサー/,
   fr: /(sponsorisé|annonce)/i,
   de: /(anzeige|gesponsert)/i,

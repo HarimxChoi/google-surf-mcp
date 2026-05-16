@@ -1,28 +1,28 @@
 #!/usr/bin/env node
-import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { launch, getPage, PROFILE_MAIN, profileExists, clearProfileLocks } from './browser.js';
 import { search, CaptchaError } from './search.js';
-import { SearchPool } from './pool.js';
+import { SearchPool, type PoolSearchResult } from './pool.js';
+import { extract, type ExtractMode } from './extract.js';
 import { recoverFromCaptcha } from './captchaRecover.js';
+import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
 import { withTimeout } from './timeout.js';
 import {
   searchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
-  initDeps, type Deps,
+  initDeps, type Deps, type PoolHandle,
 } from './agent.js';
 import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
+import { PKG_NAME, VERSION } from './version.js';
 
-const require = createRequire(import.meta.url);
-const pkg = require('../package.json') as { name: string; version: string };
-const NAME = 'google-surf-mcp';
-const VERSION = pkg.version;
+const NAME = PKG_NAME;
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXTRACT_BATCH_TIMEOUT_MS = 60_000;
 const POOL_SIZE = 4;
+const POOL_FALLBACK_THRESHOLD = 3;
 
 function parseIdleMs(): number {
   const raw = process.env.SURF_IDLE_CLOSE_MS;
@@ -95,6 +95,12 @@ let pool: SearchPool | null = null;
 let poolPromise: Promise<SearchPool> | null = null;
 let poolClosing: Promise<void> | null = null;
 let poolMode: StealthMode | null = null;
+let poolWarmFailures = 0;
+let poolFallbackMode = false;
+
+export function getPoolHealth(): { warmFailures: number; fallback: boolean } {
+  return { warmFailures: poolWarmFailures, fallback: poolFallbackMode };
+}
 
 function ensurePool(mode: StealthMode = 'off'): Promise<SearchPool> {
   if (poolClosing) return poolClosing.then(() => ensurePool(mode));
@@ -213,39 +219,97 @@ function buildDeps(): Deps {
     return await trackSeq(() => getSequentialCtx(mode));
   };
 
-  const acquirePool = async (mode: StealthMode) => {
-    const p = await trackPool(() => ensurePool(mode));
+  const seqBackedHandle = (mode: StealthMode): PoolHandle => {
+    const seqSearchOne = async (
+      query: string, limit: number, opts?: { locale?: string },
+    ): Promise<PoolSearchResult> => {
+      return await trackSeq(async () => {
+        const ctx = await getSequentialCtx(mode);
+        const page = await getPage(ctx);
+        try {
+          const outcome = await search(page, query, limit, opts);
+          return {
+            query, results: outcome.results,
+            dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons,
+          };
+        } catch (e) {
+          if (e instanceof CaptchaError) throw e;
+          return { query, results: [], error: (e as Error).message };
+        }
+      });
+    };
     return {
-      runMany: (queries: string[], limit: number, opts?: { locale?: string }) =>
-        trackPool(() => withTimeout(
-          p.runMany(queries, limit, opts),
-          REQUEST_TIMEOUT_MS * 2,
-          'search_parallel',
-          resetPool,
-        )),
-      extractOne: (url: string, maxChars: number, extractMode?: 'full' | 'abstract' | 'metadata') =>
-        trackPool(() => withTimeout(
-          p.extractOne(url, maxChars, extractMode),
-          REQUEST_TIMEOUT_MS,
-          'extract',
-        )),
-      searchOne: (query: string, limit: number, opts?: { locale?: string }) =>
-        trackPool(() => withTimeout(
-          p.searchOne(query, limit, opts),
-          REQUEST_TIMEOUT_MS,
-          'search_extract:search',
-          resetPool,
-        )),
+      runMany: async (queries, limit, opts) => {
+        const out: PoolSearchResult[] = [];
+        for (const q of queries) out.push(await seqSearchOne(q, limit, opts));
+        return out;
+      },
+      searchOne: seqSearchOne,
+      extractOne: async (url, maxChars, extractMode?: ExtractMode) => {
+        return await trackSeq(async () => {
+          const ctx = await getSequentialCtx(mode);
+          return await extract(ctx, url, { maxChars, mode: extractMode });
+        });
+      },
     };
   };
 
-  // Tier-3 in local mode: release contexts then open headed Chrome for human.
+  const poolBackedHandle = (p: SearchPool): PoolHandle => ({
+    runMany: (queries, limit, opts) =>
+      trackPool(() => withTimeout(
+        p.runMany(queries, limit, opts),
+        REQUEST_TIMEOUT_MS * 2,
+        'search_parallel',
+        resetPool,
+      )),
+    extractOne: (url, maxChars, extractMode) =>
+      trackPool(() => withTimeout(
+        p.extractOne(url, maxChars, extractMode),
+        REQUEST_TIMEOUT_MS,
+        'extract',
+      )),
+    searchOne: (query, limit, opts) =>
+      trackPool(() => withTimeout(
+        p.searchOne(query, limit, opts),
+        REQUEST_TIMEOUT_MS,
+        'search_extract:search',
+        resetPool,
+      )),
+  });
+
+  const acquirePool = async (mode: StealthMode): Promise<PoolHandle> => {
+    if (poolFallbackMode) return seqBackedHandle(mode);
+    try {
+      const p = await trackPool(() => ensurePool(mode));
+      poolWarmFailures = 0;
+      return poolBackedHandle(p);
+    } catch (e) {
+      poolWarmFailures++;
+      if (poolWarmFailures >= POOL_FALLBACK_THRESHOLD) {
+        poolFallbackMode = true;
+        console.error(
+          `[google-surf-mcp] pool warm failed ${poolWarmFailures}× — switching to single-context fallback`,
+        );
+        return seqBackedHandle(mode);
+      }
+      throw e;
+    }
+  };
+
+  const captchaMode = captchaModeFromConfig({
+    cloudMode: baseDeps.config.cloudMode,
+    headless: baseDeps.config.headless,
+    remoteDebug: baseDeps.config.remoteDebug,
+  });
   const recoverHuman = async () => {
-    await Promise.all([
-      resetPool().catch(() => {}),
-      closeSequential().catch(() => {}),
-    ]);
-    await recoverFromCaptcha();
+    // remote_debug keeps the existing Chromium alive for DevTools attach.
+    if (captchaMode === 'notify_spawn' || captchaMode === 'always_headed') {
+      await Promise.all([
+        resetPool().catch(() => {}),
+        closeSequential().catch(() => {}),
+      ]);
+    }
+    await recoverFromCaptcha({ mode: captchaMode });
   };
 
   return {

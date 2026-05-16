@@ -10,6 +10,7 @@ import { formatToolResponse, toErrorInfo } from './response.js';
 import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
 } from './cascade.js';
+import { VERSION } from './version.js';
 
 import type { ExtractMode, ExtractResult } from './extract.js';
 import type { PoolSearchResult } from './pool.js';
@@ -297,7 +298,7 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
     extract: await deps.cache.size('extract'),
   };
   return formatToolResponse({
-    version: '0.4.5',
+    version: VERSION,
     cascade: {
       mode: deps.cascade.mode,
       captchaCountInMode: deps.cascade.captchaCountInMode,

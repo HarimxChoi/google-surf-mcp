@@ -19,6 +19,7 @@ export interface Config {
   // Composite cloud flag: enables insecureTls + noSandbox + pool disabled +
   // tier-3 fail-fast. Cascade itself runs unchanged in cloud mode.
   cloudMode: boolean;
+  remoteDebug: boolean;
   useStealth: boolean;
   insecureTls: boolean;
   noSandbox: boolean;
@@ -82,6 +83,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimitPerMin: parseInt0(env.SURF_RATE_LIMIT_PER_MIN, 10, 1, 600),
 
     cloudMode,
+    remoteDebug: parseBool(env.SURF_REMOTE_DEBUG, false),
     useStealth: parseBool(env.SURF_USE_STEALTH, true),
     insecureTls: parseBool(env.SURF_INSECURE_TLS, cloudMode),
     noSandbox: parseBool(env.SURF_NO_SANDBOX, cloudMode),

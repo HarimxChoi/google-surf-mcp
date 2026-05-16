@@ -89,6 +89,12 @@ describe('scoreResult', () => {
     expect(score.classification).toBe('sponsored');
   });
 
+  it('does not match "Ads" as a substring outside marker context', () => {
+    const r = { ...baseResult, title: 'Google Ads API docs' };
+    const score = scoreResult(r, goodGeometry, { locale: 'en-US' });
+    expect(score.classification).toBe('organic');
+  });
+
   it('handles missing geometric (textual-only) conservatively', () => {
     const score = scoreResult(baseResult, undefined, { locale: 'en-US' });
     expect(score.classification).toBe('organic');
@@ -139,7 +145,14 @@ describe('getAdMarker', () => {
     expect(getAdMarker('ko-KR').test('광고')).toBe(true);
     expect(getAdMarker('ja-JP').test('広告')).toBe(true);
     expect(getAdMarker('en-US').test('Sponsored')).toBe(true);
+    expect(getAdMarker('en-US').test('Sponsored - Brand')).toBe(true);
+    expect(getAdMarker('en-US').test('Ad · brand.com')).toBe(true);
+    expect(getAdMarker('en-US').test('Ad')).toBe(true);
+    expect(getAdMarker('en-US').test('Ads')).toBe(true);
+    expect(getAdMarker('en-US').test('advertisement here')).toBe(true);
     expect(getAdMarker('en-US').test('normal text')).toBe(false);
+    expect(getAdMarker('en-US').test('Google Ads API docs')).toBe(false);
+    expect(getAdMarker('en-US').test('Ads Manager')).toBe(false);
   });
 
   it('falls back to en for unknown locale', () => {

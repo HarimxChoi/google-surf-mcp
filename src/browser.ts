@@ -70,6 +70,7 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
   const useStealth = opts.stealth ?? readBoolEnv('SURF_USE_STEALTH', true);
   const insecureTls = opts.insecureTls ?? readBoolEnv('SURF_INSECURE_TLS', cloudMode);
   const noSandbox = opts.noSandbox ?? readBoolEnv('SURF_NO_SANDBOX', cloudMode);
+  const remoteDebug = readBoolEnv('SURF_REMOTE_DEBUG', false);
 
   const effectiveHeadless = opts.headless !== undefined
     ? opts.headless
@@ -88,6 +89,8 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ...(noSandbox ? ['--no-sandbox'] : []),
     ...(insecureTls ? ['--ignore-certificate-errors'] : []),
     ...(cloudMode ? ['--disable-dev-shm-usage'] : []), // cloud /dev/shm too small for Chromium
+    // port=0: kernel-assigned, written to <profileDir>/DevToolsActivePort.
+    ...(remoteDebug ? ['--remote-debugging-port=0', '--remote-debugging-address=0.0.0.0'] : []),
   ];
 
   const ctx = await driver.launchPersistentContext(profileFor(opts.profileDir), {

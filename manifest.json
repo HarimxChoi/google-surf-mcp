@@ -2,16 +2,30 @@
   "manifest_version": "0.3",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "description": "Free Google search MCP that actually works — no API key, no proxies, no solvers. Search + extraction in one MCP.",
   "long_description": "Free Google search MCP that actually works — no API key, no proxies, no solvers (most free Google search MCPs fail in practice; this one drives a warm Chrome profile via Playwright + stealth). Search + page extraction in one MCP: `search_extract` returns SERP results already enriched with article bodies — replaces the usual search-MCP + fetch-MCP combo. CAPTCHA opens a visible Chrome window for a human to solve (shared-IP reputation protection); `SURF_CLOUD_MODE=true` for headless/serverless fail-fast.",
-  "author": { "name": "harimxchoi", "url": "https://github.com/HarimxChoi" },
+  "author": {
+    "name": "harimxchoi",
+    "url": "https://github.com/HarimxChoi"
+  },
   "homepage": "https://github.com/HarimxChoi/google-surf-mcp#readme",
   "documentation": "https://github.com/HarimxChoi/google-surf-mcp#readme",
   "support": "https://github.com/HarimxChoi/google-surf-mcp/issues",
-  "repository": { "type": "git", "url": "https://github.com/HarimxChoi/google-surf-mcp.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarimxChoi/google-surf-mcp.git"
+  },
   "license": "MIT",
-  "keywords": ["google", "google-search", "search", "web-search", "serp", "playwright", "headless-browser"],
+  "keywords": [
+    "google",
+    "google-search",
+    "search",
+    "web-search",
+    "serp",
+    "playwright",
+    "headless-browser"
+  ],
   "icons": {
     "default": "https://raw.githubusercontent.com/HarimxChoi/google-surf-mcp/main/assets/icon-512.png"
   },
@@ -20,13 +34,17 @@
     "entry_point": "build/index.js",
     "mcp_config": {
       "command": "npx",
-      "args": ["-y", "google-surf-mcp@0.4.6"],
+      "args": [
+        "-y",
+        "google-surf-mcp@0.5.0"
+      ],
       "env": {
         "CHROME_PATH": "${user_config.chrome_path}",
         "SURF_PROFILE_ROOT": "${user_config.profile_root}",
         "SURF_LOCALE": "${user_config.locale}",
         "SURF_TZ": "${user_config.timezone}",
         "SURF_HEADLESS": "${user_config.headless}",
+        "SURF_REMOTE_DEBUG": "${user_config.remote_debug}",
         "SURF_CLOUD_MODE": "${user_config.cloud_mode}",
         "SURF_ALLOW_PRIVATE": "${user_config.allow_private}"
       }
@@ -34,23 +52,90 @@
   },
   "tools_generated": false,
   "tools": [
-    { "name": "search", "description": "Single Google search -> title/url/snippet per result. Results cached 24h. First call ~4s, then ~2s. On CAPTCHA opens visible Chrome for human solving; SURF_CLOUD_MODE=true for fail-fast." },
-    { "name": "search_parallel", "description": "Run 2-10 Google searches concurrently. Rate-limited (~10/min). Disabled in cloud mode." },
-    { "name": "extract", "description": "Fetch one public URL -> clean article text via Mozilla Readability. Best-effort; failures return errorInfo instead of throwing." },
-    { "name": "search_extract", "description": "Google search + parallel extract of top results -- SERP enriched with article text. Slower (~5-15s) and far more tokens than search alone. Disabled in cloud mode." },
-    { "name": "health", "description": "MCP server status: cascade mode, rate-limiter usage, cache size, config. Call when searches start failing." }
+    {
+      "name": "search",
+      "description": "Single Google search -> title/url/snippet per result. Results cached 24h. First call ~4s, then ~2s. On CAPTCHA opens visible Chrome for human solving; SURF_CLOUD_MODE=true for fail-fast."
+    },
+    {
+      "name": "search_parallel",
+      "description": "Run 2-10 Google searches concurrently. Rate-limited (~10/min). Disabled in cloud mode."
+    },
+    {
+      "name": "extract",
+      "description": "Fetch one public URL -> clean article text via Mozilla Readability. Best-effort; failures return errorInfo instead of throwing."
+    },
+    {
+      "name": "search_extract",
+      "description": "Google search + parallel extract of top results -- SERP enriched with article text. Slower (~5-15s) and far more tokens than search alone. Disabled in cloud mode."
+    },
+    {
+      "name": "health",
+      "description": "MCP server status: cascade mode, rate-limiter usage, cache size, config. Call when searches start failing."
+    }
   ],
   "user_config": {
-    "chrome_path":   { "type": "file",      "title": "Chrome binary path", "description": "Absolute path to the Chrome/Chromium binary. Auto-detected when blank.", "required": false },
-    "profile_root":  { "type": "directory", "title": "Profile directory",  "description": "Directory for the warm Chrome profile. Defaults to ~/.google-surf-mcp.", "required": false },
-    "locale":        { "type": "string",    "title": "Browser locale",     "description": "e.g. en-US.", "default": "en-US", "required": false },
-    "timezone":      { "type": "string",    "title": "Timezone",           "description": "IANA timezone, e.g. America/New_York. Defaults to system tz.", "required": false },
-    "headless":      { "type": "boolean",   "title": "Headless",           "description": "Run Chrome headless. CAPTCHA recovery always runs visible regardless.", "default": true, "required": false },
-    "cloud_mode":    { "type": "boolean",   "title": "Cloud mode",         "description": "Headless/serverless: insecure TLS + --no-sandbox + --disable-dev-shm-usage + pool disabled + CAPTCHA fail-fast.", "default": false, "required": false },
-    "allow_private": { "type": "boolean",   "title": "Allow private addresses", "description": "Allow extract on private/loopback addresses. Default blocks them (SSRF guard).", "default": false, "required": false }
+    "chrome_path": {
+      "type": "file",
+      "title": "Chrome binary path",
+      "description": "Absolute path to the Chrome/Chromium binary. Auto-detected when blank.",
+      "required": false
+    },
+    "profile_root": {
+      "type": "directory",
+      "title": "Profile directory",
+      "description": "Directory for the warm Chrome profile. Defaults to ~/.google-surf-mcp.",
+      "required": false
+    },
+    "locale": {
+      "type": "string",
+      "title": "Browser locale",
+      "description": "e.g. en-US.",
+      "default": "en-US",
+      "required": false
+    },
+    "timezone": {
+      "type": "string",
+      "title": "Timezone",
+      "description": "IANA timezone, e.g. America/New_York. Defaults to system tz.",
+      "required": false
+    },
+    "headless": {
+      "type": "boolean",
+      "title": "Headless",
+      "description": "Run Chrome headless. CAPTCHA recovery always runs visible regardless.",
+      "default": true,
+      "required": false
+    },
+    "remote_debug": {
+      "type": "boolean",
+      "title": "Remote DevTools debug",
+      "description": "Headless server with remote DevTools. CAPTCHA emits the port and throws; attach chrome://inspect from a local Chrome to solve.",
+      "default": false,
+      "required": false
+    },
+    "cloud_mode": {
+      "type": "boolean",
+      "title": "Cloud mode",
+      "description": "Headless/serverless: insecure TLS + --no-sandbox + --disable-dev-shm-usage + pool disabled + CAPTCHA fail-fast.",
+      "default": false,
+      "required": false
+    },
+    "allow_private": {
+      "type": "boolean",
+      "title": "Allow private addresses",
+      "description": "Allow extract on private/loopback addresses. Default blocks them (SSRF guard).",
+      "default": false,
+      "required": false
+    }
   },
   "compatibility": {
-    "platforms": ["darwin", "win32", "linux"],
-    "runtimes": { "node": ">=18.0.0" }
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
   }
 }

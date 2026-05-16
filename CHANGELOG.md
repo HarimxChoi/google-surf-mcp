@@ -1,5 +1,83 @@
 # Changelog
 
+## [0.5.0]
+
+### Added
+
+#### CAPTCHA recovery — 4 env-based modes
+Single mode picked automatically from environment:
+- `notify_spawn` (default): OS notification fires (osascript / powershell / notify-send), then headed Chrome opens. Works on macOS, Windows, Linux without `node-notifier`.
+- `always_headed` (`SURF_HEADLESS=false`): headed Chrome opens, no notification (user is already watching).
+- `remote_debug` (`SURF_REMOTE_DEBUG=true`): Chromium launches with `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1`. CAPTCHA emits the active DevTools port (read from each profile's `DevToolsActivePort` file) and throws so the caller can attach `chrome://inspect` over an SSH tunnel. Loopback-only by default.
+- `cloud_fail_fast` (`SURF_CLOUD_MODE=true`): throws `CAPTCHA_REQUIRED` immediately.
+
+#### Pool fallback
+`SearchPool.warm()` failure no longer hard-fails the server. After 3 consecutive warm failures (`POOL_FALLBACK_THRESHOLD`), `acquirePool` returns a sequential-context-backed handle that serves `runMany` / `searchOne` / `extractOne` from the single ctx instead of the worker pool. `getPoolHealth()` exposes `warmFailures` and `fallback`.
+
+#### `withBackoff` utility (src/backoff.ts)
+Minimal exponential backoff: `delay = initialMs * factor^attempt`. No jitter (full backoff with AWS jitter is planned for a follow-up). Options: `initialMs`, `maxAttempts`, `factor`, `isRetryable`, `onRetry`, `sleep` (test injection). 7 unit tests.
+
+#### Version single-source-of-truth
+- **src/version.ts**: exports `VERSION` and `PKG_NAME` from `package.json` via `createRequire`.
+- **scripts/sync-versions.mjs**: `prebuild` hook syncs `package.json` version into `server.json` and `manifest.json` (including the `npx -y google-surf-mcp@<version>` arg).
+- `src/agent.ts` `healthTool` no longer hardcodes the version string.
+
+### Changed
+
+#### English ad-marker regex
+Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-—]|\s*$)`. `Sponsored` and `advertisement` match anywhere; standalone `Ad`/`Ads` matches only at start/end-of-field or before a typographic separator. Avoids false-positive sponsored classification for organic titles like "Google Ads API docs" or "Ads Manager", while still catching SERP labels like `Ad · brand.com` or just `Ad`.
+
+#### `SURF_REMOTE_DEBUG` exposed in manifest
+`manifest.json` `user_config` adds a `remote_debug` boolean and maps it to `SURF_REMOTE_DEBUG`, so manifest-based installs can enable the headless-server DevTools recovery flow.
+
+#### CAPTCHA recovery context lifecycle
+`recoverHuman` only releases pool + sequential ctx for `notify_spawn` and `always_headed` modes. `remote_debug` keeps the existing Chromium alive so the user can attach DevTools and solve in-place.
+
+### Fixed
+
+- **PDF resource leak**: `extractPdfTiered` now wraps text extraction in `try/finally` + `pdf.destroy()` so PDF.js workers and text-layer state are released even on parse error.
+
+### Removed
+
+- `scripts/check-no-korean.sh` + `.githooks/pre-commit` + `package.json` `lint:nokr` script. The hook fired on staged Korean text in `src/*.ts`; English-only source policy now enforced by review only.
+
+### Tests
+- 238 passing (was 223). New: `withBackoff` (7), `captchaModeFromConfig` (4), `recoverFromCaptcha` modes (4).
+
+## [0.4.7]
+
+### Added
+
+#### Tiered PDF extraction (`unpdf`)
+- **src/extract-pdf.ts**: `extractPdfTiered(buf, mode, maxChars)` returns `full_text`, `abstract` (PDF page 1 text content), or `metadata_only` (page count). Detects PDFs via `%PDF` magic bytes (`isPdfMagic`) or `Content-Type: application/pdf` (`isPdfContentType`).
+- **src/extract-meta.ts**: HTML meta-tag helpers — `findCitationPdfUrl`, `findAbstractFromMeta` (citation_abstract → dc.description → description → og:description), `findTitle`, `domainPdfTransform` (openreview, biorxiv/medrxiv, nature), `findPmcUrlFromPubmed`.
+- **src/extract.ts**: new `discoverViaFetch` runs before Playwright. PDF magic / Content-Type → tiered PDF extract; `mode='abstract'` HTML → meta description; otherwise tries `findCitationPdfUrl` + `domainPdfTransform` candidates; PubMed → PMC chain. Skips Playwright for academic PDFs entirely.
+- Coverage: arxiv, biorxiv, Nature, OpenReview, NeurIPS, JMLR, PMLR, Springer, PubMed (via PMC).
+
+#### Multi-strategy SERP wire-up
+The `STRATEGIES` array, geometric verification, and score-based classification from v0.4.5 are now wired into the live search path (previously only used by the self-healing pipeline).
+- **src/search.ts**: `pickAndScoreResults` iterates `STRATEGIES`, evaluates each with `parseResultsInBrowser` + `verifyResultsGeometricInBrowser`, computes `aggregateConfidence`, early-exits when ≥5 results & ≥0.7 confidence, picks best-scored otherwise. `DROP_CLASSIFICATIONS` set drops `sponsored | knowledge_panel | related`. Returns `{ results, dropped, dropped_reasons }`.
+- **src/parse.ts**: `parseResultsInBrowser` now returns `blockIndices` so filtered results align with their verify entries when ads precede organics.
+- Search responses now include `dropped` count + `dropped_reasons` array in meta. `extract` and `search_extract` responses include `is_pdf`, `page_count`, `extraction_quality`.
+
+#### `extract` mode parameter
+- `extract(url, max_chars?, mode?)`: `full` (default, whole article), `abstract` (~1500 chars triage), `metadata` (PDF page count).
+- `search_extract(query, limit?, max_chars?, mode?)`: `abstract` is the new default (~1500 chars per result, ~80% fewer tokens than full), `full` for whole bodies. Default `max_chars` adjusts to mode (1500 for abstract, 8000 for full).
+
+#### SSRF hardening (extract path)
+- **`plainFetch`** (src/extract.ts): manual redirect handling with `MAX_REDIRECTS=5`, `MAX_FETCH_BYTES=25 * 1024 * 1024` cap (bounded reader), `AbortController` timeout. Each hop runs `checkUrlAsync` and throws `SsrfBlockedError` on private addresses or redirect-limit exhaustion.
+- Playwright `page.route('**/*', ...)` now blocks navigation requests to private addresses with `route.abort('blockedbyclient')`, so HTML fallback also enforces SSRF.
+
+#### Auto-bootstrap on first call
+- **src/bootstrap-auto.ts**: idempotent `autoBootstrap({headless, log})` with single in-flight Promise, profile cleanup on failure, direct-invoke detection. `npm run bootstrap` no longer required for the npx-only install path.
+- **src/index.ts**: `ensureProfileReady` triggers `autoBootstrap` on first tool call (cloud mode requires a pre-mounted profile).
+
+### Changed
+- `extract()` accepts `ExtractOptions` (`{maxChars, mode, navTimeoutMs, fence}`); legacy `(url, maxChars)` signature kept for back-compat.
+
+### Tests
+- 223 passing.
+
 ## [0.4.6]
 
 ### Fixed
