@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.5.1]
+
+### Added
+
+#### Telemetry module (src/telemetry.ts)
+Opt-in jsonl event logging designed as the input feed for the self-healing pipeline. Off by default; enabled via `SURF_TELEMETRY=true`.
+
+- `Telemetry` class: `record(type, data)` (never throws), `query({type?, sinceDays?})`, `percentile(type, field, p)`, `movingAverage(type, field)`, `ewma(type, field, {alpha?})`, `size()`.
+- Five event types: `search.outcome`, `parse.stale`, `cache.hit`, `cache.miss`, `tool.error`.
+- UTC-dated jsonl files: `{telemetryRoot}/YYYY-MM-DD.jsonl`. Rotation derived from event timestamp.
+- Rolling-window queries: `sinceDays: 1` means `now - 86_400_000`, not last calendar day.
+- 4KB byte-guard per line stays within POSIX atomic-append bounds so the worker pool's concurrent writers don't interleave. Oversized lines are replaced with `{ _truncated: true, _originalType }`.
+- Corrupted jsonl lines (partial write, etc.) are skipped during `query()` with a stderr warning; one bad record cannot poison the read.
+- Aggregates return `null` when no valid numeric data exists, distinguishing "no data" from "value is zero" for downstream healing decisions.
+- EWMA default `alpha=0.2`. Order-independent: events sorted oldest→newest before reduction.
+- DI'd `now()` and `maxLineBytes` options for deterministic tests.
+#### Telemetry wire-up (src/agent.ts)
+- `Deps.tel: Telemetry` added; `initDeps` constructs it via `getTelemetry`.
+- `searchTool` records `cache.hit` / `cache.miss` and `search.outcome` (with `resultsLen`, `droppedCount`, `elapsedMs`, `stealthMode`).
+- `searchParallelTool` records one `search.outcome` per result.
+- `searchExtractTool` records `search.outcome` for the SERP portion.
+- `extractTool` records `tool.error` when `EXTRACT_FAILED` is returned without an exception.
+- All `catch` paths funnel through a new `recordToolError(deps, tool, e)` helper that records `tool.error` and, when the error's `ErrorCode` resolves to `PARSER_STALE`, additionally records `parse.stale`. h3 count is extracted best-effort from the error message regex; a structured signal can replace it once `search.ts` adopts typed errors.
+#### healthTool telemetry stats
+`healthTool` response now includes `telemetry: { enabled, files, events }`. When disabled, returns zero counts without touching disk.
+
+#### Env vars
+- `SURF_TELEMETRY` (default `false`): master opt-in flag.
+- `SURF_TELEMETRY_ROOT` (default `{profileRoot}/telemetry`): jsonl storage directory.
+### Changed
+- `src/config.ts` `Config` gains `telemetryEnabled` and `telemetryRoot` fields, following the existing `cacheRoot` pattern.
+### Tests
+- 261 passing (was 238). New: `Telemetry` (23) covering opt-in no-op, UTC rotation, circular-data resilience, byte-guard truncation, sinceDays rolling windows, corrupted-line skip, percentile / movingAverage / ewma on numeric fields (null on empty, ignore non-numeric), and `size()` accounting.
+### Notes
+- The self-healing trigger logic — consuming telemetry data to decide when to invoke `heal/synthesis` + `heal/llm` — is intentionally left out of this PR.
+
 ## [0.5.0]
 
 ### Added
