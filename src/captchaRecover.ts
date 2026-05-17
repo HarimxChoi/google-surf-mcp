@@ -58,6 +58,18 @@ export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Pr
       const page = await getPage(ctx);
       await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
       try { await (page as { bringToFront?: () => Promise<void> }).bringToFront?.(); } catch {}
+      // headed often isn't served /sorry/ even when headless was; auto-search to land on /search?
+      if (!isBlocked(page.url())) {
+        try {
+          await sleep(800);
+          const sb = page.locator('textarea[name="q"], input[name="q"]').first();
+          await sb.click();
+          await sleep(200);
+          await page.keyboard.type('hello world', { delay: 60 });
+          await sleep(300);
+          await page.keyboard.press('Enter');
+        } catch { /* fall through to poll — user can solve manually */ }
+      }
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
         const u = page.url();
