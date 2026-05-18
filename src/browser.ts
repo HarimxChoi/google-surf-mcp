@@ -20,10 +20,18 @@ export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
 export const PROFILE_SEED = resolve(PROFILE_ROOT, 'seed');
 export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${i}`);
 
-function detectChrome(): string {
+export function detectChrome(): string {
   if (process.env.CHROME_PATH) {
     if (existsSync(process.env.CHROME_PATH)) return process.env.CHROME_PATH;
     throw new Error(`CHROME_PATH set but not found: ${process.env.CHROME_PATH}`);
+  }
+  // Bundled chromium first: system Chrome forwards args via Singleton IPC + exits 21 on Windows.
+  try {
+    const bundled = chromiumBare.executablePath();
+    if (bundled && existsSync(bundled)) return bundled;
+    console.error('[google-surf] bundled chromium path missing, falling back to system Chrome');
+  } catch (e) {
+    console.error('[google-surf] playwright browsers not installed, falling back to system Chrome:', (e as Error).message);
   }
   const candidates: Record<string, string[]> = {
     win32: [
@@ -42,7 +50,7 @@ function detectChrome(): string {
     ],
   };
   for (const p of candidates[platform()] || []) if (existsSync(p)) return p;
-  throw new Error('Chrome not found. Install Chrome or set CHROME_PATH env.');
+  throw new Error('Chrome not found. Run `npx playwright install chromium`, install Chrome, or set CHROME_PATH env.');
 }
 
 const SYSTEM_TZ = (() => {
@@ -132,8 +140,7 @@ export async function clearProfileLocks(profileDir: string): Promise<void> {
   }
 }
 
-// Skipped during seed snapshot: Chromium holds Windows mandatory locks on
-// these while `main` is live, breaking fs.cp with EBUSY.
+// Chromium holds Windows locks on these while main is live; skip to avoid EBUSY.
 const LOCKED_BASENAMES = new Set([
   'SingletonLock', 'SingletonCookie', 'SingletonSocket',
   'Cookies', 'Cookies-journal',

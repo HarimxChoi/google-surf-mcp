@@ -1,6 +1,6 @@
-import { existsSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+export { detectChrome as detectChromePath } from './browser.js';
 
 export interface Config {
   chromePath?: string;
@@ -91,25 +91,3 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-export function detectChromePath(): string {
-  const candidates: Record<string, string[]> = {
-    win32: [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    ],
-    darwin: [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    ],
-    linux: [
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/snap/bin/chromium',
-    ],
-  };
-  for (const p of candidates[platform()] || []) {
-    if (existsSync(p)) return p;
-  }
-  throw new Error('Chrome not found. Install Chrome or set CHROME_PATH env.');
-}
