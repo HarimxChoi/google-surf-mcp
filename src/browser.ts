@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { rm, cp } from 'node:fs/promises';
 import { platform, homedir } from 'node:os';
-import { resolve, join } from 'node:path';
+import { resolve, join, basename } from 'node:path';
 import { chromium as chromiumBare } from 'playwright';
 import { chromium as chromiumExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -17,6 +17,7 @@ function ensureStealth() {
 
 const PROFILE_ROOT = process.env.SURF_PROFILE_ROOT || join(homedir(), '.google-surf-mcp');
 export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
+export const PROFILE_SEED = resolve(PROFILE_ROOT, 'seed');
 export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${i}`);
 
 function detectChrome(): string {
@@ -131,10 +132,67 @@ export async function clearProfileLocks(profileDir: string): Promise<void> {
   }
 }
 
+// Skipped during seed snapshot: Chromium holds Windows mandatory locks on
+// these while `main` is live, breaking fs.cp with EBUSY.
+const LOCKED_BASENAMES = new Set([
+  'SingletonLock', 'SingletonCookie', 'SingletonSocket',
+  'Cookies', 'Cookies-journal',
+  'Login Data', 'Login Data-journal',
+  'Login Data For Account', 'Login Data For Account-journal',
+  'Web Data', 'Web Data-journal',
+  'History', 'History-journal',
+  'Top Sites', 'Top Sites-journal',
+  'Favicons', 'Favicons-journal',
+  'Shortcuts', 'Shortcuts-journal',
+  'Network Persistent State', 'TransportSecurity', 'ParentToken',
+  'Sessions', 'Session Storage', 'Local Storage', 'IndexedDB', 'Service Worker',
+  'GPUCache', 'Code Cache', 'DawnGraphiteCache', 'DawnWebGPUCache',
+  'GrShaderCache', 'ShaderCache', 'Crashpad', 'Cache',
+]);
+const LOCKED_DIR_RE = /(^|.+ )Network$/;
+
+function isSeedSkippable(src: string): boolean {
+  const base = basename(src);
+  return LOCKED_BASENAMES.has(base) || LOCKED_DIR_RE.test(base);
+}
+
+let seedPromise: Promise<void> | null = null;
+export function ensureSeed(): Promise<void> {
+  if (existsSync(PROFILE_SEED)) return Promise.resolve();
+  if (seedPromise) return seedPromise;
+  seedPromise = (async () => {
+    if (!existsSync(PROFILE_MAIN)) {
+      throw new Error('seed: main profile missing — run bootstrap first');
+    }
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await cp(PROFILE_MAIN, PROFILE_SEED, {
+          recursive: true,
+          force: true,
+          filter: (src) => !isSeedSkippable(src),
+        });
+        await clearProfileLocks(PROFILE_SEED);
+        return;
+      } catch (e) {
+        lastErr = e;
+        await rm(PROFILE_SEED, { recursive: true, force: true }).catch(() => {});
+        await new Promise<void>((r) => setTimeout(r, 500));
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  })().catch((e) => {
+    seedPromise = null;
+    throw e;
+  });
+  return seedPromise;
+}
+
 export async function cloneProfile(workerIndex: number): Promise<string> {
   const dst = PROFILE_WORKER(workerIndex);
   if (existsSync(dst)) await rm(dst, { recursive: true, force: true });
-  await cp(PROFILE_MAIN, dst, { recursive: true, force: true });
+  await ensureSeed();
+  await cp(PROFILE_SEED, dst, { recursive: true, force: true });
   await clearProfileLocks(dst);
   return dst;
 }

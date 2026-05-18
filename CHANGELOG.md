@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.1]
+
+### Fixed
+
+- **Windows pool worker EBUSY**: `cloneProfile` copied the live `main` profile, which NetworkService keeps SQLite-locked on Windows (`Default/Network/Cookies`, `Default/Safe Browsing Network/...`). Worker clones now read from a static `seed/` snapshot created once via `ensureSeed()` with a filter that skips chromium-locked basenames (SQLite DBs, LevelDB stores, caches, `*Network` subdirs). `bootstrap-auto` snapshots `seed/` right after the warm-up context closes. POSIX behavior unchanged.
+
 ## [0.5.0]
 
 ### Added

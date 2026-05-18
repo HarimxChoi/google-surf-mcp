@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked } from './browser.js';
+import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked, ensureSeed } from './browser.js';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -51,6 +51,8 @@ async function runOnce(opts: AutoBootstrapOptions): Promise<void> {
     await ctx.close().catch(() => {});
     if (!succeeded) {
       await rm(PROFILE_MAIN, { recursive: true, force: true }).catch(() => {});
+    } else {
+      await ensureSeed().catch((e: Error) => log(`[bootstrap] seed snapshot failed: ${e.message}`));
     }
   }
 }
