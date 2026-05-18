@@ -14,7 +14,7 @@ Opt-in jsonl event logging designed as the input feed for the self-healing pipel
 - 4KB byte-guard per line stays within POSIX atomic-append bounds so the worker pool's concurrent writers don't interleave. Oversized lines are replaced with `{ _truncated: true, _originalType }`.
 - Corrupted jsonl lines (partial write, etc.) are skipped during `query()` with a stderr warning; one bad record cannot poison the read.
 - Aggregates return `null` when no valid numeric data exists, distinguishing "no data" from "value is zero" for downstream healing decisions.
-- EWMA default `alpha=0.2`. Order-independent: events sorted oldest→newest before reduction.
+- EWMA default `alpha=0.3`. Order-independent: events sorted oldest→newest before reduction.
 - DI'd `now()` and `maxLineBytes` options for deterministic tests.
 #### Telemetry wire-up (src/agent.ts)
 - `Deps.tel: Telemetry` added; `initDeps` constructs it via `getTelemetry`.

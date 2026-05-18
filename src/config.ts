@@ -1,6 +1,6 @@
-import { existsSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
-import { join, resolve } from 'node:path';
+import {existsSync} from 'node:fs';
+import {homedir, platform} from 'node:os';
+import {join, resolve} from 'node:path';
 
 export interface Config {
   chromePath?: string;
@@ -43,17 +43,23 @@ function parseInt0(v: string | undefined, defaultVal: number, min: number, max: 
 
 function parseTz(v: string | undefined): string {
   if (!v) {
-    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
-    catch { return 'UTC'; }
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
   }
   // Validate IANA tz at startup; fall back instead of throwing at launch time.
   try {
-    new Intl.DateTimeFormat('en-US', { timeZone: v });
+    new Intl.DateTimeFormat('en-US', {timeZone: v});
     return v;
   } catch {
     console.error(`[config] invalid SURF_TZ='${v}', falling back to system tz`);
-    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
-    catch { return 'UTC'; }
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
   }
 }
 

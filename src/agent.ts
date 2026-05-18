@@ -54,8 +54,8 @@ function tier3Recovery(deps: Deps): () => Promise<void> {
 }
 
 async function executeSeqWithCascade<T>(
-    deps: Deps,
-    op: (ctx: BrowserContext) => Promise<T>,
+  deps: Deps,
+  op: (ctx: BrowserContext) => Promise<T>,
 ): Promise<T> {
   if (deps.config.cascadeDisabled) {
     const ctx = await deps.acquireSeqCtx(deps.config.useStealth ? 'on' : 'off');
@@ -77,8 +77,8 @@ async function executeSeqWithCascade<T>(
 }
 
 async function executePoolWithCascade<T>(
-    deps: Deps,
-    op: (pool: PoolHandle) => Promise<T>,
+  deps: Deps,
+  op: (pool: PoolHandle) => Promise<T>,
 ): Promise<T> {
   if (deps.config.cascadeDisabled) {
     const initialMode = deps.config.useStealth ? 'on' : 'off';
@@ -106,8 +106,8 @@ async function executePoolWithCascade<T>(
 }
 
 export async function searchTool(
-    input: { query: string; limit?: number },
-    deps: Deps,
+  input: { query: string; limit?: number },
+  deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const query = input.query.trim();
@@ -124,9 +124,9 @@ export async function searchTool(
   if (cached) {
     deps.tel.record('cache.hit', { tool: 'search', namespace: 'search' }).catch(() => {});
     return formatToolResponse(
-        { query, results: cached.results, elapsed_ms: Date.now() - t0 },
-        undefined,
-        { ...cached.meta, cache: 'hit' },
+      { query, results: cached.results, elapsed_ms: Date.now() - t0 },
+      undefined,
+      { ...cached.meta, cache: 'hit' },
     );
   }
   deps.tel.record('cache.miss', { tool: 'search', namespace: 'search' }).catch(() => {});
@@ -161,9 +161,9 @@ export async function searchTool(
     }).catch(() => {});
 
     return formatToolResponse(
-        { query, results: outcome.results, elapsed_ms: Date.now() - t0 },
-        undefined,
-        { ...meta, cache: 'miss' },
+      { query, results: outcome.results, elapsed_ms: Date.now() - t0 },
+      undefined,
+      { ...meta, cache: 'miss' },
     );
   } catch (e) {
     recordToolError(deps, 'search', e);
@@ -172,8 +172,8 @@ export async function searchTool(
 }
 
 export async function searchParallelTool(
-    input: { queries: string[]; limit?: number },
-    deps: Deps,
+  input: { queries: string[]; limit?: number },
+  deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const queries = input.queries.map(q => String(q).trim()).filter(Boolean);
@@ -211,9 +211,9 @@ export async function searchParallelTool(
     }
 
     return formatToolResponse(
-        { results, elapsed_ms: elapsed },
-        undefined,
-        { stealth_mode: deps.cascade.mode, cache: 'miss' },
+      { results, elapsed_ms: elapsed },
+      undefined,
+      { stealth_mode: deps.cascade.mode, cache: 'miss' },
     );
   } catch (e) {
     recordToolError(deps, 'search_parallel', e);
@@ -222,8 +222,8 @@ export async function searchParallelTool(
 }
 
 export async function extractTool(
-    input: { url: string; max_chars?: number; mode?: ExtractMode },
-    deps: Deps,
+  input: { url: string; max_chars?: number; mode?: ExtractMode },
+  deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const url = input.url.trim();
@@ -257,7 +257,7 @@ export async function extractTool(
     }
 
     return formatToolResponse(
-        { ...result, elapsed_ms: Date.now() - t0 },
+      { ...result, elapsed_ms: Date.now() - t0 },
     );
   } catch (e) {
     recordToolError(deps, 'extract', e);
@@ -266,8 +266,8 @@ export async function extractTool(
 }
 
 export async function searchExtractTool(
-    input: { query: string; limit?: number; max_chars?: number; mode?: 'full' | 'abstract' },
-    deps: Deps,
+  input: { query: string; limit?: number; max_chars?: number; mode?: 'full' | 'abstract' },
+  deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const query = input.query.trim();
@@ -323,9 +323,9 @@ export async function searchExtractTool(
       });
     }
     return formatToolResponse(
-        { query, results: data.results, elapsed_ms: Date.now() - t0 },
-        undefined,
-        { stealth_mode: deps.cascade.mode },
+      { query, results: data.results, elapsed_ms: Date.now() - t0 },
+      undefined,
+      { stealth_mode: deps.cascade.mode },
     );
   } catch (e) {
     recordToolError(deps, 'search_extract', e);
