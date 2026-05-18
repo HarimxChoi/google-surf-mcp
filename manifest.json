@@ -46,7 +46,9 @@
         "SURF_HEADLESS": "${user_config.headless}",
         "SURF_REMOTE_DEBUG": "${user_config.remote_debug}",
         "SURF_CLOUD_MODE": "${user_config.cloud_mode}",
-        "SURF_ALLOW_PRIVATE": "${user_config.allow_private}"
+        "SURF_ALLOW_PRIVATE": "${user_config.allow_private}",
+        "SURF_TELEMETRY": "${user_config.telemetry}",
+        "SURF_TELEMETRY_ROOT": "${user_config.telemetry_root}"
       }
     }
   },
@@ -125,6 +127,19 @@
       "title": "Allow private addresses",
       "description": "Allow extract on private/loopback addresses. Default blocks them (SSRF guard).",
       "default": false,
+      "required": false
+    },
+    "telemetry": {
+      "type": "boolean",
+      "title": "Enable telemetry",
+      "description": "Enable jsonl event logging for the self-healing pipeline (search outcomes, cache hits/misses, tool errors, parser staleness). Off by default.",
+      "default": false,
+      "required": false
+    },
+    "telemetry_root": {
+      "type": "directory",
+      "title": "Telemetry directory",
+      "description": "Directory for jsonl telemetry files. UTC-dated one file per day (YYYY-MM-DD.jsonl). Defaults to <profileRoot>/telemetry.",
       "required": false
     }
   },
