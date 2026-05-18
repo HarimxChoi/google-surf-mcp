@@ -10,6 +10,7 @@ import { formatToolResponse, toErrorInfo } from './response.js';
 import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
 } from './cascade.js';
+import { Telemetry, getTelemetry } from './telemetry.js';
 import { VERSION } from './version.js';
 
 import type { ExtractMode, ExtractResult } from './extract.js';
@@ -26,6 +27,7 @@ export interface Deps {
   cache: UnifiedCache;
   cascade: CascadeState;
   limiter: RateLimiter;
+  tel: Telemetry;
   acquireSeqCtx: (mode: StealthMode) => Promise<BrowserContext>;
   acquirePool: (mode: StealthMode) => Promise<PoolHandle>;
   closeSeq: () => Promise<void>;
@@ -33,12 +35,13 @@ export interface Deps {
   recoverHuman: () => Promise<void>;
 }
 
-export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter'> {
+export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel'> {
   const config = loadConfig(env);
   const cache = getCache(config.cacheRoot, config.cacheMaxEntries);
   const cascade = createCascadeState();
   const limiter = new RateLimiter(config.rateLimitPerMin);
-  return { config, cache, cascade, limiter };
+  const tel = getTelemetry(config.telemetryRoot, config.telemetryEnabled);
+  return { config, cache, cascade, limiter, tel };
 }
 
 function tier3Recovery(deps: Deps): () => Promise<void> {
@@ -119,12 +122,14 @@ export async function searchTool(
   const cacheKey = deps.cache.searchKey(query, deps.config.locale, limit);
   const cached = await deps.cache.get<{ results: SearchResult[]; meta: any }>('search', cacheKey);
   if (cached) {
+    deps.tel.record('cache.hit', { tool: 'search', namespace: 'search' }).catch(() => {});
     return formatToolResponse(
       { query, results: cached.results, elapsed_ms: Date.now() - t0 },
       undefined,
       { ...cached.meta, cache: 'hit' },
     );
   }
+  deps.tel.record('cache.miss', { tool: 'search', namespace: 'search' }).catch(() => {});
 
   try {
     await deps.limiter.acquire();
@@ -147,12 +152,21 @@ export async function searchTool(
     };
     await deps.cache.set('search', cacheKey, { results: outcome.results, meta }, deps.config.cacheTtlSearchMs);
 
+    deps.tel.record('search.outcome', {
+      tool: 'search',
+      resultsLen: outcome.results.length,
+      droppedCount: outcome.dropped,
+      elapsedMs: Date.now() - t0,
+      stealthMode: deps.cascade.mode,
+    }).catch(() => {});
+
     return formatToolResponse(
       { query, results: outcome.results, elapsed_ms: Date.now() - t0 },
       undefined,
       { ...meta, cache: 'miss' },
     );
   } catch (e) {
+    recordToolError(deps, 'search', e);
     return rateLimitResponse(e) ?? handleError(e, deps);
   }
 }
@@ -185,12 +199,24 @@ export async function searchParallelTool(
       return await pool.runMany(queries, limit, { locale: deps.config.locale });
     });
 
+    const elapsed = Date.now() - t0;
+    for (const r of results) {
+      deps.tel.record('search.outcome', {
+        tool: 'search_parallel',
+        resultsLen: r.results.length,
+        droppedCount: r.dropped ?? 0,
+        elapsedMs: elapsed,
+        stealthMode: deps.cascade.mode,
+      }).catch(() => {});
+    }
+
     return formatToolResponse(
-      { results, elapsed_ms: Date.now() - t0 },
+      { results, elapsed_ms: elapsed },
       undefined,
       { stealth_mode: deps.cascade.mode, cache: 'miss' },
     );
   } catch (e) {
+    recordToolError(deps, 'search_parallel', e);
     return rateLimitResponse(e) ?? handleError(e, deps);
   }
 }
@@ -217,6 +243,11 @@ export async function extractTool(
     const failed = !!result.error && !result.content;
 
     if (failed) {
+      deps.tel.record('tool.error', {
+        tool: 'extract',
+        errorCode: 'EXTRACT_FAILED',
+        retryable: true,
+      }).catch(() => {});
       return formatToolResponse(null, {
         code: 'EXTRACT_FAILED',
         message: typeof result.error === 'string' ? result.error : 'unknown extract failure',
@@ -229,6 +260,7 @@ export async function extractTool(
       { ...result, elapsed_ms: Date.now() - t0 },
     );
   } catch (e) {
+    recordToolError(deps, 'extract', e);
     return handleError(e, deps);
   }
 }
@@ -262,7 +294,7 @@ export async function searchExtractTool(
     await deps.limiter.acquire();
     const data = await executePoolWithCascade(deps, async (pool) => {
       const sr = await pool.searchOne(query, limit, { locale: deps.config.locale });
-      if (!sr.results.length) return { results: [], searchError: sr.error };
+      if (!sr.results.length) return { results: [], searchError: sr.error, droppedCount: sr.dropped ?? 0 };
       const enriched = await Promise.all(sr.results.map(async (r) => {
         const ex = await pool.extractOne(r.url, maxChars, mode);
         return {
@@ -272,8 +304,16 @@ export async function searchExtractTool(
           error: typeof ex.error === 'string' ? ex.error : undefined,
         };
       }));
-      return { results: enriched, searchError: undefined as string | undefined };
+      return { results: enriched, searchError: undefined as string | undefined, droppedCount: sr.dropped ?? 0 };
     });
+
+    deps.tel.record('search.outcome', {
+      tool: 'search_extract',
+      resultsLen: data.results.length,
+      droppedCount: data.droppedCount,
+      elapsedMs: Date.now() - t0,
+      stealthMode: deps.cascade.mode,
+    }).catch(() => {});
 
     if (data.searchError && data.results.length === 0) {
       return formatToolResponse(null, {
@@ -288,6 +328,7 @@ export async function searchExtractTool(
       { stealth_mode: deps.cascade.mode },
     );
   } catch (e) {
+    recordToolError(deps, 'search_extract', e);
     return rateLimitResponse(e) ?? handleError(e, deps);
   }
 }
@@ -313,6 +354,10 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
       queueSize: deps.limiter.queueSize,
     },
     cache: cacheStats,
+    telemetry: {
+      enabled: deps.config.telemetryEnabled,
+      ...(deps.config.telemetryEnabled ? await deps.tel.size() : { files: 0, events: 0 }),
+    },
     config: {
       cloudMode: deps.config.cloudMode,
       humanlikeMode: deps.config.humanlikeMode,
@@ -336,4 +381,28 @@ function rateLimitResponse(e: unknown): CallToolResult | null {
 function handleError(e: unknown, deps: Deps): CallToolResult {
   console.error('[google-surf-mcp] tool error:', e);
   return formatToolResponse(null, toErrorInfo(e, { cloudMode: deps.config.cloudMode }));
+}
+
+// Records both the generic tool.error event and, when the error message
+// matches the parser-stale signature thrown by search.ts, an additional
+// parse.stale event for self-healing trigger detection.
+function recordToolError(deps: Deps, tool: string, e: unknown): void {
+  const info = toErrorInfo(e, { cloudMode: deps.config.cloudMode });
+  deps.tel.record('tool.error', {
+    tool,
+    errorCode: info.code,
+    retryable: info.retryable,
+  }).catch(() => {});
+
+  if (info.code === 'PARSER_STALE') {
+    const message = e instanceof Error ? e.message : String(e);
+    // Best-effort h3 count extraction; structured signal will follow when
+    // search.ts gains structured error throwing.
+    const h3Match = message.match(/(\d+)\s*h3/i);
+    deps.tel.record('parse.stale', {
+      tool,
+      reason: 'h3_but_no_results',
+      h3Count: h3Match ? Number(h3Match[1]) : null,
+    }).catch(() => {});
+  }
 }

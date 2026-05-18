@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+
 export { detectChrome as detectChromePath } from './browser.js';
 
 export interface Config {
@@ -24,6 +25,9 @@ export interface Config {
   insecureTls: boolean;
   noSandbox: boolean;
   cascadeDisabled: boolean;
+
+  telemetryEnabled: boolean;
+  telemetryRoot: string;
 }
 
 function parseBool(v: string | undefined, defaultVal: boolean): boolean {
@@ -40,8 +44,11 @@ function parseInt0(v: string | undefined, defaultVal: number, min: number, max: 
 
 function parseTz(v: string | undefined): string {
   if (!v) {
-    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
-    catch { return 'UTC'; }
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
   }
   // Validate IANA tz at startup; fall back instead of throwing at launch time.
   try {
@@ -49,8 +56,11 @@ function parseTz(v: string | undefined): string {
     return v;
   } catch {
     console.error(`[config] invalid SURF_TZ='${v}', falling back to system tz`);
-    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
-    catch { return 'UTC'; }
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
   }
 }
 
@@ -88,6 +98,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     insecureTls: parseBool(env.SURF_INSECURE_TLS, cloudMode),
     noSandbox: parseBool(env.SURF_NO_SANDBOX, cloudMode),
     cascadeDisabled: parseBool(env.SURF_CASCADE_DISABLED, false),
+
+    telemetryEnabled: parseBool(env.SURF_TELEMETRY, false),
+    telemetryRoot: env.SURF_TELEMETRY_ROOT || join(profileRoot, 'telemetry'),
   };
 }
-
