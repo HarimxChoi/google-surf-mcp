@@ -170,11 +170,11 @@ The `STRATEGIES` array, geometric verification, and score-based classification f
 #### Stealth cascade (src/cascade.ts)
 The stealth plugin's evasion patterns are themselves a fingerprint. v0.4.5 makes bare playwright the default and the stealth plugin the fallback:
 
-Tier 1: stealth off  (bare playwright — borrows the real profile's reputation)
-↓ 1 CAPTCHA
-Tier 2: stealth on   (playwright-extra + stealth plugin)
-↓ 2 CAPTCHA
-Tier 3: human (local) or fail-fast (cloud)
+  Tier 1: stealth off  (bare playwright — borrows the real profile's reputation)
+    ↓ 1 CAPTCHA
+  Tier 2: stealth on   (playwright-extra + stealth plugin)
+    ↓ 2 CAPTCHA
+  Tier 3: human (local) or fail-fast (cloud)
 
 State is process-level so the sequential ctx and pool share it. `SURF_CASCADE_DISABLED=true` pins a single mode.
 
