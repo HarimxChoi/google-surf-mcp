@@ -45,7 +45,7 @@ Opt-in jsonl event logging designed as the input feed for the self-healing pipel
 
 ### Fixed
 
-- **Windows chrome exit 21 (single-instance forwarding)**: `detectChrome()` now prefers playwright's bundled chromium over the system Chrome install. The system Chrome shares Singleton IPC with the user's daily browser on Windows even with a unique `--user-data-dir`, forwarding launch args and exiting with `RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED` (21) before playwright can attach. Bundled chromium is a separate binary with no such conflict. Fallback order is unchanged for users without `playwright install`: `CHROME_PATH` env ??bundled chromium ??system Chrome paths.
+- **Windows chrome exit 21 (single-instance forwarding)**: `detectChrome()` now prefers playwright's bundled chromium over the system Chrome install. The system Chrome shares Singleton IPC with the user's daily browser on Windows even with a unique `--user-data-dir`, forwarding launch args and exiting with `RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED` (21) before playwright can attach. Bundled chromium is a separate binary with no such conflict. Fallback order is unchanged for users without `playwright install`: `CHROME_PATH` env → bundled chromium → system Chrome paths.
 
 ## [0.5.1]
 
@@ -57,7 +57,7 @@ Opt-in jsonl event logging designed as the input feed for the self-healing pipel
 
 ### Added
 
-#### CAPTCHA recovery ??4 env-based modes
+#### CAPTCHA recovery — 4 env-based modes
 Single mode picked automatically from environment:
 - `notify_spawn` (default): OS notification fires (osascript / powershell / notify-send), then headed Chrome opens. Works on macOS, Windows, Linux without `node-notifier`.
 - `always_headed` (`SURF_HEADLESS=false`): headed Chrome opens, no notification (user is already watching).
@@ -78,7 +78,7 @@ Minimal exponential backoff: `delay = initialMs * factor^attempt`. No jitter (fu
 ### Changed
 
 #### English ad-marker regex
-Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·?�‧▾\-??|\s*$)`. `Sponsored` and `advertisement` match anywhere; standalone `Ad`/`Ads` matches only at start/end-of-field or before a typographic separator. Avoids false-positive sponsored classification for organic titles like "Google Ads API docs" or "Ads Manager", while still catching SERP labels like `Ad · brand.com` or just `Ad`.
+Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-—]|\s*$)`. `Sponsored` and `advertisement` match anywhere; standalone `Ad`/`Ads` matches only at start/end-of-field or before a typographic separator. Avoids false-positive sponsored classification for organic titles like "Google Ads API docs" or "Ads Manager", while still catching SERP labels like `Ad · brand.com` or just `Ad`.
 
 #### `SURF_REMOTE_DEBUG` exposed in manifest
 `manifest.json` `user_config` adds a `remote_debug` boolean and maps it to `SURF_REMOTE_DEBUG`, so manifest-based installs can enable the headless-server DevTools recovery flow.
@@ -103,13 +103,13 @@ Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)
 
 #### Tiered PDF extraction (`unpdf`)
 - **src/extract-pdf.ts**: `extractPdfTiered(buf, mode, maxChars)` returns `full_text`, `abstract` (PDF page 1 text content), or `metadata_only` (page count). Detects PDFs via `%PDF` magic bytes (`isPdfMagic`) or `Content-Type: application/pdf` (`isPdfContentType`).
-- **src/extract-meta.ts**: HTML meta-tag helpers ??`findCitationPdfUrl`, `findAbstractFromMeta` (citation_abstract ??dc.description ??description ??og:description), `findTitle`, `domainPdfTransform` (openreview, biorxiv/medrxiv, nature), `findPmcUrlFromPubmed`.
-- **src/extract.ts**: new `discoverViaFetch` runs before Playwright. PDF magic / Content-Type ??tiered PDF extract; `mode='abstract'` HTML ??meta description; otherwise tries `findCitationPdfUrl` + `domainPdfTransform` candidates; PubMed ??PMC chain. Skips Playwright for academic PDFs entirely.
+- **src/extract-meta.ts**: HTML meta-tag helpers — `findCitationPdfUrl`, `findAbstractFromMeta` (citation_abstract → dc.description → description → og:description), `findTitle`, `domainPdfTransform` (openreview, biorxiv/medrxiv, nature), `findPmcUrlFromPubmed`.
+- **src/extract.ts**: new `discoverViaFetch` runs before Playwright. PDF magic / Content-Type → tiered PDF extract; `mode='abstract'` HTML → meta description; otherwise tries `findCitationPdfUrl` + `domainPdfTransform` candidates; PubMed → PMC chain. Skips Playwright for academic PDFs entirely.
 - Coverage: arxiv, biorxiv, Nature, OpenReview, NeurIPS, JMLR, PMLR, Springer, PubMed (via PMC).
 
 #### Multi-strategy SERP wire-up
 The `STRATEGIES` array, geometric verification, and score-based classification from v0.4.5 are now wired into the live search path (previously only used by the self-healing pipeline).
-- **src/search.ts**: `pickAndScoreResults` iterates `STRATEGIES`, evaluates each with `parseResultsInBrowser` + `verifyResultsGeometricInBrowser`, computes `aggregateConfidence`, early-exits when ?? results & ??.7 confidence, picks best-scored otherwise. `DROP_CLASSIFICATIONS` set drops `sponsored | knowledge_panel | related`. Returns `{ results, dropped, dropped_reasons }`.
+- **src/search.ts**: `pickAndScoreResults` iterates `STRATEGIES`, evaluates each with `parseResultsInBrowser` + `verifyResultsGeometricInBrowser`, computes `aggregateConfidence`, early-exits when ≥5 results & ≥0.7 confidence, picks best-scored otherwise. `DROP_CLASSIFICATIONS` set drops `sponsored | knowledge_panel | related`. Returns `{ results, dropped, dropped_reasons }`.
 - **src/parse.ts**: `parseResultsInBrowser` now returns `blockIndices` so filtered results align with their verify entries when ads precede organics.
 - Search responses now include `dropped` count + `dropped_reasons` array in meta. `extract` and `search_extract` responses include `is_pdf`, `page_count`, `extraction_quality`.
 
@@ -153,10 +153,10 @@ The `STRATEGIES` array, geometric verification, and score-based classification f
 - These power the self-healing pipeline; wiring them into the live search path is planned for 0.5.
 
 #### Self-healing pipeline
-- **src/heal/validator.ts** ??Triple Gate validator: Gate A (geometric: ?? results, organic ratio ??0%, mean confidence ??.5), Gate B (XPath stability: stable attributes preferred over class-only), Gate C (LLM confirmation). All three required before a PR is generated. A 3-query empirical test runs on anchor queries ??3/3 ??apply, 2/3 ??caution flag, <2 ??escalate.
-- **src/heal/synthesis.ts** ??deterministic selector synthesis from stable attributes (`[data-ved]` ??`div[jscontroller]` ??`div[data-hveid]` ??longest class token).
-- **src/heal/llm.ts** ??LLM verifier (Anthropic SDK optional peer dep; mock fallback when no API key).
-- **scripts/repair/** + **.github/workflows/repair-pipeline.yml** ??daily cron: detection ??synthesis ??Triple Gate ??3-query empirical check ??PR draft. Auto-merge never; human review required.
+- **src/heal/validator.ts** — Triple Gate validator: Gate A (geometric: ≥5 results, organic ratio ≥60%, mean confidence ≥0.5), Gate B (XPath stability: stable attributes preferred over class-only), Gate C (LLM confirmation). All three required before a PR is generated. A 3-query empirical test runs on anchor queries — 3/3 → apply, 2/3 → caution flag, <2 → escalate.
+- **src/heal/synthesis.ts** — deterministic selector synthesis from stable attributes (`[data-ved]` → `div[jscontroller]` → `div[data-hveid]` → longest class token).
+- **src/heal/llm.ts** — LLM verifier (Anthropic SDK optional peer dep; mock fallback when no API key).
+- **scripts/repair/** + **.github/workflows/repair-pipeline.yml** — daily cron: detection → synthesis → Triple Gate → 3-query empirical check → PR draft. Auto-merge never; human review required.
 
 #### Foundation
 - **src/config.ts**: centralized env validation; `parseTz` validates IANA tz with fallback (no launch-time throw on invalid `SURF_TZ`).
@@ -165,16 +165,16 @@ The `STRATEGIES` array, geometric verification, and score-based classification f
 - **src/navigate.ts**: `navigateHome` consolidates duplicate goto sites with exact-match URL check.
 
 #### Data layer
-- **src/cache.ts**: JSON+fs unified cache ??namespace + per-entry TTL + atomic write + LRU eviction by mtime (`SURF_CACHE_MAX_ENTRIES`, default 1000). `search` results cached 24h by default (`SURF_CACHE_TTL_SEARCH_MS`); cache key is `query|locale|limit`.
+- **src/cache.ts**: JSON+fs unified cache — namespace + per-entry TTL + atomic write + LRU eviction by mtime (`SURF_CACHE_MAX_ENTRIES`, default 1000). `search` results cached 24h by default (`SURF_CACHE_TTL_SEARCH_MS`); cache key is `query|locale|limit`.
 
 #### Stealth cascade (src/cascade.ts)
 The stealth plugin's evasion patterns are themselves a fingerprint. v0.4.5 makes bare playwright the default and the stealth plugin the fallback:
 
-  Tier 1: stealth off  (bare playwright ??borrows the real profile's reputation)
-    ??1 CAPTCHA
-  Tier 2: stealth on   (playwright-extra + stealth plugin)
-    ??2 CAPTCHA
-  Tier 3: human (local) or fail-fast (cloud)
+Tier 1: stealth off  (bare playwright — borrows the real profile's reputation)
+↓ 1 CAPTCHA
+Tier 2: stealth on   (playwright-extra + stealth plugin)
+↓ 2 CAPTCHA
+Tier 3: human (local) or fail-fast (cloud)
 
 State is process-level so the sequential ctx and pool share it. `SURF_CASCADE_DISABLED=true` pins a single mode.
 
@@ -191,14 +191,14 @@ Multi-action behavior session (7 action types, 4 mouse styles). 2-layer randomiz
 New 5th tool: reports cascade state (mode, per-mode CAPTCHA counts, transitions), rate-limiter usage, cache size, config. Read-only.
 
 #### Extract hardening
-- DNS-resolve SSRF guard: `checkUrlAsync` resolves host then validates IP, blocking DNS rebinding (evil.com ??127.0.0.1).
+- DNS-resolve SSRF guard: `checkUrlAsync` resolves host then validates IP, blocking DNS rebinding (evil.com → 127.0.0.1).
 - Optional untrusted-content fencing on extract bodies.
 
 #### Anti-bot launch flags
 `--fingerprinting-canvas-image-data-noise`, `--webrtc-ip-handling-policy=disable_non_proxied_udp`, `--force-webrtc-ip-handling-policy`.
 
 ### Changed
-- **MCP SDK migration**: `setRequestHandler` ??`McpServer` + `registerTool` + Zod schemas. All 5 tools declare `inputSchema` + `outputSchema`; responses include `structuredContent`. Tool descriptions rewritten with usage guidance.
+- **MCP SDK migration**: `setRequestHandler` → `McpServer` + `registerTool` + Zod schemas. All 5 tools declare `inputSchema` + `outputSchema`; responses include `structuredContent`. Tool descriptions rewritten with usage guidance.
 - **First-call reliability**: the sequential context is pre-warmed in the background on server start; a failed launch clears a stale profile lock and retries once.
 - Tool annotations (readOnlyHint / idempotentHint / openWorldHint) on all tools.
 - All v0.4.x lifecycle code (sequential ctx, pool, idle timer, drain shutdown) preserved.
@@ -223,7 +223,7 @@ New 5th tool: reports cascade state (mode, per-mode CAPTCHA counts, transitions)
 - **CAPTCHA on pool path didn't release `PROFILE_MAIN` (B2)**: `search_parallel` and `search_extract` only called `resetPool` before recovery, while the sequential ctx might still hold `PROFILE_MAIN`. Headed Chrome launch in `recoverFromCaptcha` then collided on `SingletonLock`. Pool paths now also call `closeSequential`.
 - **`recoverFromCaptcha` had no mutex (B3)**: two concurrent in-flight requests both hitting CAPTCHA spawned two headed Chrome processes against `PROFILE_MAIN`, colliding on `SingletonLock`. Added module-level Promise singleton so concurrent callers share a single recovery. Also swallows `ctx.close()` errors (user closing the recovery window manually).
 - **Pool deadlock when all workers die + rebuilds fail (B4)**: previously, a fully-dead pool with unrebuildable workers would push acquires to the waiter queue forever (no resolve, no reject). Added `MAX_REBUILD_FAILURES=5` counter (resets on successful rebuild) that throws fast, and a 60s waiter timeout that rejects pending acquires instead of hanging indefinitely.
-- **`onHome` URL detection false-positives (B5)**: `url.startsWith('https://www.google.com/')` matched `imghp`, `finance/...`, `preferences`, etc., which lack the search textarea ??the subsequent `sb.click({timeout:6000})` then waited 6s before throwing. Now exact-matches `https://www.google.com/` (with or without trailing slash).
+- **`onHome` URL detection false-positives (B5)**: `url.startsWith('https://www.google.com/')` matched `imghp`, `finance/...`, `preferences`, etc., which lack the search textarea — the subsequent `sb.click({timeout:6000})` then waited 6s before throwing. Now exact-matches `https://www.google.com/` (with or without trailing slash).
 
 ### Added
 - Tests: `withTimeout` cleanup-on-timeout (5 cases), `recoverFromCaptcha` mutex (3 cases), pool deadlock prevention (3 cases). Total: 32 tests pass.
