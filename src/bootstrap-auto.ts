@@ -1,6 +1,5 @@
 import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
 import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked, ensureSeed } from './browser.js';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -26,7 +25,6 @@ async function runOnce(opts: AutoBootstrapOptions): Promise<void> {
   log(`[bootstrap] no profile found, auto-warming (headless=${headless}, ~30s)...`);
 
   const ctx = await launch({ profileDir: PROFILE_MAIN, headless });
-  let succeeded = false;
   try {
     const page = await getPage(ctx);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -45,15 +43,10 @@ async function runOnce(opts: AutoBootstrapOptions): Promise<void> {
     if (isBlocked(page.url())) throw new Error('blocked after search');
 
     await sleep(2000);
-    succeeded = true;
     log('[bootstrap] profile warmed successfully');
   } finally {
     await ctx.close().catch(() => {});
-    if (!succeeded) {
-      await rm(PROFILE_MAIN, { recursive: true, force: true }).catch(() => {});
-    } else {
-      await ensureSeed().catch((e: Error) => log(`[bootstrap] seed snapshot failed: ${e.message}`));
-    }
+    await ensureSeed().catch((e: Error) => log(`[bootstrap] seed snapshot failed: ${e.message}`));
   }
 }
 
