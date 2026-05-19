@@ -11,15 +11,23 @@ import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
 } from './cascade.js';
 import { Telemetry, getTelemetry } from './telemetry.js';
+import { StrategyHealing, getStrategyHealing } from './strategyHealing.js';
+import { STRATEGIES } from './parse.js';
 import { VERSION } from './version.js';
 
 import type { ExtractMode, ExtractResult } from './extract.js';
 import type { PoolSearchResult } from './pool.js';
+import type { SearchOptions } from './search.js';
 
 export interface PoolHandle {
-  runMany: (queries: string[], limit: number, opts?: { locale?: string }) => Promise<PoolSearchResult[]>;
+  runMany: (queries: string[], limit: number, opts?: SearchOptions) => Promise<PoolSearchResult[]>;
   extractOne: (url: string, maxChars: number, mode?: ExtractMode) => Promise<ExtractResult>;
-  searchOne: (query: string, limit: number, opts?: { locale?: string }) => Promise<PoolSearchResult>;
+  searchOne: (query: string, limit: number, opts?: SearchOptions) => Promise<PoolSearchResult>;
+}
+
+export interface PoolHealthSnapshot {
+  warmFailures: number;
+  fallback: boolean;
 }
 
 export interface Deps {
@@ -28,20 +36,28 @@ export interface Deps {
   cascade: CascadeState;
   limiter: RateLimiter;
   tel: Telemetry;
+  healing: StrategyHealing;
   acquireSeqCtx: (mode: StealthMode) => Promise<BrowserContext>;
   acquirePool: (mode: StealthMode) => Promise<PoolHandle>;
   closeSeq: () => Promise<void>;
   resetPool: () => Promise<void>;
   recoverHuman: () => Promise<void>;
+  getPoolHealth: () => PoolHealthSnapshot;
 }
 
-export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel'> {
+export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel' | 'healing'> {
   const config = loadConfig(env);
   const cache = getCache(config.cacheRoot, config.cacheMaxEntries);
   const cascade = createCascadeState();
   const limiter = new RateLimiter(config.rateLimitPerMin);
   const tel = getTelemetry(config.telemetryRoot, config.telemetryEnabled);
-  return { config, cache, cascade, limiter, tel };
+  const healing = getStrategyHealing(
+    config.selfHealingFile,
+    config.selfHealingEnabled,
+    STRATEGIES.map((s) => s.id),
+  );
+  healing.load().catch(() => {});
+  return { config, cache, cascade, limiter, tel, healing };
 }
 
 function tier3Recovery(deps: Deps): () => Promise<void> {
@@ -137,7 +153,10 @@ export async function searchTool(
     const outcome = await executeSeqWithCascade(deps, async (ctx) => {
       const page = (await ctx.pages())[0] ?? (await ctx.newPage());
       const behavior = new HumanlikeBehavior(params, deps.config.humanlikeMode);
-      const r = await legacySearch(page, query, limit, { locale: deps.config.locale });
+      const r = await legacySearch(page, query, limit, {
+        locale: deps.config.locale,
+        healing: deps.healing,
+      });
       if (deps.config.humanlikeMode !== 'off') {
         await behavior.simulateBrowsing(page, []).catch(() => {});
       }
@@ -196,7 +215,7 @@ export async function searchParallelTool(
   try {
     for (let i = 0; i < queries.length; i++) await deps.limiter.acquire();
     const results = await executePoolWithCascade(deps, async (pool) => {
-      return await pool.runMany(queries, limit, { locale: deps.config.locale });
+      return await pool.runMany(queries, limit, { locale: deps.config.locale, healing: deps.healing });
     });
 
     const elapsed = Date.now() - t0;
@@ -293,7 +312,7 @@ export async function searchExtractTool(
   try {
     await deps.limiter.acquire();
     const data = await executePoolWithCascade(deps, async (pool) => {
-      const sr = await pool.searchOne(query, limit, { locale: deps.config.locale });
+      const sr = await pool.searchOne(query, limit, { locale: deps.config.locale, healing: deps.healing });
       if (!sr.results.length) return { results: [], searchError: sr.error, droppedCount: sr.dropped ?? 0 };
       const enriched = await Promise.all(sr.results.map(async (r) => {
         const ex = await pool.extractOne(r.url, maxChars, mode);
@@ -354,9 +373,15 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
       queueSize: deps.limiter.queueSize,
     },
     cache: cacheStats,
+    pool: deps.getPoolHealth(),
     telemetry: {
       enabled: deps.config.telemetryEnabled,
       ...(deps.config.telemetryEnabled ? await deps.tel.size() : { files: 0, events: 0 }),
+    },
+    selfHealing: {
+      enabled: deps.config.selfHealingEnabled,
+      order: deps.healing.getOrderedStrategyIds(STRATEGIES.map((s) => s.id)),
+      stats: deps.healing.getStats(),
     },
     config: {
       cloudMode: deps.config.cloudMode,

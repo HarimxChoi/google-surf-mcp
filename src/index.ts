@@ -147,20 +147,35 @@ let seqActive = 0;
 let poolActive = 0;
 let seqIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let poolIdleTimer: ReturnType<typeof setTimeout> | null = null;
+let idleSuspended = false;
 
 function clearSeqIdle() { if (seqIdleTimer) { clearTimeout(seqIdleTimer); seqIdleTimer = null; } }
 function clearPoolIdle() { if (poolIdleTimer) { clearTimeout(poolIdleTimer); poolIdleTimer = null; } }
 
+export function suspendIdleClose(): void {
+  idleSuspended = true;
+  clearSeqIdle();
+  clearPoolIdle();
+}
+export function resumeIdleClose(): void {
+  idleSuspended = false;
+}
+
 async function trackSeq<T>(op: () => Promise<T>): Promise<T> {
   clearSeqIdle();
   seqActive++;
-  try { return await op(); }
-  finally {
+  let succeeded = false;
+  try {
+    const r = await op();
+    succeeded = true;
+    return r;
+  } finally {
     seqActive--;
-    if (seqActive === 0 && IDLE_CLOSE_MS > 0) {
+    if (succeeded && idleSuspended) idleSuspended = false;
+    if (seqActive === 0 && IDLE_CLOSE_MS > 0 && !idleSuspended) {
       seqIdleTimer = setTimeout(() => {
         seqIdleTimer = null;
-        if (seqActive === 0) closeSequential().catch(() => {});
+        if (seqActive === 0 && !idleSuspended) closeSequential().catch(() => {});
       }, IDLE_CLOSE_MS);
     }
   }
@@ -169,13 +184,18 @@ async function trackSeq<T>(op: () => Promise<T>): Promise<T> {
 async function trackPool<T>(op: () => Promise<T>): Promise<T> {
   clearPoolIdle();
   poolActive++;
-  try { return await op(); }
-  finally {
+  let succeeded = false;
+  try {
+    const r = await op();
+    succeeded = true;
+    return r;
+  } finally {
     poolActive--;
-    if (poolActive === 0 && IDLE_CLOSE_MS > 0) {
+    if (succeeded && idleSuspended) idleSuspended = false;
+    if (poolActive === 0 && IDLE_CLOSE_MS > 0 && !idleSuspended) {
       poolIdleTimer = setTimeout(() => {
         poolIdleTimer = null;
-        if (poolActive === 0) resetPool().catch(() => {});
+        if (poolActive === 0 && !idleSuspended) resetPool().catch(() => {});
       }, IDLE_CLOSE_MS);
     }
   }
@@ -191,6 +211,8 @@ async function shutdown() {
   await closeSequential();
   await pool?.close();
   pool = null;
+  await baseDeps.healing.flush().catch(() => {});
+  baseDeps.healing.shutdown();
 }
 
 
@@ -223,22 +245,28 @@ function buildDeps(): Deps {
     const seqSearchOne = async (
       query: string, limit: number, opts?: { locale?: string },
     ): Promise<PoolSearchResult> => {
-      return await trackSeq(async () => {
-        const ctx = await getSequentialCtx(mode);
-        const page = await getPage(ctx);
-        try {
-          const outcome = await search(page, query, limit, opts);
-          return {
-            query, results: outcome.results,
-            dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons,
-          };
-        } catch (e) {
-          if (e instanceof CaptchaError) throw e;
-          return { query, results: [], error: (e as Error).message };
-        }
-      });
+      return await trackSeq(() => withTimeout(
+        (async () => {
+          const ctx = await getSequentialCtx(mode);
+          const page = await getPage(ctx);
+          try {
+            const outcome = await search(page, query, limit, opts);
+            return {
+              query, results: outcome.results,
+              dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons,
+            } as PoolSearchResult;
+          } catch (e) {
+            if (e instanceof CaptchaError) throw e;
+            return { query, results: [], error: (e as Error).message } as PoolSearchResult;
+          }
+        })(),
+        REQUEST_TIMEOUT_MS,
+        'search_extract:search',
+        closeSequential,
+      ));
     };
     return {
+      // serial: aggregate timeout would cap legitimate n-query batches
       runMany: async (queries, limit, opts) => {
         const out: PoolSearchResult[] = [];
         for (const q of queries) out.push(await seqSearchOne(q, limit, opts));
@@ -246,10 +274,15 @@ function buildDeps(): Deps {
       },
       searchOne: seqSearchOne,
       extractOne: async (url, maxChars, extractMode?: ExtractMode) => {
-        return await trackSeq(async () => {
-          const ctx = await getSequentialCtx(mode);
-          return await extract(ctx, url, { maxChars, mode: extractMode });
-        });
+        return await trackSeq(() => withTimeout(
+          (async () => {
+            const ctx = await getSequentialCtx(mode);
+            return await extract(ctx, url, { maxChars, mode: extractMode });
+          })(),
+          REQUEST_TIMEOUT_MS,
+          'extract',
+          closeSequential,
+        ));
       },
     };
   };
@@ -302,8 +335,10 @@ function buildDeps(): Deps {
     remoteDebug: baseDeps.config.remoteDebug,
   });
   const recoverHuman = async () => {
-    // remote_debug keeps the existing Chromium alive for DevTools attach.
-    if (captchaMode === 'notify_spawn' || captchaMode === 'always_headed') {
+    // remote_debug: keep Chromium alive across DevTools attach window
+    if (captchaMode === 'remote_debug') {
+      suspendIdleClose();
+    } else if (captchaMode === 'notify_spawn' || captchaMode === 'always_headed') {
       await Promise.all([
         resetPool().catch(() => {}),
         closeSequential().catch(() => {}),
@@ -319,6 +354,7 @@ function buildDeps(): Deps {
     closeSeq: closeSequential,
     resetPool,
     recoverHuman,
+    getPoolHealth,
   };
 }
 
@@ -434,6 +470,9 @@ const HealthOutput = {
   cascade: MetaShape.optional(),
   rateLimiter: MetaShape.optional(),
   cache: MetaShape.optional(),
+  pool: MetaShape.optional(),
+  telemetry: MetaShape.optional(),
+  selfHealing: MetaShape.optional(),
   config: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };

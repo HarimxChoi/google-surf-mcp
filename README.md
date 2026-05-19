@@ -151,6 +151,11 @@ Local clone variant:
 | `SURF_NO_SANDBOX` | `=SURF_CLOUD_MODE` | `--no-sandbox` (auto-on in cloud mode) |
 | `SURF_TELEMETRY` | `false` | set `true` to enable jsonl event logging (search outcomes, cache hits/misses, tool errors, parser staleness) under `{SURF_TELEMETRY_ROOT}`. Designed as the input feed for the self-healing pipeline. Off by default. |
 | `SURF_TELEMETRY_ROOT` | `<profile>/telemetry` | directory for jsonl telemetry files. UTC-dated one file per day (`YYYY-MM-DD.jsonl`). |
+| `SURF_SELF_HEALING` | `true` | per-strategy outcome tracking + persisted reordering. Healing must win by 3 outcomes before reorder kicks in, so single-call flapping is impossible. Set `false` to pin the default strategy order. |
+| `SURF_SELF_HEALING_FILE` | `<profile>/.heal/strategy-order.json` | persistence path for healing state. Atomic tmp+rename writes; debounced 5s. |
+| `SURF_LLM_HEAL` | `false` | opt-in for LLM-assisted selector repair in the workflow-only `repairWithLLM` helper. Off by default → no third-party LLM request ever fires. When `true`, requires `ANTHROPIC_API_KEY` (your own); the package never ships a maintainer key. |
+| `ANTHROPIC_API_KEY` | — | your Anthropic key. Read only when `SURF_LLM_HEAL=true`. The runtime self-healing in `SURF_SELF_HEALING` is deterministic and never reads this variable. |
+
 ## Troubleshooting
 
 - CAPTCHA in 4 modes (picked automatically from env):
@@ -158,6 +163,7 @@ Local clone variant:
   - `SURF_HEADLESS=false`: headed Chrome opens, no notification (user is already watching)
   - `SURF_REMOTE_DEBUG=true`: DevTools port + instructions printed, attach `chrome://inspect` locally to solve
   - `SURF_CLOUD_MODE=true`: fail-fast with `CAPTCHA_REQUIRED` error
+- **Headed Chrome opens to a plain search box instead of CAPTCHA**: just type any query in the box and press Enter. Subsequent calls work.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
 - Stale selectors: Google rotates classes. v0.4.5+ runs a multi-strategy parser and a daily self-healing workflow that opens draft PRs (human review required).
 - SSRF: `extract` blocks `localhost`, private IPs, AWS metadata by default. Set `SURF_ALLOW_PRIVATE=true` to allow them.

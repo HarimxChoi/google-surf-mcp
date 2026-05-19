@@ -19,6 +19,7 @@ jobs:
       issues: write
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SURF_LLM_HEAL: 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,9 @@ jobs:
       - name: build
         run: npm run build
 
+      - name: build repair scripts
+        run: npx tsc -p tsconfig.scripts.json
+
       - name: bootstrap profile (auto, headed via Xvfb)
         env:
           DISPLAY: ':99'
@@ -44,11 +48,11 @@ jobs:
           sudo apt-get install -y xvfb
           Xvfb :99 -screen 0 1366x768x24 &
           sleep 2
-          npm run bootstrap-auto || true
+          node build/bootstrap.js || true
 
       - name: run repair pipeline
         id: repair
-        run: node build/scripts/repair/index.js
+        run: node build-scripts/scripts/repair/index.js
 
       - name: open draft PR (if decision=open)
         if: steps.repair.outputs.should_open_pr == 'true'
@@ -76,6 +80,6 @@ jobs:
         with:
           name: repair-run-${{ github.run_id }}
           path: |
-            build/scripts/repair/*.json
+            build-scripts/scripts/repair/*.json
             *.log
           retention-days: 30

@@ -1,3 +1,5 @@
+// Workflow-only. Default-off: requires SURF_LLM_HEAL=true + ANTHROPIC_API_KEY.
+
 const SYSTEM_PROMPT = `You are a CSS-selector repair agent for a Google SERP parser.
 Given (a) compressed HTML of a SERP page (b) the current broken selectors and
 (c) candidate selectors from deterministic synthesis, your job is to either
@@ -10,14 +12,23 @@ Rules:
 - Must skip ads inside #tads, #tadsb, #bottomads, [data-text-ad].
 - Each result must have an h3 (title) and a[href^="http"] (link).
 
-Output STRICT JSON, no prose:
-{
-  "decision": "approve_candidate" | "propose_new",
-  "selector": "<CSS selector>",
-  "rationale": "<1-2 sentences>",
-  "confidence": "low" | "medium" | "high",
-  "expected_min_blocks": <number>
-}`;
+Call the submit_selector_repair tool with your decision.`;
+
+const REPAIR_TOOL = {
+  name: 'submit_selector_repair',
+  description: 'Submit the chosen selector repair decision.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      decision: { type: 'string', enum: ['approve_candidate', 'propose_new'] },
+      selector: { type: 'string', description: 'CSS selector to use for SERP result blocks' },
+      rationale: { type: 'string', description: '1-2 sentences explaining the choice' },
+      confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+      expected_min_blocks: { type: 'number', description: 'Expected minimum block count' },
+    },
+    required: ['decision', 'selector', 'rationale', 'confidence', 'expected_min_blocks'],
+  },
+} as const;
 
 export interface LLMRepairInput {
   compressedHtml: string;
@@ -33,33 +44,40 @@ export interface LLMRepairOutput {
   expected_min_blocks: number;
 }
 
-export async function repairWithLLM(input: LLMRepairInput): Promise<LLMRepairOutput> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    // Mock path for tests and CI without an API key.
-    if (input.candidates.length > 0) {
-      return {
-        decision: 'approve_candidate',
-        selector: input.candidates[0].blockSelector,
-        rationale: '[mock] no API key, defaulting to first candidate',
-        confidence: 'low',
-        expected_min_blocks: 5,
-      };
-    }
+function mockRepair(input: LLMRepairInput, reason: string): LLMRepairOutput {
+  if (input.candidates.length > 0) {
     return {
-      decision: 'propose_new',
-      selector: '[data-ved] h3',
-      rationale: '[mock] fallback to data-ved anchor',
+      decision: 'approve_candidate',
+      selector: input.candidates[0].blockSelector,
+      rationale: `[mock] ${reason}, defaulting to first candidate`,
       confidence: 'low',
       expected_min_blocks: 5,
     };
   }
+  return {
+    decision: 'propose_new',
+    selector: '[data-ved] h3',
+    rationale: `[mock] ${reason}, fallback to data-ved anchor`,
+    confidence: 'low',
+    expected_min_blocks: 5,
+  };
+}
 
-  // Optional peer dep: only required when ANTHROPIC_API_KEY is set.
+export async function repairWithLLM(input: LLMRepairInput): Promise<LLMRepairOutput> {
+  const optedIn = process.env.SURF_LLM_HEAL === 'true';
+  if (!optedIn) {
+    return mockRepair(input, 'SURF_LLM_HEAL not enabled');
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return mockRepair(input, 'no API key');
+  }
+
   let Anthropic: any;
   try {
-    // @ts-expect-error optional peer dep
-    const mod = await import('@anthropic-ai/sdk');
+    // dynamic specifier: optional peer dep, may not be installed
+    const sdkName = '@anthropic-ai/sdk';
+    const mod = await import(sdkName);
     Anthropic = mod.default;
   } catch {
     throw new Error('ANTHROPIC_API_KEY set but @anthropic-ai/sdk not installed (run: npm install @anthropic-ai/sdk)');
@@ -83,12 +101,14 @@ export async function repairWithLLM(input: LLMRepairInput): Promise<LLMRepairOut
         cache_control: { type: 'ephemeral', ttl: '1h' },
       },
     ],
+    tools: [REPAIR_TOOL],
+    tool_choice: { type: 'tool', name: REPAIR_TOOL.name },
     messages: [{ role: 'user', content: userMsg }],
   });
 
-  const block = resp.content[0];
-  if (block.type !== 'text') throw new Error('unexpected response shape');
-  return JSON.parse(block.text) as LLMRepairOutput;
+  const toolUse = resp.content.find((b: { type: string }) => b.type === 'tool_use');
+  if (!toolUse) throw new Error('expected tool_use response, got: ' + JSON.stringify(resp.content.map((b: { type: string }) => b.type)));
+  return (toolUse as { input: LLMRepairOutput }).input;
 }
 
 export function compressSerpHtml(html: string, maxBytes = 100_000): string {

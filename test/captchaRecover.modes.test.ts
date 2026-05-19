@@ -36,6 +36,23 @@ describe('recoverFromCaptcha modes', () => {
     errSpy.mockRestore();
   });
 
+  it('remote_debug attaches guidance to CaptchaError.userAction', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { recoverFromCaptcha } = await import('../src/captchaRecover.js');
+    let caught: unknown;
+    try {
+      await recoverFromCaptcha({ mode: 'remote_debug' });
+    } catch (e) {
+      caught = e;
+    }
+    errSpy.mockRestore();
+    expect(caught).toBeDefined();
+    const ua = (caught as { userAction?: string }).userAction;
+    expect(typeof ua).toBe('string');
+    expect(ua).toMatch(/chrome:\/\/inspect/i);
+    expect(ua).toMatch(/ssh|forward|DevTools/i);
+  });
+
   it('notify_spawn invokes osNotify', async () => {
     const notify = await import('../src/notify.js');
     const { recoverFromCaptcha } = await import('../src/captchaRecover.js');

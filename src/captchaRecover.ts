@@ -43,8 +43,9 @@ export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Pr
     throw new CaptchaError('cloud-mode: tier-3 unavailable');
   }
   if (mode === 'remote_debug') {
-    console.error(`[google-surf-mcp] ${remoteDebugGuidance()}`);
-    throw new CaptchaError('remote-debug: human action required via DevTools');
+    const guidance = remoteDebugGuidance();
+    console.error(`[google-surf-mcp] ${guidance}`);
+    throw new CaptchaError('remote-debug: human action required via DevTools', guidance);
   }
 
   if (recoveryInFlight) return recoveryInFlight;

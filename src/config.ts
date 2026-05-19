@@ -28,6 +28,9 @@ export interface Config {
 
   telemetryEnabled: boolean;
   telemetryRoot: string;
+
+  selfHealingEnabled: boolean;
+  selfHealingFile: string;
 }
 
 function parseBool(v: string | undefined, defaultVal: boolean): boolean {
@@ -101,5 +104,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     telemetryEnabled: parseBool(env.SURF_TELEMETRY, false),
     telemetryRoot: env.SURF_TELEMETRY_ROOT || join(profileRoot, 'telemetry'),
+
+    selfHealingEnabled: parseBool(env.SURF_SELF_HEALING, true),
+    selfHealingFile: env.SURF_SELF_HEALING_FILE || join(profileRoot, '.heal', 'strategy-order.json'),
   };
 }

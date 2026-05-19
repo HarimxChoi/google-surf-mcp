@@ -1,6 +1,6 @@
 import type { BrowserContext } from 'playwright';
 import { launch, cloneProfile, getPage } from './browser.js';
-import { search, CaptchaError } from './search.js';
+import { search, CaptchaError, type SearchOptions } from './search.js';
 import { extract, type ExtractResult, type ExtractMode } from './extract.js';
 import type { SearchResult, ResultClassification } from './types.js';
 
@@ -66,12 +66,12 @@ export class SearchPool {
     this.warmed = true;
   }
 
-  async runMany(queries: string[], limit = 10, opts?: { locale?: string }): Promise<PoolSearchResult[]> {
+  async runMany(queries: string[], limit = 10, opts?: SearchOptions): Promise<PoolSearchResult[]> {
     if (!this.warmed) await this.warm();
     return Promise.all(queries.map((q) => this.searchOne(q, limit, opts)));
   }
 
-  async searchOne(query: string, limit: number, opts?: { locale?: string }): Promise<PoolSearchResult> {
+  async searchOne(query: string, limit: number, opts?: SearchOptions): Promise<PoolSearchResult> {
     if (!this.warmed) await this.warm();
     const w = await this.acquire();
     try {

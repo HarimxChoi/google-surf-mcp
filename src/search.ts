@@ -4,15 +4,18 @@ import { isBlocked } from './browser.js';
 import { STRATEGIES, parseResultsInBrowser } from './parse.js';
 import { verifyResultsGeometricInBrowser, aggregateConfidence } from './verify.js';
 import { scoreResult } from './score.js';
+import type { StrategyHealing } from './strategyHealing.js';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const SELECT_ALL = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
 
 export class CaptchaError extends Error {
-  constructor(stage: string) {
+  readonly userAction?: string;
+  constructor(stage: string, userAction?: string) {
     super(`Google CAPTCHA at ${stage}`);
     this.name = 'CaptchaError';
+    this.userAction = userAction;
   }
 }
 
@@ -25,6 +28,7 @@ const EARLY_EXIT_MIN_CONFIDENCE = 0.7;
 
 export interface SearchOptions {
   locale?: string;
+  healing?: StrategyHealing;
 }
 
 export interface SearchOutcome {
@@ -117,12 +121,14 @@ export async function search(
   return await pickAndScoreResults(page, limit, {
     locale: opts.locale,
     waitErr,
+    healing: opts.healing,
   });
 }
 
 export interface PickOptions {
   locale?: string;
   waitErr?: Error | null;
+  healing?: StrategyHealing;
 }
 
 export async function pickAndScoreResults(
@@ -131,8 +137,19 @@ export async function pickAndScoreResults(
   opts: PickOptions = {},
 ): Promise<SearchOutcome> {
   const parseMax = Math.max(limit * 2, limit + 5);
+  const orderedIds = opts.healing
+    ? opts.healing.getOrderedStrategyIds(STRATEGIES.map((s) => s.id))
+    : STRATEGIES.map((s) => s.id);
+  const orderedStrategies: ParserStrategy[] = orderedIds
+    .map((id) => STRATEGIES.find((s) => s.id === id))
+    .filter((s): s is ParserStrategy => !!s);
+  // defensive: a corrupt persisted order must not silently drop strategies
+  for (const s of STRATEGIES) {
+    if (!orderedStrategies.find((x) => x.id === s.id)) orderedStrategies.push(s);
+  }
+
   const candidates: StrategyCandidate[] = [];
-  for (const strategy of STRATEGIES) {
+  for (const strategy of orderedStrategies) {
     const cand = await evaluateStrategy(page, strategy, parseMax);
     candidates.push(cand);
     if (cand.results.length >= EARLY_EXIT_MIN_RESULTS && cand.conf >= EARLY_EXIT_MIN_CONFIDENCE) {
@@ -144,6 +161,14 @@ export async function pickAndScoreResults(
     const score = (c: StrategyCandidate) => c.results.length * (1 + c.conf);
     return score(b) > score(a) ? b : a;
   }, candidates[0]);
+
+  if (opts.healing) {
+    for (const c of candidates) {
+      if (c.results.length === 0) opts.healing.recordOutcome(c.strategy.id, 'zero');
+      else if (c === best) opts.healing.recordOutcome(c.strategy.id, 'win');
+      else opts.healing.recordOutcome(c.strategy.id, 'loss');
+    }
+  }
 
   if (best.results.length === 0) {
     if (opts.waitErr) {

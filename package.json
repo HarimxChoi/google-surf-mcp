@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "MCP server for Google search via warm Chrome profile. No API key.",
   "type": "module",
@@ -57,6 +57,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.97.0",
     "@types/jsdom": "^21.1.7",
     "@types/node": "^20.17.10",
     "@types/turndown": "^5.0.6",

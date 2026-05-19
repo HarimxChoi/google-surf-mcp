@@ -1,6 +1,50 @@
 # Changelog
 
-## [0.5.3]
+## [0.6.0]
+
+### Added
+
+#### Runtime self-healing (src/strategyHealing.ts)
+Per-strategy outcome tracking with persisted reordering. The healing layer learns which SERP parser strategy wins for the current Google layout and reorders the runtime trial sequence so the most reliable strategy is tried first.
+
+- `StrategyHealing` class: `recordOutcome(id, 'win'|'loss'|'zero')`, `getOrderedStrategyIds(default)`, `getStats()`, `flush()`.
+- Score formula: `wins * 10 - zeros`. Losses are ignored (losing to a better strategy is normal SERP drift, not breakage).
+- Reorder only kicks in when the leader has at least 3 more wins than the runner-up; prevents single-call flapping.
+- Recent-win recency breaks score ties so a strategy that worked yesterday outranks one that worked six months ago at equal score.
+- Atomic disk writes via `tmp + rename`. Debounced (5s) so a burst of searches does not hammer the disk.
+- Per-strategy stats are surfaced through `healthTool` so operators can see the current preference order without inspecting the file.
+- Corrupt or missing state collapses to default order; healing must never break a search call.
+- 17 unit tests covering disabled mode, load, ordering thresholds, win/loss/zero accounting, tie-breaks, disk safety.
+
+#### New env vars
+- `SURF_SELF_HEALING` (default `true`): master switch for runtime selector reordering (deterministic, no LLM, no network).
+- `SURF_SELF_HEALING_FILE` (default `<profileRoot>/.heal/strategy-order.json`): override the persistence path.
+- `SURF_LLM_HEAL` (default `false`): opt-in gate for the workflow-only `repairWithLLM` helper. Off by default — no third-party LLM request ever fires from this package without an explicit opt-in AND a user-supplied `ANTHROPIC_API_KEY`. The package never ships a maintainer key.
+
+#### `pool` field in `healthTool` response
+`getPoolHealth()` is now wired into the health response. Returns `{ warmFailures, fallback }` so operators can spot a pool that has flipped to single-context mode without digging through stderr.
+
+#### `selfHealing` field in `healthTool` response
+Reports `{ enabled, order, stats }` so the current strategy preference order is visible at runtime.
+
+### Fixed
+
+- **remote_debug idle close**: `recoverHuman` now calls `suspendIdleClose()` before throwing in `remote_debug` mode and resumes after. Previously the 30s idle timer scheduled by `trackSeq`/`trackPool` could close the Chromium whose DevTools port was just advertised, breaking the recovery if the user took longer than `SURF_IDLE_CLOSE_MS` to set up the SSH tunnel.
+- **remote_debug guidance lost in MCP clients**: `CaptchaError` now carries an optional `userAction` field. The remote-debug branch in `recoverFromCaptcha` embeds the port-forward instructions in `userAction`, which `toErrorInfo` surfaces through `ErrorInfo.user_action`. MCP clients that drop server stderr (most of them) now see the actionable text in the structured error response.
+- **seqBackedHandle missing timeout protection**: when the pool warms 3× and `acquirePool` switches to the single-context fallback, `runMany`/`searchOne`/`extractOne` are now wrapped with `withTimeout` matching the `poolBackedHandle` budgets (30s / 60s). Previously a hung sequential op had no upper bound.
+
+### Fixed (cron / build)
+- **`serp-repair-pipeline` workflow daily failure**: `scripts/repair/index.ts` lives outside `src/` so `npm run build` (tsconfig `rootDir: ./src`) never compiled it. Workflow then `node build/scripts/repair/index.js` → ENOENT → exit 1. Added `tsconfig.scripts.json` (rootDir=`.`, outDir=`./build-scripts`) and a `build repair scripts` step. Workflow now runs `node build-scripts/scripts/repair/index.js` and sets `SURF_LLM_HEAL=true` so the new opt-in gate does not turn the cron into a deterministic no-op.
+
+### Tests
+- 296 passing (was 261). New:
+  - `StrategyHealing` unit tests (21) — disabled mode, load merge with concurrent recordOutcome race, ordering thresholds, win/loss/zero accounting, tie-breaks, persisted reorder, disk safety, dirty-flag preserved on flush failure.
+  - `search.healing` integration tests (4) — `pickAndScoreResults` against real SERP fixtures: win/loss/zero on populated SERP, all-zero on empty SERP, 4-call → persisted → fresh-instance reorder, no-healing control.
+  - `agent.health` tests (5) — `healthTool` surfaces `getPoolHealth()` snapshot (incl. fallback=true case) and `selfHealing` { enabled, order, stats } correctly, order updates after margin-crossing wins.
+  - `heal.llm.gate` tests (4) — opt-in matrix: unset/false → mock, opted-in + no key → mock, no candidates → fallback selector.
+  - CaptchaError userAction surface (1).
+
+## [0.5.5]
 
 ### Added
 

@@ -20,14 +20,14 @@ export function toErrorInfo(
         code: 'CAPTCHA_REQUIRED',
         message: 'Google CAPTCHA encountered. Cloud mode cannot solve interactively.',
         retryable: false,
-        user_action: 'Run on an interactive desktop session, or refresh profile: npm run bootstrap',
+        user_action: e.userAction ?? 'Run on an interactive desktop session, or refresh profile: npm run bootstrap',
       };
     }
     return {
       code: 'CAPTCHA_RECOVER_FAIL',
       message,
       retryable: false,
-      user_action: 'Solve CAPTCHA in opened browser, or run: npm run bootstrap',
+      user_action: e.userAction ?? 'Solve CAPTCHA in opened browser, or run: npm run bootstrap',
     };
   }
 

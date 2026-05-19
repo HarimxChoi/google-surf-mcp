@@ -150,6 +150,11 @@ Claude Code 재시작
 | `SURF_NO_SANDBOX` | `=SURF_CLOUD_MODE` | `--no-sandbox` (cloud 모드에서 자동 on) |
 | `SURF_TELEMETRY` | `false` | `true`로 설정 시 jsonl 이벤트 로깅 활성화 (검색 결과, 캐시 hit/miss, tool 에러, parser staleness 기록). self-healing 파이프라인의 입력으로 사용. 기본 OFF. |
 | `SURF_TELEMETRY_ROOT` | `<profile>/telemetry` | jsonl 파일 디렉토리. UTC 기준 날짜별 파일 1개 (`YYYY-MM-DD.jsonl`). |
+| `SURF_SELF_HEALING` | `true` | strategy별 성공/실패 추적 + 영속 재배열. leader가 runner-up보다 3승 차이 이상일 때만 재배열 발동. `false`로 끄면 기본 strategy 순서 고정 |
+| `SURF_SELF_HEALING_FILE` | `<profile>/.heal/strategy-order.json` | self-healing 상태 영속 경로. atomic tmp+rename 쓰기, 5초 디바운스 |
+| `SURF_LLM_HEAL` | `false` | workflow 전용 `repairWithLLM`의 LLM 호출 opt-in. 기본 OFF → 외부 LLM 요청 절대 안 나감. `true`로 켜면 `ANTHROPIC_API_KEY` (본인 키) 필요. 패키지는 유지보수자 키를 절대 포함하지 않음 |
+| `ANTHROPIC_API_KEY` | — | 본인 Anthropic 키. `SURF_LLM_HEAL=true`일 때만 읽음. 런타임 self-healing (`SURF_SELF_HEALING`)은 deterministic이라 이 변수 안 읽음 |
+
 ## Troubleshooting
 
 - CAPTCHA 4모드 (env로 자동 결정):
@@ -157,6 +162,7 @@ Claude Code 재시작
   - `SURF_HEADLESS=false`: headed Chrome 열림, 알림 생략
   - `SURF_REMOTE_DEBUG=true`: DevTools 포트 안내 출력, 로컬에서 `chrome://inspect`로 attach해서 풀기
   - `SURF_CLOUD_MODE=true`: `CAPTCHA_REQUIRED` 에러로 fail-fast
+- **headed Chrome이 CAPTCHA 대신 그냥 검색창으로 열림**: 그냥 아무 검색어 입력하고 Enter 치면 됨. 이후 호출은 정상 동작
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정
 - 셀렉터 깨짐: Google이 클래스명 바꿈. v0.4.5+는 multi-strategy parser + 일일 self-healing 워크플로우로 draft PR 자동 생성 (사람 리뷰 필수)
 - SSRF: `extract`는 기본적으로 `localhost`, 사설 IP, AWS metadata 차단. `SURF_ALLOW_PRIVATE=true`로 우회

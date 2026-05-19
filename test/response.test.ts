@@ -62,6 +62,18 @@ describe('toErrorInfo classification', () => {
     expect(ei.user_action).toMatch(/Solve CAPTCHA|bootstrap/);
   });
 
+  it('CaptchaError carrying userAction overrides the default user_action', () => {
+    const guidance = 'Forward port 9222 via ssh -L 9222:localhost:9222 host';
+    const ei = toErrorInfo(new CaptchaError('remote-debug', guidance), { cloudMode: false });
+    expect(ei.user_action).toBe(guidance);
+  });
+
+  it('CaptchaError userAction also overrides cloudMode default', () => {
+    const guidance = 'specific cloud guidance';
+    const ei = toErrorInfo(new CaptchaError('cloud', guidance), { cloudMode: true });
+    expect(ei.user_action).toBe(guidance);
+  });
+
   it('timeout message → NAV_TIMEOUT retryable', () => {
     const ei = toErrorInfo(new Error('search timeout after 30000ms'), { cloudMode: false });
     expect(ei.code).toBe('NAV_TIMEOUT');
