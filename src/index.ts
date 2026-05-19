@@ -142,6 +142,15 @@ async function resetPool(): Promise<void> {
   return poolClosing;
 }
 
+// withTimeout cleanup: skip teardown while concurrent callers still hold the shared ctx/pool.
+// trackSeq/trackPool keep the counters incremented through cleanup, so > 1 means another in-flight request.
+function closeSequentialIfIdle(): Promise<void> {
+  return seqActive > 1 ? Promise.resolve() : closeSequential();
+}
+function resetPoolIfIdle(): Promise<void> {
+  return poolActive > 1 ? Promise.resolve() : resetPool();
+}
+
 // ref-counted idle auto-close
 let seqActive = 0;
 let poolActive = 0;
@@ -262,7 +271,7 @@ function buildDeps(): Deps {
         })(),
         REQUEST_TIMEOUT_MS,
         'search_extract:search',
-        closeSequential,
+        closeSequentialIfIdle,
       ));
     };
     return {
@@ -281,7 +290,7 @@ function buildDeps(): Deps {
           })(),
           REQUEST_TIMEOUT_MS,
           'extract',
-          closeSequential,
+          closeSequentialIfIdle,
         ));
       },
     };
@@ -293,7 +302,7 @@ function buildDeps(): Deps {
         p.runMany(queries, limit, opts),
         REQUEST_TIMEOUT_MS * 2,
         'search_parallel',
-        resetPool,
+        resetPoolIfIdle,
       )),
     extractOne: (url, maxChars, extractMode) =>
       trackPool(() => withTimeout(
@@ -306,7 +315,7 @@ function buildDeps(): Deps {
         p.searchOne(query, limit, opts),
         REQUEST_TIMEOUT_MS,
         'search_extract:search',
-        resetPool,
+        resetPoolIfIdle,
       )),
   });
 
