@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
 import { launch, getPage, PROFILE_MAIN } from '../../src/browser.js';
 import { search } from '../../src/search.js';
 import { STRATEGIES, parseResultsInBrowser } from '../../src/parse.js';
@@ -191,11 +192,10 @@ detectAndRepair()
   .then((result) => {
     console.error('[repair] complete:', JSON.stringify(result, null, 2));
     if (process.env.GITHUB_OUTPUT) {
-      const fs = require('node:fs');
-      fs.appendFileSync(process.env.GITHUB_OUTPUT, `trigger=${result.trigger}\n`);
+      appendFileSync(process.env.GITHUB_OUTPUT, `trigger=${result.trigger}\n`);
       if (result.prDraft) {
-        fs.appendFileSync(process.env.GITHUB_OUTPUT, `should_open_pr=${result.decision?.shouldOpenPR ?? false}\n`);
-        fs.appendFileSync(process.env.GITHUB_OUTPUT, `caution=${result.decision?.caution ?? false}\n`);
+        appendFileSync(process.env.GITHUB_OUTPUT, `should_open_pr=${result.decision?.shouldOpenPR ?? false}\n`);
+        appendFileSync(process.env.GITHUB_OUTPUT, `caution=${result.decision?.caution ?? false}\n`);
       }
     }
     process.exit(0);
