@@ -105,11 +105,12 @@ export async function search(
     await page.keyboard.type(ch, { delay: rand(8, 20) });
   }
   await sleep(rand(50, 110));
+  const beforeUrl = page.url();
   await page.keyboard.press('Enter');
 
   let waitErr: Error | null = null;
   try {
-    await page.waitForURL(/\/search\?/, { timeout: 5_000 });
+    await page.waitForURL(u => u.href !== beforeUrl, { timeout: 5_000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 4_000 });
     await page.waitForSelector('h3, #search, [id="rso"]', { timeout: 4_000 });
   } catch (e) {
