@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { launch, getPage, PROFILE_MAIN, profileExists, clearProfileLocks } from './browser.js';
+import { launch, getPage, PROFILE_MAIN, profileExists, clearProfileLocks, invalidateSeed } from './browser.js';
 import { search, CaptchaError } from './search.js';
 import { SearchPool, type PoolSearchResult } from './pool.js';
 import { extract, type ExtractMode } from './extract.js';
@@ -345,6 +345,7 @@ function buildDeps(): Deps {
       ]);
     }
     await recoverFromCaptcha({ mode: captchaMode });
+    await invalidateSeed();
   };
 
   return {
