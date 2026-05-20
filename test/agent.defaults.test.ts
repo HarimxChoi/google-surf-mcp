@@ -73,8 +73,8 @@ describe('agent default-config path (no env)', () => {
       ...deps,
       acquireSeqCtx: async () => { throw new Error('unused'); },
       acquirePool: async () => { throw new Error('unused'); },
-      closeSeq: async () => {},
-      resetPool: async () => {},
+      requestSeqRebuild: () => {},
+      requestPoolRebuild: () => {},
       recoverHuman: async () => {},
       getPoolHealth: () => ({ warmFailures: 0, fallback: false }),
     });

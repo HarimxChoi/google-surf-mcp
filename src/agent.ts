@@ -30,6 +30,16 @@ export interface PoolHealthSnapshot {
   fallback: boolean;
 }
 
+// release(succeeded=false) preserves idleSuspended so remote_debug recovery survives a failed retry.
+export interface SeqLease {
+  ctx: BrowserContext;
+  release: (succeeded?: boolean) => void;
+}
+export interface PoolLease {
+  handle: PoolHandle;
+  release: (succeeded?: boolean) => void;
+}
+
 export interface Deps {
   config: Config;
   cache: UnifiedCache;
@@ -37,10 +47,10 @@ export interface Deps {
   limiter: RateLimiter;
   tel: Telemetry;
   healing: StrategyHealing;
-  acquireSeqCtx: (mode: StealthMode) => Promise<BrowserContext>;
-  acquirePool: (mode: StealthMode) => Promise<PoolHandle>;
-  closeSeq: () => Promise<void>;
-  resetPool: () => Promise<void>;
+  acquireSeqCtx: (mode: StealthMode) => Promise<SeqLease>;
+  acquirePool: (mode: StealthMode) => Promise<PoolLease>;
+  requestSeqRebuild: () => void;
+  requestPoolRebuild: () => void;
   recoverHuman: () => Promise<void>;
   getPoolHealth: () => PoolHealthSnapshot;
 }
@@ -74,16 +84,20 @@ async function executeSeqWithCascade<T>(
   op: (ctx: BrowserContext) => Promise<T>,
 ): Promise<T> {
   if (deps.config.cascadeDisabled) {
-    const ctx = await deps.acquireSeqCtx(deps.config.useStealth ? 'on' : 'off');
-    return await op(ctx);
+    const lease = await deps.acquireSeqCtx(deps.config.useStealth ? 'on' : 'off');
+    let ok = false;
+    try { const r = await op(lease.ctx); ok = true; return r; }
+    finally { lease.release(ok); }
   }
 
   return await executeWithCascade<T>(deps.cascade, {
     runWithMode: async (mode) => {
-      const ctx = await deps.acquireSeqCtx(mode);
-      return await op(ctx);
+      const lease = await deps.acquireSeqCtx(mode);
+      let ok = false;
+      try { const r = await op(lease.ctx); ok = true; return r; }
+      finally { lease.release(ok); }
     },
-    resetContext: async () => { await deps.closeSeq(); },
+    resetContext: async () => { deps.requestSeqRebuild(); },
     tier3Recovery: tier3Recovery(deps),
     isCaptchaError: (e) => e instanceof CaptchaError,
     onTransition: (from, to, reason) => {
@@ -98,20 +112,22 @@ async function executePoolWithCascade<T>(
 ): Promise<T> {
   if (deps.config.cascadeDisabled) {
     const initialMode = deps.config.useStealth ? 'on' : 'off';
-    const pool = await deps.acquirePool(initialMode);
-    return await op(pool);
+    const lease = await deps.acquirePool(initialMode);
+    let ok = false;
+    try { const r = await op(lease.handle); ok = true; return r; }
+    finally { lease.release(ok); }
   }
 
   return await executeWithCascade<T>(deps.cascade, {
     runWithMode: async (mode) => {
-      const pool = await deps.acquirePool(mode);
-      return await op(pool);
+      const lease = await deps.acquirePool(mode);
+      let ok = false;
+      try { const r = await op(lease.handle); ok = true; return r; }
+      finally { lease.release(ok); }
     },
     resetContext: async () => {
-      await Promise.all([
-        deps.resetPool().catch(() => {}),
-        deps.closeSeq().catch(() => {}),
-      ]);
+      deps.requestPoolRebuild();
+      deps.requestSeqRebuild();
     },
     tier3Recovery: tier3Recovery(deps),
     isCaptchaError: (e) => e instanceof CaptchaError,
@@ -257,8 +273,10 @@ export async function extractTool(
 
   try {
     const initialMode: StealthMode = deps.cascade.mode;
-    const pool = await deps.acquirePool(initialMode);
-    const result = await pool.extractOne(url, maxChars, mode);
+    const lease = await deps.acquirePool(initialMode);
+    let result, ok = false;
+    try { result = await lease.handle.extractOne(url, maxChars, mode); ok = true; }
+    finally { lease.release(ok); }
     const failed = !!result.error && !result.content;
 
     if (failed) {

@@ -27,8 +27,8 @@ function mkDeps(
     healing,
     acquireSeqCtx: async () => { throw new Error('not used in healthTool'); },
     acquirePool: async () => { throw new Error('not used in healthTool'); },
-    closeSeq: async () => {},
-    resetPool: async () => {},
+    requestSeqRebuild: () => {},
+    requestPoolRebuild: () => {},
     recoverHuman: async () => {},
     getPoolHealth: () => poolHealth,
   };
