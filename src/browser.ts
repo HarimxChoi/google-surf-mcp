@@ -102,7 +102,7 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ...(remoteDebug ? ['--remote-debugging-port=0', '--remote-debugging-address=0.0.0.0'] : []),
   ];
 
-  const ctx = await driver.launchPersistentContext(profileFor(opts.profileDir), {
+  const doLaunch = () => driver.launchPersistentContext(profileFor(opts.profileDir), {
     executablePath: detectChrome(),
     headless: effectiveHeadless,
     viewport: { width: 1366, height: 768 },
@@ -112,6 +112,17 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ignoreHTTPSErrors: insecureTls,
     args,
   });
+
+  // Stale lock from a prior Chrome still flushing; wait, clear, retry once.
+  let ctx: BrowserContext;
+  try {
+    ctx = await doLaunch();
+  } catch (e) {
+    if (!/ProcessSingleton|SingletonLock/i.test((e as Error).message)) throw e;
+    await waitForLockReleased(opts.profileDir, 3_000);
+    await clearProfileLocks(opts.profileDir);
+    ctx = await doLaunch();
+  }
 
   await ctx.route('**/*', route => {
     const t = route.request().resourceType();
@@ -140,30 +151,67 @@ export async function clearProfileLocks(profileDir: string): Promise<void> {
   }
 }
 
-// Chromium holds Windows locks on these while main is live; skip to avoid EBUSY.
-const LOCKED_BASENAMES = new Set([
+export async function waitForLockReleased(profileDir: string, maxMs = 3_000): Promise<void> {
+  const lock = resolve(profileDir, 'SingletonLock');
+  const deadline = Date.now() + maxMs;
+  while (existsSync(lock) && Date.now() < deadline) {
+    await new Promise<void>((r) => setTimeout(r, 50));
+  }
+}
+
+const ALWAYS_SKIP_BASENAMES = new Set([
   'SingletonLock', 'SingletonCookie', 'SingletonSocket',
-  'Cookies', 'Cookies-journal',
-  'Login Data', 'Login Data-journal',
-  'Login Data For Account', 'Login Data For Account-journal',
   'Web Data', 'Web Data-journal',
   'History', 'History-journal',
   'Top Sites', 'Top Sites-journal',
   'Favicons', 'Favicons-journal',
   'Shortcuts', 'Shortcuts-journal',
-  'Network Persistent State', 'TransportSecurity', 'ParentToken',
-  'Sessions', 'Session Storage', 'Local Storage', 'IndexedDB', 'Service Worker',
+  'Sessions', 'Service Worker',
   'GPUCache', 'Code Cache', 'DawnGraphiteCache', 'DawnWebGPUCache',
   'GrShaderCache', 'ShaderCache', 'Crashpad', 'Cache',
 ]);
-const LOCKED_DIR_RE = /(^|.+ )Network$/;
 
-function isSeedSkippable(src: string): boolean {
-  const base = basename(src);
-  return LOCKED_BASENAMES.has(base) || LOCKED_DIR_RE.test(base);
+// Skipped in pass 1 (may be locked on Windows while main's Chrome runs);
+// copied best-effort in pass 2 so workers inherit the solved session.
+const SESSION_BASENAMES = new Set([
+  'Cookies', 'Cookies-journal',
+  'Login Data', 'Login Data-journal',
+  'Login Data For Account', 'Login Data For Account-journal',
+  'Network Persistent State', 'TransportSecurity', 'ParentToken',
+  'Local Storage', 'Session Storage', 'IndexedDB',
+]);
+const SESSION_DIR_BASENAME = 'Network'; // modern cookie location
+const SESSION_PASS_TWO_NAMES: readonly string[] = [
+  ...SESSION_BASENAMES,
+  SESSION_DIR_BASENAME,
+];
+
+function isPassOneSkip(src: string): boolean {
+  const b = basename(src);
+  return ALWAYS_SKIP_BASENAMES.has(b) || SESSION_BASENAMES.has(b) || b === SESSION_DIR_BASENAME;
+}
+
+async function copySessionFiles(srcRoot: string, dstRoot: string): Promise<void> {
+  const defaultSrc = join(srcRoot, 'Default');
+  const defaultDst = join(dstRoot, 'Default');
+  if (!existsSync(defaultSrc)) return;
+  await Promise.all(SESSION_PASS_TWO_NAMES.map(async (name) => {
+    const s = join(defaultSrc, name);
+    if (!existsSync(s)) return;
+    const d = join(defaultDst, name);
+    await cp(s, d, { recursive: true, force: true }).catch(() => {});
+  }));
 }
 
 let seedPromise: Promise<void> | null = null;
+
+export async function invalidateSeed(): Promise<void> {
+  seedPromise = null;
+  if (existsSync(PROFILE_SEED)) {
+    await rm(PROFILE_SEED, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export function ensureSeed(): Promise<void> {
   if (existsSync(PROFILE_SEED)) return Promise.resolve();
   if (seedPromise) return seedPromise;
@@ -177,9 +225,10 @@ export function ensureSeed(): Promise<void> {
         await cp(PROFILE_MAIN, PROFILE_SEED, {
           recursive: true,
           force: true,
-          filter: (src) => !isSeedSkippable(src),
+          filter: (src) => !isPassOneSkip(src),
         });
         await clearProfileLocks(PROFILE_SEED);
+        await copySessionFiles(PROFILE_MAIN, PROFILE_SEED);
         return;
       } catch (e) {
         lastErr = e;
