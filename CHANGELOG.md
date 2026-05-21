@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1]
+
+### Fixed
+- Fixed stale SERP parsing by waiting for the search URL to actually change before parsing results.
+- Fixed CAPTCHA recovery seed/session inheritance so pool workers can inherit solved session state.
+- Improved ProcessSingleton retry by waiting for Chrome profile locks to be released before relaunch.
+
 ## [0.6.0]
 
 ### Added
