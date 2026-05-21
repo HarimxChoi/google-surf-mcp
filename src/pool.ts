@@ -1,5 +1,5 @@
 import type { BrowserContext } from 'playwright';
-import { launch, cloneProfile, getPage } from './browser.js';
+import { launch, cloneProfile, getPage, PROFILE_MAIN } from './browser.js';
 import { search, CaptchaError, type SearchOptions } from './search.js';
 import { extract, type ExtractResult, type ExtractMode } from './extract.js';
 import type { SearchResult, ResultClassification } from './types.js';
@@ -34,6 +34,7 @@ export class SearchPool {
   private warmed = false;
   private closing = false;
   private rebuildFailureCount = 0;
+  private seedCookies: Awaited<ReturnType<BrowserContext['cookies']>> | null = null;
 
   constructor(size = 4) {
     this.size = Math.max(1, size);
@@ -41,12 +42,14 @@ export class SearchPool {
 
   async warm(): Promise<void> {
     if (this.warmed) return;
+    const cookies = await this.getSeedCookies();
     const dirs = await Promise.all(
       Array.from({ length: this.size }, (_, i) => cloneProfile(i)),
     );
     const settled = await Promise.allSettled(
       dirs.map(async (d) => {
         const ctx = await launch({ profileDir: d });
+        if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
         const page = await getPage(ctx);
         await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
         return { ctx, busy: false } as Worker;
@@ -105,9 +108,26 @@ export class SearchPool {
     }
   }
 
+  // Workers clone a cookie-stripped seed; without Google cookies the first search hits /sorry/.
+  private async getSeedCookies(): Promise<Awaited<ReturnType<BrowserContext['cookies']>>> {
+    if (this.seedCookies) return this.seedCookies;
+    let ctx: BrowserContext | undefined;
+    try {
+      ctx = await launch({ profileDir: PROFILE_MAIN });
+      this.seedCookies = await ctx.cookies();
+    } catch {
+      this.seedCookies = [];
+    } finally {
+      await ctx?.close().catch(() => {});
+    }
+    return this.seedCookies;
+  }
+
   private async rebuildWorker(idx: number): Promise<Worker> {
     const dir = await cloneProfile(idx);
     const ctx = await launch({ profileDir: dir });
+    const cookies = await this.getSeedCookies();
+    if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
     const page = await getPage(ctx);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
     return { ctx, busy: false };
