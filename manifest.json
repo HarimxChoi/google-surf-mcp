@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "0.6.0",
+  "version": "0.6.2",
   "description": "Free Google search MCP that actually works — no API key, no proxies, no solvers. Search + extraction in one MCP.",
   "long_description": "Free Google search MCP that actually works — no API key, no proxies, no solvers (most free Google search MCPs fail in practice; this one drives a warm Chrome profile via Playwright + stealth). Search + page extraction in one MCP: `search_extract` returns SERP results already enriched with article bodies — replaces the usual search-MCP + fetch-MCP combo. CAPTCHA opens a visible Chrome window for a human to solve (shared-IP reputation protection); `SURF_CLOUD_MODE=true` for headless/serverless fail-fast.",
   "author": {
@@ -36,7 +36,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@0.6.0"
+        "google-surf-mcp@0.6.2"
       ],
       "env": {
         "CHROME_PATH": "${user_config.chrome_path}",
