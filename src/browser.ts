@@ -102,7 +102,7 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ...(remoteDebug ? ['--remote-debugging-port=0', '--remote-debugging-address=0.0.0.0'] : []),
   ];
 
-  const ctx = await driver.launchPersistentContext(profileFor(opts.profileDir), {
+  const doLaunch = () => driver.launchPersistentContext(profileFor(opts.profileDir), {
     executablePath: detectChrome(),
     headless: effectiveHeadless,
     viewport: { width: 1366, height: 768 },
@@ -112,6 +112,17 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ignoreHTTPSErrors: insecureTls,
     args,
   });
+
+  // Stale lock from a prior Chrome still flushing; wait, clear, retry once.
+  let ctx: BrowserContext;
+  try {
+    ctx = await doLaunch();
+  } catch (e) {
+    if (!/ProcessSingleton|SingletonLock/i.test((e as Error).message)) throw e;
+    await waitForLockReleased(opts.profileDir, 3_000);
+    await clearProfileLocks(opts.profileDir);
+    ctx = await doLaunch();
+  }
 
   await ctx.route('**/*', route => {
     const t = route.request().resourceType();
@@ -137,6 +148,14 @@ export async function clearProfileLocks(profileDir: string): Promise<void> {
   for (const f of SINGLETON_FILES) {
     const p = resolve(profileDir, f);
     if (existsSync(p)) await rm(p, { force: true }).catch(() => {});
+  }
+}
+
+export async function waitForLockReleased(profileDir: string, maxMs = 3_000): Promise<void> {
+  const lock = resolve(profileDir, 'SingletonLock');
+  const deadline = Date.now() + maxMs;
+  while (existsSync(lock) && Date.now() < deadline) {
+    await new Promise<void>((r) => setTimeout(r, 50));
   }
 }
 
