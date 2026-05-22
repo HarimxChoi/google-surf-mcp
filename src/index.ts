@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { launch, getPage, PROFILE_MAIN, profileExists, clearProfileLocks } from './browser.js';
+import { launch, getPage, PROFILE_MAIN, profileExists } from './browser.js';
 import { search, CaptchaError } from './search.js';
 import { SearchPool, type PoolSearchResult } from './pool.js';
 import { extract, type ExtractMode } from './extract.js';
@@ -10,9 +10,10 @@ import { recoverFromCaptcha } from './captchaRecover.js';
 import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
 import { withTimeout } from './timeout.js';
+import { LeasedResource } from './lifecycle.js';
 import {
   searchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
-  initDeps, type Deps, type PoolHandle,
+  initDeps, type Deps, type PoolHandle, type SeqLease, type PoolLease,
 } from './agent.js';
 import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
@@ -32,11 +33,7 @@ function parseIdleMs(): number {
 }
 const IDLE_CLOSE_MS = parseIdleMs();
 
-// sequential ctx lifecycle
-let ctxPromise: Promise<BrowserContext> | null = null;
-let ctxClosing: Promise<void> | null = null;
-let ctxMode: StealthMode | null = null;
-
+// shared resource lifecycle
 async function launchAndWarm(mode: StealthMode): Promise<BrowserContext> {
   const c = await launch({ profileDir: PROFILE_MAIN, stealth: mode === 'on' });
   try {
@@ -49,52 +46,21 @@ async function launchAndWarm(mode: StealthMode): Promise<BrowserContext> {
   }
 }
 
-function getSequentialCtx(mode: StealthMode = 'off'): Promise<BrowserContext> {
-  if (ctxClosing) return ctxClosing.then(() => getSequentialCtx(mode));
-  // If a ctx exists but with a different stealth mode, close and rebuild.
-  if (ctxPromise && ctxMode !== null && ctxMode !== mode) {
-    return closeSequential().then(() => getSequentialCtx(mode));
-  }
-  if (ctxPromise) return ctxPromise;
-  const p = (async () => {
-    try {
-      return await launchAndWarm(mode);
-    } catch {
-      // Stale lock from a crashed Chromium fails the first launch; clear + retry once.
-      await clearProfileLocks(PROFILE_MAIN);
-      return await launchAndWarm(mode);
-    }
-  })();
-  ctxPromise = p;
-  ctxMode = mode;
-  p.catch(() => {
-    if (ctxPromise === p) { ctxPromise = null; ctxMode = null; }
-  });
-  return p;
-}
+const seqResource = new LeasedResource<BrowserContext, StealthMode>({
+  build: launchAndWarm,
+  close: (c) => c.close().catch(() => {}),
+});
 
-function closeSequential(): Promise<void> {
-  if (ctxClosing) return ctxClosing;
-  const cp = ctxPromise;
-  ctxPromise = null;
-  ctxMode = null;
-  if (!cp) return Promise.resolve();
-  ctxClosing = (async () => {
-    try {
-      const c = await cp.catch(() => null);
-      await c?.close().catch(() => {});
-    } finally {
-      ctxClosing = null;
-    }
-  })();
-  return ctxClosing;
-}
+const poolResource = new LeasedResource<SearchPool, StealthMode>({
+  build: async (_mode) => {
+    const p = new SearchPool(POOL_SIZE);
+    try { await p.warm(); }
+    catch (e) { await p.close().catch(() => {}); throw e; }
+    return p;
+  },
+  close: (p) => p.close().catch(() => {}),
+});
 
-// pool lifecycle
-let pool: SearchPool | null = null;
-let poolPromise: Promise<SearchPool> | null = null;
-let poolClosing: Promise<void> | null = null;
-let poolMode: StealthMode | null = null;
 let poolWarmFailures = 0;
 let poolFallbackMode = false;
 
@@ -102,49 +68,7 @@ export function getPoolHealth(): { warmFailures: number; fallback: boolean } {
   return { warmFailures: poolWarmFailures, fallback: poolFallbackMode };
 }
 
-function ensurePool(mode: StealthMode = 'off'): Promise<SearchPool> {
-  if (poolClosing) return poolClosing.then(() => ensurePool(mode));
-  // Pool reflects current cascade mode; rebuild on transition.
-  if (pool && poolMode !== null && poolMode !== mode) {
-    return resetPool().then(() => ensurePool(mode));
-  }
-  if (pool) return Promise.resolve(pool);
-  if (poolPromise) return poolPromise;
-  poolPromise = (async () => {
-    try {
-      await closeSequential();
-      const p = new SearchPool(POOL_SIZE);
-      try { await p.warm(); }
-      catch (e) { await p.close().catch(() => {}); throw e; }
-      pool = p;
-      poolMode = mode;
-      return p;
-    } finally {
-      poolPromise = null;
-    }
-  })();
-  return poolPromise;
-}
-
-async function resetPool(): Promise<void> {
-  if (poolClosing) return poolClosing;
-  if (poolPromise) {
-    try { await poolPromise; } catch { /* */ }
-  }
-  const cur = pool;
-  pool = null;
-  poolMode = null;
-  if (!cur) return;
-  poolClosing = (async () => {
-    try { await cur.close(); }
-    finally { poolClosing = null; }
-  })();
-  return poolClosing;
-}
-
-// ref-counted idle auto-close
-let seqActive = 0;
-let poolActive = 0;
+// idle auto-close
 let seqIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let poolIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let idleSuspended = false;
@@ -161,56 +85,34 @@ export function resumeIdleClose(): void {
   idleSuspended = false;
 }
 
-async function trackSeq<T>(op: () => Promise<T>): Promise<T> {
+function scheduleSeqIdleClose(): void {
   clearSeqIdle();
-  seqActive++;
-  let succeeded = false;
-  try {
-    const r = await op();
-    succeeded = true;
-    return r;
-  } finally {
-    seqActive--;
-    if (succeeded && idleSuspended) idleSuspended = false;
-    if (seqActive === 0 && IDLE_CLOSE_MS > 0 && !idleSuspended) {
-      seqIdleTimer = setTimeout(() => {
-        seqIdleTimer = null;
-        if (seqActive === 0 && !idleSuspended) closeSequential().catch(() => {});
-      }, IDLE_CLOSE_MS);
-    }
-  }
+  if (IDLE_CLOSE_MS <= 0 || idleSuspended) return;
+  seqIdleTimer = setTimeout(() => {
+    seqIdleTimer = null;
+    if (seqResource.activeCount === 0 && !idleSuspended) seqResource.requestRebuild();
+  }, IDLE_CLOSE_MS);
 }
-
-async function trackPool<T>(op: () => Promise<T>): Promise<T> {
+function schedulePoolIdleClose(): void {
   clearPoolIdle();
-  poolActive++;
-  let succeeded = false;
-  try {
-    const r = await op();
-    succeeded = true;
-    return r;
-  } finally {
-    poolActive--;
-    if (succeeded && idleSuspended) idleSuspended = false;
-    if (poolActive === 0 && IDLE_CLOSE_MS > 0 && !idleSuspended) {
-      poolIdleTimer = setTimeout(() => {
-        poolIdleTimer = null;
-        if (poolActive === 0 && !idleSuspended) resetPool().catch(() => {});
-      }, IDLE_CLOSE_MS);
-    }
-  }
+  if (IDLE_CLOSE_MS <= 0 || idleSuspended) return;
+  poolIdleTimer = setTimeout(() => {
+    poolIdleTimer = null;
+    if (poolResource.activeCount === 0 && !idleSuspended) poolResource.requestRebuild();
+  }, IDLE_CLOSE_MS);
 }
 
 async function shutdown() {
   clearSeqIdle();
   clearPoolIdle();
   const drainStart = Date.now();
-  while ((seqActive > 0 || poolActive > 0) && Date.now() - drainStart < 10_000) {
+  while ((seqResource.activeCount + poolResource.activeCount) > 0 && Date.now() - drainStart < 10_000) {
     await new Promise((r) => setTimeout(r, 50));
   }
-  await closeSequential();
-  await pool?.close();
-  pool = null;
+  await Promise.all([
+    seqResource.closeAll(),
+    poolResource.closeAll(),
+  ]);
   await baseDeps.healing.flush().catch(() => {});
   baseDeps.healing.shutdown();
 }
@@ -237,33 +139,50 @@ async function ensureProfileReady(): Promise<{ ok: true } | { ok: false; message
 }
 
 function buildDeps(): Deps {
-  const acquireSeqCtx = async (mode: StealthMode) => {
-    return await trackSeq(() => getSequentialCtx(mode));
+  const acquireSeqCtx = async (mode: StealthMode): Promise<SeqLease> => {
+    clearSeqIdle();
+    const lease = await seqResource.acquire(mode);
+    return {
+      ctx: lease.value,
+      release: (succeeded = false) => {
+        lease.release();
+        if (succeeded && idleSuspended) idleSuspended = false;
+        if (seqResource.activeCount === 0) scheduleSeqIdleClose();
+      },
+    };
   };
 
   const seqBackedHandle = (mode: StealthMode): PoolHandle => {
     const seqSearchOne = async (
       query: string, limit: number, opts?: { locale?: string },
     ): Promise<PoolSearchResult> => {
-      return await trackSeq(() => withTimeout(
-        (async () => {
-          const ctx = await getSequentialCtx(mode);
-          const page = await getPage(ctx);
-          try {
-            const outcome = await search(page, query, limit, opts);
-            return {
-              query, results: outcome.results,
-              dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons,
-            } as PoolSearchResult;
-          } catch (e) {
-            if (e instanceof CaptchaError) throw e;
-            return { query, results: [], error: (e as Error).message } as PoolSearchResult;
-          }
-        })(),
-        REQUEST_TIMEOUT_MS,
-        'search_extract:search',
-        closeSequential,
-      ));
+      const lease = await seqResource.acquire(mode);
+      let ok = false;
+      try {
+        const r = await withTimeout(
+          (async () => {
+            const page = await getPage(lease.value);
+            try {
+              const outcome = await search(page, query, limit, opts);
+              return {
+                query, results: outcome.results,
+                dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons,
+              } as PoolSearchResult;
+            } catch (e) {
+              if (e instanceof CaptchaError) throw e;
+              return { query, results: [], error: (e as Error).message } as PoolSearchResult;
+            }
+          })(),
+          REQUEST_TIMEOUT_MS,
+          'search_extract:search',
+        );
+        ok = true;
+        return r;
+      } finally {
+        lease.release();
+        if (ok && idleSuspended) idleSuspended = false;
+        if (seqResource.activeCount === 0) scheduleSeqIdleClose();
+      }
     };
     return {
       // serial: aggregate timeout would cap legitimate n-query batches
@@ -274,48 +193,48 @@ function buildDeps(): Deps {
       },
       searchOne: seqSearchOne,
       extractOne: async (url, maxChars, extractMode?: ExtractMode) => {
-        return await trackSeq(() => withTimeout(
-          (async () => {
-            const ctx = await getSequentialCtx(mode);
-            return await extract(ctx, url, { maxChars, mode: extractMode });
-          })(),
-          REQUEST_TIMEOUT_MS,
-          'extract',
-          closeSequential,
-        ));
+        const lease = await seqResource.acquire(mode);
+        let ok = false;
+        try {
+          const r = await withTimeout(
+            extract(lease.value, url, { maxChars, mode: extractMode }),
+            REQUEST_TIMEOUT_MS,
+            'extract',
+          );
+          ok = true;
+          return r;
+        } finally {
+          lease.release();
+          if (ok && idleSuspended) idleSuspended = false;
+          if (seqResource.activeCount === 0) scheduleSeqIdleClose();
+        }
       },
     };
   };
 
   const poolBackedHandle = (p: SearchPool): PoolHandle => ({
     runMany: (queries, limit, opts) =>
-      trackPool(() => withTimeout(
-        p.runMany(queries, limit, opts),
-        REQUEST_TIMEOUT_MS * 2,
-        'search_parallel',
-        resetPool,
-      )),
+      withTimeout(p.runMany(queries, limit, opts), REQUEST_TIMEOUT_MS * 2, 'search_parallel'),
     extractOne: (url, maxChars, extractMode) =>
-      trackPool(() => withTimeout(
-        p.extractOne(url, maxChars, extractMode),
-        REQUEST_TIMEOUT_MS,
-        'extract',
-      )),
+      withTimeout(p.extractOne(url, maxChars, extractMode), REQUEST_TIMEOUT_MS, 'extract'),
     searchOne: (query, limit, opts) =>
-      trackPool(() => withTimeout(
-        p.searchOne(query, limit, opts),
-        REQUEST_TIMEOUT_MS,
-        'search_extract:search',
-        resetPool,
-      )),
+      withTimeout(p.searchOne(query, limit, opts), REQUEST_TIMEOUT_MS, 'search_extract:search'),
   });
 
-  const acquirePool = async (mode: StealthMode): Promise<PoolHandle> => {
-    if (poolFallbackMode) return seqBackedHandle(mode);
+  const acquirePool = async (mode: StealthMode): Promise<PoolLease> => {
+    if (poolFallbackMode) return { handle: seqBackedHandle(mode), release: () => {} };
+    clearPoolIdle();
     try {
-      const p = await trackPool(() => ensurePool(mode));
+      const lease = await poolResource.acquire(mode);
       poolWarmFailures = 0;
-      return poolBackedHandle(p);
+      return {
+        handle: poolBackedHandle(lease.value),
+        release: (succeeded = false) => {
+          lease.release();
+          if (succeeded && idleSuspended) idleSuspended = false;
+          if (poolResource.activeCount === 0) schedulePoolIdleClose();
+        },
+      };
     } catch (e) {
       poolWarmFailures++;
       if (poolWarmFailures >= POOL_FALLBACK_THRESHOLD) {
@@ -323,7 +242,7 @@ function buildDeps(): Deps {
         console.error(
           `[google-surf-mcp] pool warm failed ${poolWarmFailures}× — switching to single-context fallback`,
         );
-        return seqBackedHandle(mode);
+        return { handle: seqBackedHandle(mode), release: () => {} };
       }
       throw e;
     }
@@ -339,10 +258,8 @@ function buildDeps(): Deps {
     if (captchaMode === 'remote_debug') {
       suspendIdleClose();
     } else if (captchaMode === 'notify_spawn' || captchaMode === 'always_headed') {
-      await Promise.all([
-        resetPool().catch(() => {}),
-        closeSequential().catch(() => {}),
-      ]);
+      seqResource.requestRebuild();
+      poolResource.requestRebuild();
     }
     await recoverFromCaptcha({ mode: captchaMode });
   };
@@ -351,8 +268,8 @@ function buildDeps(): Deps {
     ...baseDeps,
     acquireSeqCtx,
     acquirePool,
-    closeSeq: closeSequential,
-    resetPool,
+    requestSeqRebuild: () => seqResource.requestRebuild(),
+    requestPoolRebuild: () => poolResource.requestRebuild(),
     recoverHuman,
     getPoolHealth,
   };
@@ -572,7 +489,8 @@ if (!baseDeps.config.cloudMode) {
   (async () => {
     try {
       if (!profileExists()) await autoBootstrap();
-      if (profileExists()) await getSequentialCtx();
+      // acquire + immediate release leaves the gen warm for the first request.
+      if (profileExists()) (await seqResource.acquire('off')).release();
     } catch (e) {
       console.error('[google-surf-mcp] startup warm failed (will retry on first call):', (e as Error)?.message ?? e);
     }
