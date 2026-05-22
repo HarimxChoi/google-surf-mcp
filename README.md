@@ -165,7 +165,7 @@ Local clone variant:
   - `SURF_CLOUD_MODE=true`: fail-fast with `CAPTCHA_REQUIRED` error
 - **Headed Chrome opens to a plain search box instead of CAPTCHA**: just type any query in the box and press Enter. Subsequent calls work.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
-- Stale selectors: Google rotates classes. v0.4.5+ runs a multi-strategy parser and a daily self-healing workflow that opens draft PRs (human review required).
+- Stale selectors: Google rotates classes. A multi-strategy parser plus runtime self-healing (`SURF_SELF_HEALING`) absorb most drift; a daily CI workflow additionally detects SERP breakage and files a tracking issue for a manual selector update.
 - SSRF: `extract` blocks `localhost`, private IPs, AWS metadata by default. Set `SURF_ALLOW_PRIVATE=true` to allow them.
 
 ## Changelog

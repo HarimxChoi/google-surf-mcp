@@ -314,6 +314,15 @@ export async function extract(
     page = await ctx.newPage();
 
     const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
+
+    // page.goto follows server-side redirects unchecked; a public URL can 30x
+    // into a private address (e.g. cloud metadata). Re-verify the landed URL.
+    const landedUrl = resp?.url() ?? page.url();
+    if (landedUrl !== url) {
+      const redirectErr = await checkUrlAsync(landedUrl);
+      if (redirectErr) return { url, error: `${redirectErr} (redirected)` };
+    }
+
     if (resp && resp.status() >= 400) {
       return { url, error: `http ${resp.status()}` };
     }

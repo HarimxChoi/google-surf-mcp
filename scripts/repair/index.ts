@@ -94,7 +94,7 @@ async function detectAndRepair(): Promise<RunOutput> {
   const compressed = compressSerpHtml(brokenHtml);
   const llmResult = await repairWithLLM({
     compressedHtml: compressed,
-    brokenSelectors: { block: STRATEGIES[1].blockSelector, snippet: STRATEGIES[1].snippetSelector },
+    brokenSelectors: { block: STRATEGIES[0].blockSelector, snippet: STRATEGIES[0].snippetSelector },
     candidates: candidates.map(c => ({ blockSelector: c.blockSelector, source: c.source, rationale: c.rationale })),
   });
   console.error(`[repair] LLM decision: ${llmResult.decision} (${llmResult.confidence}) → ${llmResult.selector}`);

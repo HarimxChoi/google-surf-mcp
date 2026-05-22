@@ -10,6 +10,7 @@ chrome-profiles/
 .mcp-publisher
 .mcp.json
 demo-*.mjs
+_probe*.mjs
 eval-*.md
 RELEASE-PLAN.md
 V0.5-REVIEW-AND-DECISIONS.md

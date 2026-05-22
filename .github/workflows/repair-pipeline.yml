@@ -14,8 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
       issues: write
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -54,15 +53,13 @@ jobs:
         id: repair
         run: node build-scripts/scripts/repair/index.js
 
-      - name: open draft PR (if decision=open)
+      - name: report repair decision
         if: steps.repair.outputs.should_open_pr == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # repair pipeline이 만든 PR draft body를 사용
-          # (실제 PR 생성은 별도 step으로 — 여기선 구조만)
-          echo "PR draft generated. Manual review required."
-          echo "caution=${{ steps.repair.outputs.caution }}"
+          # Automated PR creation is intentionally not implemented — the
+          # pipeline only proposes a selector; a human applies it to src/parse.ts.
+          echo "Repair pipeline proposed a selector fix (caution=${{ steps.repair.outputs.caution }})."
+          echo "Review the run artifacts and the drift issue, then patch src/parse.ts manually."
 
       - name: open issue on failure
         if: failure() || steps.repair.outputs.trigger == 'detected'
