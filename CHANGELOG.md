@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.3]
+
+### Fixed
+- Fixed a `ProcessSingleton`/`SingletonLock` race on rapid Chrome relaunch — `launch()` now waits for the stale profile lock to clear before retrying once (#8).
+
+## [0.6.2]
+
+### Fixed
+- Fixed an SSRF gap in `extract`: a server-side redirect landing on a private address (e.g. cloud metadata) is now blocked on the Playwright fallback path.
+- Repair pipeline (dev/CI only): fixed a parser-strategy mismatch and removed a misleading no-op draft-PR step.
+
 ## [0.6.1]
 
 ### Fixed
