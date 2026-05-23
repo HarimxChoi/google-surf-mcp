@@ -55,6 +55,7 @@ Measured on a workstation with a 1Gb/s connection.
 - `unpdf` for PDF text extraction; Mozilla Readability + Turndown for HTML
 - Resource-blocked images / media / fonts for speed
 - Auto-bootstrap on first call; pool falls back to single-context after repeated warm failures
+- Self-healing: runtime parser-strategy reorder (deterministic) + daily cron repair PR (synthesis → optional LLM → triple-gate validation, human review)
 
 ## Install
 
@@ -125,7 +126,7 @@ Local clone variant:
   - `mode="metadata"`: PDF page count only.
   - Response: `content`, `title`, `excerpt`, `length`, `is_pdf`, `page_count`, `extraction_quality`. Failures return `{ error }`, never throw.
 - `search_extract(query, limit?, max_chars?, mode?)` - search + parallel extract in one call. Default `mode="abstract"` returns SERP enriched with ~1500-char summaries (cheap triage). Use `mode="full"` when you actually need the article texts (slower, more tokens).
-- `health()` - server status: cascade mode, rate-limiter usage, cache size, config. Call it if searches start failing or returning empty.
+- `health()` - server status. Response: `cascade` / `pool` (`warmFailures` + `fallback`) / `rateLimiter` / `cache` / `telemetry` / `selfHealing` (current strategy order + stats) / `config`. Call it if searches start failing — `pool.fallback=true` or rising `cascade.totalCaptchas` are the usual culprits.
 
 ## Env vars
 
@@ -140,9 +141,9 @@ Local clone variant:
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 | `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
 | `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |
-| `SURF_CASCADE_DISABLED` | `false` | pin a single stealth mode instead of the 3-tier cascade |
+| `SURF_CASCADE_DISABLED` | `false` | pin a single stealth mode (chosen by `SURF_USE_STEALTH`) instead of the 3-tier auto-cascade |
 | `SURF_USE_STEALTH` | `true` | initial stealth tier — only consulted when `SURF_CASCADE_DISABLED=true` |
-| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` / `inline` — opt-in humanlike browsing behavior |
+| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` (fire-and-forget after returning results) / `inline` (await before returning, slower) — opt-in humanlike browsing |
 | `SURF_RATE_LIMIT_PER_MIN` | `10` | internal cap on Google-facing requests per minute |
 | `SURF_CACHE_TTL_SEARCH_MS` | `86400000` | search cache TTL (24h); `0` disables caching |
 | `SURF_CACHE_MAX_ENTRIES` | `1000` | LRU cap per cache namespace |
@@ -165,7 +166,8 @@ Local clone variant:
   - `SURF_CLOUD_MODE=true`: fail-fast with `CAPTCHA_REQUIRED` error
 - **Headed Chrome opens to a plain search box instead of CAPTCHA**: just type any query in the box and press Enter. Subsequent calls work.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
-- Stale selectors: Google rotates classes. A multi-strategy parser plus runtime self-healing (`SURF_SELF_HEALING`) absorb most drift; a daily CI workflow additionally detects SERP breakage and files a tracking issue for a manual selector update.
+- Stale selectors: two-layer mitigation — runtime per-strategy reorder (`SURF_SELF_HEALING`, deterministic) + daily cron that opens draft PRs with candidate fixes (`SURF_LLM_HEAL` optional, human review required, never auto-merged).
+- Searches feel slower than the Numbers table: check `health().pool.fallback`. `true` means the worker pool gave up after 3 warm failures and is using a single context. Usually fixed by `npm run bootstrap` to refresh the seed profile.
 - SSRF: `extract` blocks `localhost`, private IPs, AWS metadata by default. Set `SURF_ALLOW_PRIVATE=true` to allow them.
 
 ## Changelog
