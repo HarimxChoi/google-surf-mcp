@@ -54,6 +54,7 @@ CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운
 - PDF는 `unpdf`, HTML 본문은 Mozilla Readability + Turndown
 - 이미지 / 미디어 / 폰트 차단 (속도)
 - 첫 호출 자동 부트스트랩, pool warm 3회 실패 시 single-context로 폴백
+- Self-healing 2단계: 런타임 parser-strategy 재배열 (deterministic) + 일일 cron repair PR (synthesis → 선택적 LLM → triple-gate 검증, 사람이 리뷰)
 
 ## Install
 
@@ -124,7 +125,7 @@ Claude Code 재시작
   - `mode="metadata"`: PDF 페이지 수만
   - 응답: `content`, `title`, `excerpt`, `length`, `is_pdf`, `page_count`, `extraction_quality`. 실패는 `{ error }` 반환, throw 안 함
 - `search_extract(query, limit?, max_chars?, mode?)` - 검색 + 병렬 추출 한 번에. 기본 `mode="abstract"`는 SERP 결과에 ~1500자 요약 붙여서 반환 (저렴한 트리아지). 실제 본문 필요 시 `mode="full"` (느림, 토큰 많이 씀)
-- `health()` - 서버 상태: cascade 모드, rate-limiter 사용량, 캐시 크기, 설정. 검색이 실패하기 시작하면 호출
+- `health()` - 서버 상태. 응답: `cascade` / `pool` (`warmFailures` + `fallback`) / `rateLimiter` / `cache` / `telemetry` / `selfHealing` (현재 strategy 순서 + 통계) / `config`. 검색이 실패하면 호출 — `pool.fallback=true` 또는 `cascade.totalCaptchas` 증가가 보통 원인
 
 ## Env vars
 
@@ -139,9 +140,9 @@ Claude Code 재시작
 | `SURF_IDLE_CLOSE_MS` | `30000` | sequential ctx와 pool을 idle 후 닫는 ms. `0`이면 비활성화. 낮으면 빠른 정리, 높으면 띄엄띄엄 호출에 캐시 유지. |
 | `SURF_ALLOW_PRIVATE` | `false` | `true`로 설정 시 `extract`가 사설/loopback 주소(`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x` 등) 접근 허용. 기본은 SSRF 차단으로 막음. |
 | `SURF_CLOUD_MODE` | `false` | headless/서버리스 모드: TLS 우회 + `--no-sandbox` + `--disable-dev-shm-usage` + 워커 풀 비활성 + CAPTCHA fail-fast |
-| `SURF_CASCADE_DISABLED` | `false` | 3-tier cascade 대신 단일 stealth 모드로 고정 |
+| `SURF_CASCADE_DISABLED` | `false` | 3-tier 자동 cascade 대신 단일 stealth 모드(`SURF_USE_STEALTH`로 선택)로 고정 |
 | `SURF_USE_STEALTH` | `true` | 초기 stealth tier — `SURF_CASCADE_DISABLED=true`일 때만 적용 |
-| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` / `inline` — opt-in humanlike 브라우징 동작 |
+| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` (결과 반환 후 비동기 실행) / `inline` (반환 전 대기, 더 느림) — opt-in humanlike 브라우징 |
 | `SURF_RATE_LIMIT_PER_MIN` | `10` | 분당 Google 요청 내부 상한 |
 | `SURF_CACHE_TTL_SEARCH_MS` | `86400000` | search 캐시 TTL (24h); `0`이면 캐시 비활성화 |
 | `SURF_CACHE_MAX_ENTRIES` | `1000` | 캐시 namespace별 LRU 상한 |
@@ -164,7 +165,8 @@ Claude Code 재시작
   - `SURF_CLOUD_MODE=true`: `CAPTCHA_REQUIRED` 에러로 fail-fast
 - **headed Chrome이 CAPTCHA 대신 그냥 검색창으로 열림**: 그냥 아무 검색어 입력하고 Enter 치면 됨. 이후 호출은 정상 동작
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정
-- 셀렉터 깨짐: Google이 클래스명 바꿈. v0.4.5+는 multi-strategy parser + 일일 self-healing 워크플로우로 draft PR 자동 생성 (사람 리뷰 필수)
+- 셀렉터 깨짐: 2단계 대응 — 런타임 strategy 재배열 (`SURF_SELF_HEALING`, deterministic) + 일일 cron이 후보 셀렉터로 draft PR 자동 생성 (`SURF_LLM_HEAL` 선택, 사람이 리뷰)
+- 검색이 Numbers 표보다 느려짐: `health().pool.fallback` 확인. `true`면 워커 풀이 warm 3회 실패 후 single-context로 폴백된 상태. `npm run bootstrap`으로 seed 프로필 갱신하면 보통 회복됨
 - SSRF: `extract`는 기본적으로 `localhost`, 사설 IP, AWS metadata 차단. `SURF_ALLOW_PRIVATE=true`로 우회
 
 ## Changelog
