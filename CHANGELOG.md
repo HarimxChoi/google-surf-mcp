@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.4]
+
+### Fixed
+- CAPTCHA recovery now keeps the headed Chrome window open for a grace period (default 120s, `SURF_CAPTCHA_GRACE_MS`) after landing on `/search?`, so a late CAPTCHA on the auto-search is solvable by the user. If a CAPTCHA appears during the grace window, the timer resets. Outer timeout raised to 240s (`SURF_CAPTCHA_TIMEOUT_MS`).
+- CAPTCHA recovery launches Chrome with image/media/font requests un-blocked so reCAPTCHA image grids actually render in the visible window.
+- Windows: zombie `chrome.exe` from a crashed prior session held the user-data-dir lock, causing `launchPersistentContext` to fail with "Target page, context or browser has been closed". `launch()` now calls `killZombieChromium()` (PowerShell scan by `--user-data-dir` match + `SIGKILL`) before `clearProfileLocks` on retry. `waitForLockReleased` covers the still-flushing case; this covers the fully-crashed case.
+
 ## [0.6.3]
 
 ### Fixed
