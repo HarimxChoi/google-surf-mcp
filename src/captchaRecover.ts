@@ -30,14 +30,22 @@ function remoteDebugGuidance(): string {
 export interface RecoverOptions {
   mode?: CaptchaMode;
   timeoutMs?: number;
+  graceMs?: number;
 }
 
 let recoveryInFlight: Promise<void> | null = null;
 
+function parseMs(v: string | undefined, fallback: number): number {
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Promise<void> {
   const o: RecoverOptions = typeof opts === 'number' ? { timeoutMs: opts } : opts;
   const mode: CaptchaMode = o.mode ?? 'notify_spawn';
-  const timeoutMs = o.timeoutMs ?? 120_000;
+  const timeoutMs = o.timeoutMs ?? parseMs(process.env.SURF_CAPTCHA_TIMEOUT_MS, 240_000);
+  const graceMs = o.graceMs ?? parseMs(process.env.SURF_CAPTCHA_GRACE_MS, 120_000);
 
   if (mode === 'cloud_fail_fast') {
     throw new CaptchaError('cloud-mode: tier-3 unavailable');
@@ -54,7 +62,7 @@ export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Pr
     if (mode === 'notify_spawn') {
       await osNotify(NOTIFY_TITLE, NOTIFY_BODY).catch(() => {});
     }
-    const ctx = await launch({ profileDir: PROFILE_MAIN, headless: false });
+    const ctx = await launch({ profileDir: PROFILE_MAIN, headless: false, blockResources: false });
     try {
       const page = await getPage(ctx);
       await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
@@ -69,17 +77,27 @@ export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Pr
           await page.keyboard.type('hello world', { delay: 60 });
           await sleep(300);
           await page.keyboard.press('Enter');
-        } catch { /* fall through to poll — user can solve manually */ }
+        } catch {}
       }
       const start = Date.now();
+      let landedAt: number | null = null;
       while (Date.now() - start < timeoutMs) {
         const u = page.url();
-        if (u.includes('/search?') && !isBlocked(u)) {
-          await sleep(2000);
-          return;
+        if (isBlocked(u)) {
+          landedAt = null;
+          await sleep(1500);
+          continue;
+        }
+        if (u.includes('/search?')) {
+          if (landedAt === null) {
+            landedAt = Date.now();
+            console.error(`[google-surf-mcp] captcha cleared; keeping window open ${Math.round(graceMs / 1000)}s for any follow-up CAPTCHA (override via SURF_CAPTCHA_GRACE_MS)`);
+          }
+          if (Date.now() - landedAt >= graceMs) return;
         }
         await sleep(1500);
       }
+      if (landedAt !== null) return;
       throw new Error(`captcha not solved within ${Math.round(timeoutMs / 1000)}s`);
     } finally {
       await ctx.close().catch(() => {});

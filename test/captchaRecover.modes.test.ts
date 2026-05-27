@@ -56,14 +56,14 @@ describe('recoverFromCaptcha modes', () => {
   it('notify_spawn invokes osNotify', async () => {
     const notify = await import('../src/notify.js');
     const { recoverFromCaptcha } = await import('../src/captchaRecover.js');
-    await recoverFromCaptcha({ mode: 'notify_spawn', timeoutMs: 5_000 });
+    await recoverFromCaptcha({ mode: 'notify_spawn', timeoutMs: 5_000, graceMs: 0 });
     expect(notify.osNotify).toHaveBeenCalledOnce();
   });
 
   it('always_headed skips notification but still recovers', async () => {
     const notify = await import('../src/notify.js');
     const { recoverFromCaptcha } = await import('../src/captchaRecover.js');
-    await recoverFromCaptcha({ mode: 'always_headed', timeoutMs: 5_000 });
+    await recoverFromCaptcha({ mode: 'always_headed', timeoutMs: 5_000, graceMs: 0 });
     expect(notify.osNotify).not.toHaveBeenCalled();
   });
 });

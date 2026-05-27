@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { rm, cp } from 'node:fs/promises';
 import { platform, homedir } from 'node:os';
@@ -66,6 +67,8 @@ export interface LaunchOpts {
   insecureTls?: boolean;
   // Required for chromium under non-root cgroups (most cloud sandboxes).
   noSandbox?: boolean;
+  // Set false for CAPTCHA recovery — reCAPTCHA image grids need images.
+  blockResources?: boolean;
 }
 
 function readBoolEnv(name: string, defaultVal: boolean): boolean {
@@ -118,17 +121,21 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
   try {
     ctx = await doLaunch();
   } catch (e) {
-    if (!/ProcessSingleton|SingletonLock/i.test((e as Error).message)) throw e;
+    const msg = (e as Error).message;
+    if (!/ProcessSingleton|SingletonLock|Target page, context or browser has been closed/i.test(msg)) throw e;
+    killZombieChromium(opts.profileDir);
     await waitForLockReleased(opts.profileDir, 3_000);
     await clearProfileLocks(opts.profileDir);
     ctx = await doLaunch();
   }
 
-  await ctx.route('**/*', route => {
-    const t = route.request().resourceType();
-    if (t === 'image' || t === 'media' || t === 'font') return route.abort();
-    return route.continue();
-  });
+  if (opts.blockResources !== false) {
+    await ctx.route('**/*', route => {
+      const t = route.request().resourceType();
+      if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+      return route.continue();
+    });
+  }
 
   return ctx;
 }
@@ -148,6 +155,35 @@ export async function clearProfileLocks(profileDir: string): Promise<void> {
   for (const f of SINGLETON_FILES) {
     const p = resolve(profileDir, f);
     if (existsSync(p)) await rm(p, { force: true }).catch(() => {});
+  }
+}
+
+// Windows: zombie chrome.exe from a crashed prior session holds the user-data-dir
+// lock; new launches forward args via Singleton IPC then exit 21. Lock files
+// alone do not cover this.
+export function killZombieChromium(profileDir: string): number {
+  if (process.platform !== 'win32') return 0;
+  const needle = profileDir.toLowerCase();
+  try {
+    const out = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+        `Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('${needle.replace(/'/g, "''")}') } | ` +
+        `Select-Object -ExpandProperty ProcessId`,
+      ],
+      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const pids = out.split(/\r?\n/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
+    let killed = 0;
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGKILL'); killed++; } catch {}
+    }
+    if (killed > 0) console.error(`[google-surf-mcp] killed ${killed} zombie chrome.exe holding ${profileDir}`);
+    return killed;
+  } catch {
+    return 0;
   }
 }
 
