@@ -4,8 +4,11 @@ import { launch, getPage, PROFILE_MAIN, isBlocked } from './browser.js';
 import { CaptchaError } from './search.js';
 import type { CaptchaMode } from './captchaMode.js';
 import { osNotify } from './notify.js';
+import { HumanlikeBehavior, generateBehaviorParams } from './humanlike.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const rand = (a: number, b: number) => a + Math.random() * (b - a);
+const randInt = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1));
 
 const NOTIFY_TITLE = 'google-surf-mcp: CAPTCHA';
 const NOTIFY_BODY = 'Google CAPTCHA detected. A browser window will open — solve it to resume.';
@@ -30,7 +33,7 @@ function remoteDebugGuidance(): string {
 export interface RecoverOptions {
   mode?: CaptchaMode;
   timeoutMs?: number;
-  graceMs?: number;
+  seedQuery?: string;
 }
 
 let recoveryInFlight: Promise<void> | null = null;
@@ -44,8 +47,8 @@ function parseMs(v: string | undefined, fallback: number): number {
 export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Promise<void> {
   const o: RecoverOptions = typeof opts === 'number' ? { timeoutMs: opts } : opts;
   const mode: CaptchaMode = o.mode ?? 'notify_spawn';
-  const timeoutMs = o.timeoutMs ?? parseMs(process.env.SURF_CAPTCHA_TIMEOUT_MS, 240_000);
-  const graceMs = o.graceMs ?? parseMs(process.env.SURF_CAPTCHA_GRACE_MS, 120_000);
+  const timeoutMs = o.timeoutMs ?? parseMs(process.env.SURF_CAPTCHA_TIMEOUT_MS, 180_000);
+  const seedQuery = (o.seedQuery ?? '').trim() || 'hello world';
 
   if (mode === 'cloud_fail_fast') {
     throw new CaptchaError('cloud-mode: tier-3 unavailable');
@@ -63,41 +66,42 @@ export async function recoverFromCaptcha(opts: RecoverOptions | number = {}): Pr
       await osNotify(NOTIFY_TITLE, NOTIFY_BODY).catch(() => {});
     }
     const ctx = await launch({ profileDir: PROFILE_MAIN, headless: false, blockResources: false });
+    const behavior = new HumanlikeBehavior(generateBehaviorParams(), 'inline');
     try {
       const page = await getPage(ctx);
       await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
       try { await (page as { bringToFront?: () => Promise<void> }).bringToFront?.(); } catch {}
-      // headed often isn't served /sorry/ even when headless was; auto-search to land on /search?
+      // headed often isn't served /sorry/ even when headless was; seed the real query to reach /search?
       if (!isBlocked(page.url())) {
         try {
-          await sleep(800);
+          await sleep(rand(600, 1400));
           const sb = page.locator('textarea[name="q"], input[name="q"]').first();
           await sb.click();
-          await sleep(200);
-          await page.keyboard.type('hello world', { delay: 60 });
-          await sleep(300);
-          await page.keyboard.press('Enter');
+          await sleep(rand(150, 450));
+          await behavior.typeQuery(page, seedQuery);
+          await behavior.submitQuery(page);
         } catch {}
       }
       const start = Date.now();
-      let landedAt: number | null = null;
+      let browsed = false;
       while (Date.now() - start < timeoutMs) {
         const u = page.url();
         if (isBlocked(u)) {
-          landedAt = null;
+          browsed = false;
           await sleep(1500);
           continue;
         }
         if (u.includes('/search?')) {
-          if (landedAt === null) {
-            landedAt = Date.now();
-            console.error(`[google-surf-mcp] captcha cleared; keeping window open ${Math.round(graceMs / 1000)}s for any follow-up CAPTCHA (override via SURF_CAPTCHA_GRACE_MS)`);
+          if (!browsed) {
+            browsed = true;
+            console.error('[google-surf-mcp] captcha cleared; running humanlike browse before close');
+            await behavior.visitRandomResults(page, randInt(1, 3)).catch(() => {});
+            continue;
           }
-          if (Date.now() - landedAt >= graceMs) return;
+          return;
         }
         await sleep(1500);
       }
-      if (landedAt !== null) return;
       throw new Error(`captcha not solved within ${Math.round(timeoutMs / 1000)}s`);
     } finally {
       await ctx.close().catch(() => {});

@@ -66,6 +66,73 @@ export class HumanlikeBehavior {
     }
   }
 
+  async submitQuery(page: Page): Promise<void> {
+    await sleep(rand(300, 1200));
+    if (Math.random() < 0.6) {
+      const tabCount = randInt(1, 3);
+      for (let i = 0; i < tabCount; i++) {
+        await page.keyboard.press('Tab');
+        await sleep(rand(150, 420));
+      }
+    }
+    await page.keyboard.press('Enter');
+  }
+
+  async visitRandomResults(page: Page, n: number): Promise<void> {
+    if (n <= 0) return;
+    try {
+      await page.waitForSelector('a[href^="http"] h3', { timeout: 10_000 });
+    } catch { return; }
+
+    await sleep(rand(800, 2000));
+
+    for (let i = 0; i < n; i++) {
+      const links = page.locator('a[href^="http"]:has(h3)');
+      const count = await links.count().catch(() => 0);
+      if (count === 0) break;
+
+      // top-results bias: squared random concentrates idx near 0
+      const cap = Math.min(9, count - 1);
+      const idx = Math.floor(Math.random() ** 2 * (cap + 1));
+
+      const link = links.nth(idx);
+      try { await link.scrollIntoViewIfNeeded({ timeout: 3000 }); } catch {}
+      await sleep(rand(400, 1200));
+      try { await link.hover({ timeout: 3000 }); } catch {}
+      await sleep(rand(300, 900));
+
+      try {
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+          link.click({ timeout: 5000 }),
+        ]);
+      } catch { continue; }
+
+      await this.readPage(page);
+
+      await sleep(rand(400, 1200));
+      try { await page.goBack({ timeout: 10_000, waitUntil: 'domcontentloaded' }); } catch {}
+      await sleep(rand(800, 2200));
+    }
+  }
+
+  private async readPage(page: Page): Promise<void> {
+    const dwellMs = randInt(4_000, 12_000);
+    const end = Date.now() + dwellMs;
+    await sleep(rand(500, 1500));
+    while (Date.now() < end) {
+      const r = Math.random();
+      if (r < 0.7) {
+        await page.mouse.wheel(0, randInt(120, 520)).catch(() => {});
+      } else if (r < 0.9) {
+        await page.mouse.wheel(0, -randInt(80, 240)).catch(() => {});
+      } else {
+        await page.mouse.move(rand(100, 900), rand(100, 600)).catch(() => {});
+      }
+      await sleep(rand(700, 2400));
+    }
+  }
+
   async waitAfterSearch(): Promise<void> {
     if (this.mode === 'off') {
       await sleep(rand(50, 110));

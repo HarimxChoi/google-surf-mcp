@@ -334,7 +334,7 @@ function buildDeps(): Deps {
     headless: baseDeps.config.headless,
     remoteDebug: baseDeps.config.remoteDebug,
   });
-  const recoverHuman = async () => {
+  const recoverHuman = async (seedQuery?: string) => {
     // remote_debug: keep Chromium alive across DevTools attach window
     if (captchaMode === 'remote_debug') {
       suspendIdleClose();
@@ -344,7 +344,7 @@ function buildDeps(): Deps {
         closeSequential().catch(() => {}),
       ]);
     }
-    await recoverFromCaptcha({ mode: captchaMode });
+    await recoverFromCaptcha({ mode: captchaMode, seedQuery });
   };
 
   return {

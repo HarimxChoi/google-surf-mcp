@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.5]
+
+### Changed
+- CAPTCHA recovery seeds the original query instead of `hello world`.
+- Recovery forces humanlike inline mode: random per-char typing, Tab+Enter variability, then 1-3 result visits with dwell, scroll, goBack.
+- Removed `SURF_CAPTCHA_GRACE_MS`. `SURF_CAPTCHA_TIMEOUT_MS` default 240s to 180s.
+
 ## [0.6.4]
 
 ### Fixed

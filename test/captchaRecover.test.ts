@@ -36,8 +36,8 @@ describe('recoverFromCaptcha mutex', () => {
     const { recoverFromCaptcha } = await import('../src/captchaRecover.js');
 
     const [r1, r2] = await Promise.all([
-      recoverFromCaptcha({ timeoutMs: 60_000, graceMs: 0 }),
-      recoverFromCaptcha({ timeoutMs: 60_000, graceMs: 0 }),
+      recoverFromCaptcha({ timeoutMs: 60_000 }),
+      recoverFromCaptcha({ timeoutMs: 60_000 }),
     ]);
 
     expect(r1).toBeUndefined();
@@ -50,8 +50,8 @@ describe('recoverFromCaptcha mutex', () => {
   it('sequential calls each get their own launch (mutex cleared after completion)', async () => {
     const { recoverFromCaptcha } = await import('../src/captchaRecover.js');
 
-    await recoverFromCaptcha({ timeoutMs: 60_000, graceMs: 0 });
-    await recoverFromCaptcha({ timeoutMs: 60_000, graceMs: 0 });
+    await recoverFromCaptcha({ timeoutMs: 60_000 });
+    await recoverFromCaptcha({ timeoutMs: 60_000 });
 
     expect(launchMock).toHaveBeenCalledTimes(2);
   }, 10_000);
@@ -60,6 +60,6 @@ describe('recoverFromCaptcha mutex', () => {
     closeMock.mockRejectedValueOnce(new Error('ctx already closed'));
     const { recoverFromCaptcha } = await import('../src/captchaRecover.js');
 
-    await expect(recoverFromCaptcha({ timeoutMs: 60_000, graceMs: 0 })).resolves.toBeUndefined();
+    await expect(recoverFromCaptcha({ timeoutMs: 60_000 })).resolves.toBeUndefined();
   }, 10_000);
 });

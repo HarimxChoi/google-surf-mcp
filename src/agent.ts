@@ -41,7 +41,7 @@ export interface Deps {
   acquirePool: (mode: StealthMode) => Promise<PoolHandle>;
   closeSeq: () => Promise<void>;
   resetPool: () => Promise<void>;
-  recoverHuman: () => Promise<void>;
+  recoverHuman: (seedQuery?: string) => Promise<void>;
   getPoolHealth: () => PoolHealthSnapshot;
 }
 
@@ -60,18 +60,19 @@ export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'conf
   return { config, cache, cascade, limiter, tel, healing };
 }
 
-function tier3Recovery(deps: Deps): () => Promise<void> {
+function tier3Recovery(deps: Deps, seedQuery?: string): () => Promise<void> {
   return async () => {
     if (deps.config.cloudMode) {
       throw new CaptchaError('cloud-mode: tier-3 unavailable');
     }
-    await deps.recoverHuman();
+    await deps.recoverHuman(seedQuery);
   };
 }
 
 async function executeSeqWithCascade<T>(
   deps: Deps,
   op: (ctx: BrowserContext) => Promise<T>,
+  seedQuery?: string,
 ): Promise<T> {
   if (deps.config.cascadeDisabled) {
     const ctx = await deps.acquireSeqCtx(deps.config.useStealth ? 'on' : 'off');
@@ -84,7 +85,7 @@ async function executeSeqWithCascade<T>(
       return await op(ctx);
     },
     resetContext: async () => { await deps.closeSeq(); },
-    tier3Recovery: tier3Recovery(deps),
+    tier3Recovery: tier3Recovery(deps, seedQuery),
     isCaptchaError: (e) => e instanceof CaptchaError,
     onTransition: (from, to, reason) => {
       console.error(`[cascade] ${from} → ${to}: ${reason}`);
@@ -95,6 +96,7 @@ async function executeSeqWithCascade<T>(
 async function executePoolWithCascade<T>(
   deps: Deps,
   op: (pool: PoolHandle) => Promise<T>,
+  seedQuery?: string,
 ): Promise<T> {
   if (deps.config.cascadeDisabled) {
     const initialMode = deps.config.useStealth ? 'on' : 'off';
@@ -113,7 +115,7 @@ async function executePoolWithCascade<T>(
         deps.closeSeq().catch(() => {}),
       ]);
     },
-    tier3Recovery: tier3Recovery(deps),
+    tier3Recovery: tier3Recovery(deps, seedQuery),
     isCaptchaError: (e) => e instanceof CaptchaError,
     onTransition: (from, to, reason) => {
       console.error(`[cascade pool] ${from} → ${to}: ${reason}`);
@@ -161,7 +163,7 @@ export async function searchTool(
         await behavior.simulateBrowsing(page, []).catch(() => {});
       }
       return r;
-    });
+    }, query);
 
     const meta = {
       strategy: 'legacy-v0.4',
@@ -216,7 +218,7 @@ export async function searchParallelTool(
     for (let i = 0; i < queries.length; i++) await deps.limiter.acquire();
     const results = await executePoolWithCascade(deps, async (pool) => {
       return await pool.runMany(queries, limit, { locale: deps.config.locale, healing: deps.healing });
-    });
+    }, queries[0]);
 
     const elapsed = Date.now() - t0;
     for (const r of results) {
