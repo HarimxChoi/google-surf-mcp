@@ -51,7 +51,7 @@ CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운
 - Playwright + 영구 Chrome 프로필
 - `playwright-extra` stealth (cascade fallback tier)
 - Multi-strategy SERP parser + geometric verification (sponsored / knowledge_panel / related 드롭)
-- PDF는 `unpdf`, HTML 본문은 Mozilla Readability + Turndown
+- PDF는 `@llamaindex/liteparse`(PDFium spatial parsing, 선택적 OCR), HTML 본문은 Mozilla Readability + Turndown
 - 이미지 / 미디어 / 폰트 차단 (속도)
 - 첫 호출 자동 부트스트랩, pool warm 3회 실패 시 single-context로 폴백
 - Self-healing 2단계: 런타임 parser-strategy 재배열 (deterministic) + 일일 cron repair PR (synthesis → 선택적 LLM → triple-gate 검증, 사람이 리뷰)
@@ -120,7 +120,7 @@ Claude Code 재시작
 - `search(query, limit?)` - 단일 검색, ~1.5초. title / url / snippet 반환. 스폰서 광고 + 지식 패널 자동 제거 (응답에 `dropped` 카운트 + `dropped_reasons` 포함). 결과 24h 캐시 (`SURF_CACHE_TTL_SEARCH_MS=0`으로 우회)
 - `search_parallel(queries[], limit?)` - 4-워커 풀, 호출당 최대 10개 쿼리
 - `extract(url, max_chars?, mode?)` - URL 가져와서 본문 반환
-  - `mode="full"` (기본): 본문 전체. HTML은 Readability, PDF는 `unpdf`
+  - `mode="full"` (기본): 본문 전체, PDF는 `liteparse`(spatial parsing, 다단 읽기)
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). 본문 가져오기 전 관련성 판단용
   - `mode="metadata"`: PDF 페이지 수만
   - 응답: `content`, `title`, `excerpt`, `length`, `is_pdf`, `page_count`, `extraction_quality`. 실패는 `{ error }` 반환, throw 안 함
@@ -139,6 +139,8 @@ Claude Code 재시작
 | `SURF_REMOTE_DEBUG` | `false` | headless 서버 + 원격 DevTools 환경에서 `true`. CAPTCHA 발생 시 DevTools 포트 안내 후 throw, 별도 창 안 띄움. 로컬 머신에서 SSH 포트포워드 + `chrome://inspect`로 풀고 재시도. |
 | `SURF_IDLE_CLOSE_MS` | `30000` | sequential ctx와 pool을 idle 후 닫는 ms. `0`이면 비활성화. 낮으면 빠른 정리, 높으면 띄엄띄엄 호출에 캐시 유지. |
 | `SURF_ALLOW_PRIVATE` | `false` | `true`로 설정 시 `extract`가 사설/loopback 주소(`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x` 등) 접근 허용. 기본은 SSRF 차단으로 막음. |
+| `SURF_EXTRACT_MAX_CHARS` | `8000` | `extract` 기본 truncation (200–50000); per-call `max_chars`가 우선 |
+| `SURF_EXTRACT_OCR` | `false` | 스캔/이미지 PDF를 Tesseract로 OCR (느림; 기본 off) |
 | `SURF_CLOUD_MODE` | `false` | headless/서버리스 모드: TLS 우회 + `--no-sandbox` + `--disable-dev-shm-usage` + 워커 풀 비활성 + CAPTCHA fail-fast |
 | `SURF_CASCADE_DISABLED` | `false` | 3-tier 자동 cascade 대신 단일 stealth 모드(`SURF_USE_STEALTH`로 선택)로 고정 |
 | `SURF_USE_STEALTH` | `true` | 초기 stealth tier — `SURF_CASCADE_DISABLED=true`일 때만 적용 |
