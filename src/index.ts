@@ -378,7 +378,7 @@ const SearchParallelInput = {
 
 const ExtractInput = {
   url: z.string().describe('Public http(s) URL. Loopback/private IPs blocked unless SURF_ALLOW_PRIVATE=true.'),
-  max_chars: z.number().int().min(200).max(50_000).default(8_000).describe('Truncate body to this many chars (default 8000).'),
+  max_chars: z.number().int().min(200).max(50_000).default(baseDeps.config.extractMaxChars).describe(`Truncate body to this many chars (default ${baseDeps.config.extractMaxChars}, set via SURF_EXTRACT_MAX_CHARS).`),
   mode: z.enum(['full', 'abstract', 'metadata']).default('full').describe(
     'Extraction depth. `full` = whole article body (default; uses Playwright if needed). ' +
     '`abstract` = cheap survey: PDF page 1 OR HTML meta description (~1500 chars); use to triage relevance before paying for full text. ' +

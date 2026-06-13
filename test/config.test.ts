@@ -84,4 +84,11 @@ describe('loadConfig', () => {
     expect(loadConfig({ SURF_USE_STEALTH: 'false' }).useStealth).toBe(false);
     expect(loadConfig({ SURF_USE_STEALTH: 'true' }).useStealth).toBe(true);
   });
+
+  it('extractMaxChars: default 8000, env override, clamped to [200, 50000]', () => {
+    expect(loadConfig({}).extractMaxChars).toBe(8_000);
+    expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '20000' }).extractMaxChars).toBe(20_000);
+    expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '999999' }).extractMaxChars).toBe(50_000);
+    expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '50' }).extractMaxChars).toBe(200);
+  });
 });
