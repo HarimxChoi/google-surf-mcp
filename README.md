@@ -52,7 +52,7 @@ Measured on a workstation with a 1Gb/s connection.
 - Playwright + persistent Chrome profile
 - `playwright-extra` stealth as a cascade fallback tier
 - Multi-strategy SERP parser + geometric verification (drops sponsored / knowledge_panel / related)
-- `unpdf` for PDF text extraction; Mozilla Readability + Turndown for HTML
+- `@llamaindex/liteparse` for PDF text extraction (PDFium spatial parsing, optional OCR); Mozilla Readability + Turndown for HTML
 - Resource-blocked images / media / fonts for speed
 - Auto-bootstrap on first call; pool falls back to single-context after repeated warm failures
 - Self-healing: runtime parser-strategy reorder (deterministic) + daily cron repair PR (synthesis → optional LLM → triple-gate validation, human review)
@@ -121,7 +121,7 @@ Local clone variant:
 - `search(query, limit?)` - single query, ~1.5s. Returns title / url / snippet. Sponsored ads + knowledge-panel dropped (response includes `dropped` count + `dropped_reasons`). Results cached 24h (`SURF_CACHE_TTL_SEARCH_MS=0` to bypass).
 - `search_parallel(queries[], limit?)` - pool of 4, max 10 queries per call.
 - `extract(url, max_chars?, mode?)` - fetch a URL, return article content.
-  - `mode="full"` (default): whole body. HTML via Readability, PDFs via `unpdf`.
+  - `mode="full"` (default): whole body. HTML via Readability, PDFs via `liteparse` (spatial parsing, multi-column reading order).
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Triage relevance before paying for full text.
   - `mode="metadata"`: PDF page count only.
   - Response: `content`, `title`, `excerpt`, `length`, `is_pdf`, `page_count`, `extraction_quality`. Failures return `{ error }`, never throw.
@@ -140,6 +140,8 @@ Local clone variant:
 | `SURF_REMOTE_DEBUG` | `false` | set `true` on a headless server with remote DevTools. CAPTCHA path emits the DevTools port and throws instead of spawning a window; attach `chrome://inspect` from a local machine over SSH port-forward to solve. |
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 | `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
+| `SURF_EXTRACT_MAX_CHARS` | `8000` | default `extract` truncation (200–50000); per-call `max_chars` still overrides |
+| `SURF_EXTRACT_OCR` | `false` | OCR scanned/image PDFs via Tesseract (slower; off by default) |
 | `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |
 | `SURF_CASCADE_DISABLED` | `false` | pin a single stealth mode (chosen by `SURF_USE_STEALTH`) instead of the 3-tier auto-cascade |
 | `SURF_USE_STEALTH` | `true` | initial stealth tier — only consulted when `SURF_CASCADE_DISABLED=true` |

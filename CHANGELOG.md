@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- PDF extraction uses `@llamaindex/liteparse` (PDFium spatial parsing) instead of `unpdf`: ~2x faster, correct multi-column reading order, optional OCR.
+
+### Added
+- `SURF_EXTRACT_OCR` (default `false`) — Tesseract OCR for scanned/image PDFs.
+- `SURF_EXTRACT_MAX_CHARS` (default `8000`) — configurable extract truncation (#9).
+
+### Fixed
+- EU consent overlay dismissed before the search box, with `focus` instead of `click` — fixes 100% search failure on fresh EU profiles (#10).
+- Block detection broadened beyond `/sorry/` (consent URL + in-page reCAPTCHA via DOM).
+
 ## [0.6.5]
 
 ### Changed
