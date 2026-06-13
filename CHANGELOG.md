@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.6]
 
 ### Changed
 - PDF extraction uses `@llamaindex/liteparse` (PDFium spatial parsing) instead of `unpdf`: ~2x faster, correct multi-column reading order, optional OCR.
