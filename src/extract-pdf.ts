@@ -1,4 +1,4 @@
-import { getDocumentProxy, extractText } from 'unpdf';
+import { LiteParse } from '@llamaindex/liteparse';
 
 export type PdfMode = 'full' | 'abstract' | 'metadata';
 
@@ -25,36 +25,21 @@ export async function extractPdfTiered(
   mode: PdfMode,
   maxChars: number,
 ): Promise<PdfExtractResult> {
-  const pdf = await getDocumentProxy(buf);
-  try {
-    const page_count = pdf.numPages;
+  const ocrEnabled = process.env.SURF_EXTRACT_OCR?.toLowerCase() === 'true';
+  const { pages, text } = await new LiteParse({ ocrEnabled, quiet: true }).parse(buf);
+  const page_count = pages.length;
 
-    if (mode === 'metadata') {
-      return { is_pdf: true, page_count, extraction_quality: 'metadata_only' };
-    }
-
-    let raw: string;
-    if (mode === 'abstract') {
-      const page = await (pdf as any).getPage(1);
-      const content = await page.getTextContent();
-      raw = (content.items as Array<{ str?: string; hasEOL?: boolean }>)
-        .filter((it) => it.str != null)
-        .map((it) => it.str + (it.hasEOL ? '\n' : ''))
-        .join('');
-    } else {
-      const { text } = await extractText(pdf, { mergePages: true });
-      raw = text;
-    }
-    const clipped = raw.slice(0, maxChars);
-
-    return {
-      is_pdf: true,
-      page_count,
-      extraction_quality: mode === 'abstract' ? 'abstract' : 'full_text',
-      content: clipped,
-      length: clipped.length,
-    };
-  } finally {
-    await (pdf as any).destroy?.().catch(() => {});
+  if (mode === 'metadata') {
+    return { is_pdf: true, page_count, extraction_quality: 'metadata_only' };
   }
+
+  const raw = mode === 'abstract' ? (pages[0]?.text ?? '') : text;
+  const clipped = raw.slice(0, maxChars);
+  return {
+    is_pdf: true,
+    page_count,
+    extraction_quality: mode === 'abstract' ? 'abstract' : 'full_text',
+    content: clipped,
+    length: clipped.length,
+  };
 }

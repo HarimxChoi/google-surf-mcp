@@ -91,4 +91,9 @@ describe('loadConfig', () => {
     expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '999999' }).extractMaxChars).toBe(50_000);
     expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '50' }).extractMaxChars).toBe(200);
   });
+
+  it('extractOcr: default off, env opt-in', () => {
+    expect(loadConfig({}).extractOcr).toBe(false);
+    expect(loadConfig({ SURF_EXTRACT_OCR: 'true' }).extractOcr).toBe(true);
+  });
 });

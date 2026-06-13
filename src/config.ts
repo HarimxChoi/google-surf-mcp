@@ -17,6 +17,7 @@ export interface Config {
   cacheMaxEntries: number;
   rateLimitPerMin: number;
   extractMaxChars: number;
+  extractOcr: boolean;
 
   // Composite cloud flag: enables insecureTls + noSandbox + pool disabled +
   // tier-3 fail-fast. Cascade itself runs unchanged in cloud mode.
@@ -96,6 +97,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheMaxEntries: parseInt0(env.SURF_CACHE_MAX_ENTRIES, 1000, 10, 100_000),
     rateLimitPerMin: parseInt0(env.SURF_RATE_LIMIT_PER_MIN, 10, 1, 600),
     extractMaxChars: parseInt0(env.SURF_EXTRACT_MAX_CHARS, 8_000, 200, 50_000),
+    extractOcr: parseBool(env.SURF_EXTRACT_OCR, false),
 
     cloudMode,
     remoteDebug: parseBool(env.SURF_REMOTE_DEBUG, false),
