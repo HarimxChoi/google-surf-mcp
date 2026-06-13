@@ -263,4 +263,33 @@ export function profileExists(): boolean {
   return existsSync(PROFILE_MAIN);
 }
 
-export const isBlocked = (url: string) => url.includes('/sorry/');
+export const isBlocked = (url: string) =>
+  url.includes('/sorry/') || url.includes('consent.google.');
+
+export async function detectBlock(page: Page): Promise<boolean> {
+  if (isBlocked(page.url())) return true;
+  try {
+    return await page.evaluate(() =>
+      !!document.querySelector('form#captcha-form, iframe[src*="recaptcha"]') ||
+      /unusual traffic|systems have detected|are not a robot/i.test(document.body?.innerText ?? ''),
+    );
+  } catch {
+    return false;
+  }
+}
+
+const CONSENT_BUTTONS = ['#W0wltc', '#L2AGLb'];
+
+export async function dismissConsent(page: Page): Promise<void> {
+  for (const frame of page.frames()) {
+    for (const sel of CONSENT_BUTTONS) {
+      try {
+        const btn = frame.locator(sel).first();
+        if (await btn.count() === 0) continue;
+        await btn.click({ timeout: 1_500 });
+        await page.waitForLoadState('domcontentloaded', { timeout: 3_000 }).catch(() => {});
+        return;
+      } catch {}
+    }
+  }
+}

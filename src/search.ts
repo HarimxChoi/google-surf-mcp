@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import type { SearchResult, ResultClassification, ParserStrategy } from './types.js';
-import { isBlocked } from './browser.js';
+import { detectBlock, dismissConsent } from './browser.js';
 import { STRATEGIES, parseResultsInBrowser } from './parse.js';
 import { verifyResultsGeometricInBrowser, aggregateConfidence } from './verify.js';
 import { scoreResult } from './score.js';
@@ -90,10 +90,11 @@ export async function search(
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 10_000 });
     await sleep(rand(80, 160));
   }
-  if (isBlocked(page.url())) throw new CaptchaError('home');
+  if (await detectBlock(page)) throw new CaptchaError('home');
 
+  await dismissConsent(page);
   const sb = page.locator('textarea[name="q"], input[name="q"]').first();
-  await sb.click({ timeout: 6_000 });
+  await sb.focus({ timeout: 6_000 });
   await sleep(rand(30, 70));
 
   if (onResultsPage) {
@@ -104,7 +105,7 @@ export async function search(
   for (const ch of query) {
     await page.keyboard.type(ch, { delay: rand(8, 20) });
   }
-  await sleep(rand(50, 110));
+  await sleep(rand(250, 600));
   const beforeUrl = page.url();
   await page.keyboard.press('Enter');
 
@@ -117,13 +118,18 @@ export async function search(
     waitErr = e as Error;
   }
 
-  if (isBlocked(page.url())) throw new CaptchaError('after-search');
+  if (await detectBlock(page)) throw new CaptchaError('after-search');
 
-  return await pickAndScoreResults(page, limit, {
-    locale: opts.locale,
-    waitErr,
-    healing: opts.healing,
-  });
+  try {
+    return await pickAndScoreResults(page, limit, {
+      locale: opts.locale,
+      waitErr,
+      healing: opts.healing,
+    });
+  } catch (e) {
+    if (await detectBlock(page).catch(() => false)) throw new CaptchaError('after-search');
+    throw e;
+  }
 }
 
 export interface PickOptions {
