@@ -19,7 +19,7 @@ function ensureStealth() {
 const PROFILE_ROOT = process.env.SURF_PROFILE_ROOT || join(homedir(), '.google-surf-mcp');
 export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
 export const PROFILE_SEED = resolve(PROFILE_ROOT, 'seed');
-export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${i}`);
+export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${process.pid}_${i}`);
 
 export function detectChrome(): string {
   if (process.env.CHROME_PATH) {
