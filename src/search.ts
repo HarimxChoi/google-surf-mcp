@@ -110,13 +110,14 @@ export async function search(
   await page.keyboard.press('Enter');
 
   let waitErr: Error | null = null;
+  const navTimeout = Number(process.env.SURF_NAV_TIMEOUT_MS) || 12_000;
   try {
-    await page.waitForURL(u => u.href !== beforeUrl, { timeout: 5_000 });
-    await page.waitForLoadState('domcontentloaded', { timeout: 4_000 });
-    await page.waitForSelector('h3, #search, [id="rso"]', { timeout: 4_000 });
+    await page.waitForURL(u => u.href !== beforeUrl, { timeout: navTimeout });
   } catch (e) {
     waitErr = e as Error;
   }
+  await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
+  await page.waitForSelector('h3, #search, [id="rso"]', { timeout: 8_000 }).catch(() => {});
 
   if (await detectBlock(page)) throw new CaptchaError('after-search');
 
