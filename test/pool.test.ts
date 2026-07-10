@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { SearchPool } from '../src/pool.js';
+import { EventEmitter } from 'node:events';
+import type { BrowserContext } from 'playwright';
+import { SearchPool, wireWorkerDeadOnClose } from '../src/pool.js';
 
 // no real chrome; mocks worker objects directly
 describe('SearchPool acquire/release queue', () => {
@@ -66,5 +68,26 @@ describe('SearchPool acquire/release queue', () => {
 
     const acquire = (pool as any).acquire.bind(pool) as () => Promise<any>;
     await expect(acquire()).rejects.toThrow(/pool closing/);
+  });
+});
+
+describe('wireWorkerDeadOnClose', () => {
+  it('marks worker dead when its ctx emits close', () => {
+    const ctx = new EventEmitter() as unknown as BrowserContext;
+    const w = { ctx, busy: false, dead: false };
+    wireWorkerDeadOnClose(w);
+    expect(w.dead).toBe(false);
+    (ctx as unknown as EventEmitter).emit('close');
+    expect(w.dead).toBe(true);
+  });
+
+  it('only marks once even on multiple close emits', () => {
+    const ctx = new EventEmitter() as unknown as BrowserContext;
+    const w = { ctx, busy: false, dead: false };
+    wireWorkerDeadOnClose(w);
+    (ctx as unknown as EventEmitter).emit('close');
+    w.dead = false;
+    (ctx as unknown as EventEmitter).emit('close');
+    expect(w.dead).toBe(false);
   });
 });

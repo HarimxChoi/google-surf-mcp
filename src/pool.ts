@@ -7,6 +7,14 @@ import type { SearchResult, ResultClassification } from './types.js';
 interface Worker {
   ctx: BrowserContext;
   busy: boolean;
+  dead: boolean;
+}
+
+// Worker becomes dead when its BrowserContext fires 'close' (graceful close or
+// external process kill). Probing via ctx.pages() is unreliable: pages() returns
+// a locally-cached list and succeeds even after the underlying browser is dead.
+export function wireWorkerDeadOnClose(w: Worker): void {
+  w.ctx.once('close', () => { w.dead = true; });
 }
 
 interface Waiter {
@@ -53,7 +61,9 @@ export class SearchPool {
         if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
         const page = await getPage(ctx);
         await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
-        return { ctx, busy: false } as Worker;
+        const w: Worker = { ctx, busy: false, dead: false };
+        wireWorkerDeadOnClose(w);
+        return w;
       }),
     );
     const ok = settled
@@ -100,15 +110,6 @@ export class SearchPool {
     }
   }
 
-  private isContextAlive(ctx: BrowserContext): boolean {
-    try {
-      ctx.pages();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   // Workers clone a cookie-stripped seed; without Google cookies the first search hits /sorry/.
   private async getSeedCookies(): Promise<Awaited<ReturnType<BrowserContext['cookies']>>> {
     if (this.seedCookies) return this.seedCookies;
@@ -124,6 +125,7 @@ export class SearchPool {
     return this.seedCookies;
   }
 
+
   private async rebuildWorker(idx: number): Promise<Worker> {
     const dir = await cloneProfile(idx);
     const ctx = await launch({ profileDir: dir });
@@ -131,7 +133,9 @@ export class SearchPool {
     if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
     const page = await getPage(ctx);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
-    return { ctx, busy: false };
+    const w: Worker = { ctx, busy: false, dead: false };
+    wireWorkerDeadOnClose(w);
+    return w;
   }
 
   private async acquire(): Promise<Worker> {
@@ -147,7 +151,7 @@ export class SearchPool {
       const free = this.workers.find((w) => !w.busy);
       if (!free) break;
       free.busy = true;
-      if (this.isContextAlive(free.ctx)) return free;
+      if (!free.dead) return free;
       const idx = this.workers.indexOf(free);
       try {
         const fresh = await this.rebuildWorker(idx);
@@ -195,7 +199,7 @@ export class SearchPool {
       w.busy = false;
       return;
     }
-    if (this.isContextAlive(w.ctx)) {
+    if (!w.dead) {
       next.resolve(w);
       return;
     }

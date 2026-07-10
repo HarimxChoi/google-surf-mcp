@@ -15,12 +15,12 @@ describe('SearchPool deadlock prevention', () => {
   it('throws after MAX_REBUILD_FAILURES consecutive rebuild failures', async () => {
     const pool = new SearchPool(2);
     const deadCtx = {
-      pages: () => { throw new Error('ctx disposed'); },
+      pages: () => [],
       close: async () => {},
     } as never;
     (pool as any).workers = [
-      { ctx: deadCtx, busy: false },
-      { ctx: deadCtx, busy: false },
+      { ctx: deadCtx, busy: false, dead: true },
+      { ctx: deadCtx, busy: false, dead: true },
     ];
     (pool as any).warmed = true;
     (pool as any).rebuildWorker = async () => { throw new Error('rebuild fail'); };
@@ -59,17 +59,17 @@ describe('SearchPool deadlock prevention', () => {
   it('rebuildFailureCount resets after a successful rebuild', async () => {
     const pool = new SearchPool(1);
     const deadCtx = {
-      pages: () => { throw new Error('disposed'); },
+      pages: () => [],
       close: async () => {},
     } as never;
-    (pool as any).workers = [{ ctx: deadCtx, busy: false }];
+    (pool as any).workers = [{ ctx: deadCtx, busy: false, dead: true }];
     (pool as any).warmed = true;
 
     let rebuildCallCount = 0;
     (pool as any).rebuildWorker = async () => {
       rebuildCallCount++;
       if (rebuildCallCount <= 2) throw new Error('rebuild fail');
-      return { ctx: { pages: () => [], close: async () => {} }, busy: false };
+      return { ctx: { pages: () => [], close: async () => {} }, busy: false, dead: false };
     };
 
     const acquire = (pool as any).acquire.bind(pool) as () => Promise<unknown>;
