@@ -36,12 +36,16 @@ const IDLE_CLOSE_MS = parseIdleMs();
 let ctxPromise: Promise<BrowserContext> | null = null;
 let ctxClosing: Promise<void> | null = null;
 let ctxMode: StealthMode | null = null;
+let ctxDead = false;
 
 async function launchAndWarm(mode: StealthMode): Promise<BrowserContext> {
   const c = await launch({ profileDir: PROFILE_MAIN, stealth: mode === 'on' });
   try {
     const page = await getPage(c);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    // ctx.pages() keeps succeeding after an external kill; only 'close' fires.
+    ctxDead = false;
+    c.once('close', () => { ctxDead = true; });
     return c;
   } catch (e) {
     await c.close().catch(() => {});
@@ -51,6 +55,9 @@ async function launchAndWarm(mode: StealthMode): Promise<BrowserContext> {
 
 function getSequentialCtx(mode: StealthMode = 'off'): Promise<BrowserContext> {
   if (ctxClosing) return ctxClosing.then(() => getSequentialCtx(mode));
+  if (ctxPromise && ctxDead) {
+    return closeSequential().then(() => getSequentialCtx(mode));
+  }
   // If a ctx exists but with a different stealth mode, close and rebuild.
   if (ctxPromise && ctxMode !== null && ctxMode !== mode) {
     return closeSequential().then(() => getSequentialCtx(mode));
@@ -78,6 +85,7 @@ function closeSequential(): Promise<void> {
   const cp = ctxPromise;
   ctxPromise = null;
   ctxMode = null;
+  ctxDead = false;
   if (!cp) return Promise.resolve();
   ctxClosing = (async () => {
     try {
@@ -389,7 +397,7 @@ const ExtractInput = {
 const SearchExtractInput = {
   query: z.string().min(1).max(400).describe('Search query.'),
   limit: z.number().int().min(1).max(10).default(5).describe('Number of results to extract (default 5, max 10).'),
-  max_chars: z.number().int().min(200).max(20_000).optional().describe('Truncate each result body. Default depends on mode: ~1500 for abstract, 8000 for full.'),
+  max_chars: z.number().int().min(200).max(20_000).optional().describe(`Truncate each result body. Default depends on mode: ~1500 for abstract, ${Math.min(baseDeps.config.extractMaxChars, 20_000)} for full (SURF_EXTRACT_MAX_CHARS, capped at 20000 here).`),
   mode: z.enum(['full', 'abstract']).default('abstract').describe(
     'Extraction depth per result. `abstract` (default) = cheap survey, ~1500 chars/result, ideal for relevance triage. ' +
     '`full` = whole body per result, slower and far more tokens; only when you actually need the article texts.',

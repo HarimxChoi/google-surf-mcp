@@ -90,17 +90,12 @@ export async function repairWithLLM(input: LLMRepairInput): Promise<LLMRepairOut
     html: input.compressedHtml,
   });
 
+  // No cache_control: the prompt is below the minimum cacheable prefix, and the
+  // cron calls this once a day.
   const resp = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        // Explicit ttl: default 5min would yield 0% cache hit on daily cron.
-        cache_control: { type: 'ephemeral', ttl: '1h' },
-      },
-    ],
+    system: [{ type: 'text', text: SYSTEM_PROMPT }],
     tools: [REPAIR_TOOL],
     tool_choice: { type: 'tool', name: REPAIR_TOOL.name },
     messages: [{ role: 'user', content: userMsg }],

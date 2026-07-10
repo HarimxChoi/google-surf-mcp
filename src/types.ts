@@ -23,6 +23,7 @@ export interface ParseSignals {
   hveidCount: number;
   classTokenSize: number;
   layoutSignature: string;
+  lang: string;
 }
 
 export interface ParserStrategy {
@@ -86,6 +87,9 @@ export interface FaultClassification {
     responseTimeMs: number;
     url: string;
     geometricConfidence?: number;
+    recentZeroResults?: number;
+    peerResults?: number;
+    baselineResults?: number;
   };
 }
 

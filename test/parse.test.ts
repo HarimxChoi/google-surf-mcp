@@ -68,7 +68,7 @@ describe('parseResults (compat shim)', () => {
 describe('parseResultsInBrowser (multi-strategy)', () => {
   it('returns ParseSignals alongside results', () => {
     loadDom(fixture('serp-basic.html'));
-    const out = parseResultsInBrowser({ strategy: STRATEGIES[1], max: 10 });
+    const out = parseResultsInBrowser({ strategy: STRATEGIES[0], max: 10 });
     expect(out.results.length).toBeGreaterThan(0);
     expect(out.signals).toMatchObject({
       h3Count: expect.any(Number),
@@ -76,6 +76,7 @@ describe('parseResultsInBrowser (multi-strategy)', () => {
       hveidCount: expect.any(Number),
       classTokenSize: expect.any(Number),
       layoutSignature: expect.any(String),
+      lang: expect.any(String),
     });
     expect(out.signals.layoutSignature.length).toBeGreaterThan(0);
   });
@@ -86,9 +87,9 @@ describe('parseResultsInBrowser (multi-strategy)', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it('STRATEGIES first entry uses data-ved (most stable per SearXNG)', () => {
-    expect(STRATEGIES[0].id).toContain('data-ved');
-    expect(STRATEGIES[0].blockSelector).toContain('data-ved');
+  it('STRATEGIES leads with the class-based strategy, the one that wins on live SERPs', () => {
+    expect(STRATEGIES[0].id).toBe('class-mjjyud-v1');
+    expect(STRATEGIES.map(s => s.id)).toContain('data-ved-anchor-v1');
   });
 
   it('different strategies on same page can yield different result counts', () => {

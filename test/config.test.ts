@@ -8,7 +8,7 @@ describe('loadConfig', () => {
     expect(c.headless).toBe(true);
     expect(c.idleCloseMs).toBe(30_000);
     expect(c.allowPrivate).toBe(false);
-    expect(c.humanlikeMode).toBe('off');
+    expect(c.humanlikeMode).toBe('background');
     expect(c.timezone).toBeTypeOf('string');
     expect(c.timezone.length).toBeGreaterThan(0);
   });
@@ -32,11 +32,11 @@ describe('loadConfig', () => {
     expect(loadConfig({ SURF_TZ: 'Asia/Seoul' }).timezone).toBe('Asia/Seoul');
   });
 
-  it('parses humanlikeMode strict values only', () => {
+  it('parses humanlikeMode, defaulting unknown values to background', () => {
     expect(loadConfig({ SURF_HUMANLIKE_MODE: 'inline' }).humanlikeMode).toBe('inline');
     expect(loadConfig({ SURF_HUMANLIKE_MODE: 'background' }).humanlikeMode).toBe('background');
     expect(loadConfig({ SURF_HUMANLIKE_MODE: 'off' }).humanlikeMode).toBe('off');
-    expect(loadConfig({ SURF_HUMANLIKE_MODE: 'aggressive' }).humanlikeMode).toBe('off');
+    expect(loadConfig({ SURF_HUMANLIKE_MODE: 'aggressive' }).humanlikeMode).toBe('background');
   });
 
   it('idleCloseMs accepts 0 (disable)', () => {

@@ -1,5 +1,5 @@
 import type { BrowserContext } from 'playwright';
-import { launch, cloneProfile, getPage, PROFILE_MAIN } from './browser.js';
+import { launch, cloneProfile, getPage, cleanupOrphanProfiles, PROFILE_MAIN } from './browser.js';
 import { search, CaptchaError, type SearchOptions } from './search.js';
 import { extract, type ExtractResult, type ExtractMode } from './extract.js';
 import type { SearchResult, ResultClassification } from './types.js';
@@ -42,6 +42,7 @@ export class SearchPool {
 
   async warm(): Promise<void> {
     if (this.warmed) return;
+    await cleanupOrphanProfiles().catch(() => {});
     const cookies = await this.getSeedCookies();
     const dirs = await Promise.all(
       Array.from({ length: this.size }, (_, i) => cloneProfile(i)),

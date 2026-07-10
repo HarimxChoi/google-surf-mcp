@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.6.8",
+  "version": "0.7.0",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "MCP server for Google search via warm Chrome profile. No API key.",
   "type": "module",
@@ -21,7 +21,8 @@
     "bootstrap": "node build/bootstrap.js",
     "start": "node build/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "drift-check": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/repair/index.js"
   },
   "keywords": [
     "mcp",

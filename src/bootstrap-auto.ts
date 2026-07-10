@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
-import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked, ensureSeed } from './browser.js';
+import { launch, getPage, PROFILE_MAIN, profileExists, isBlocked, dismissConsent, ensureSeed } from './browser.js';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -28,6 +28,7 @@ async function runOnce(opts: AutoBootstrapOptions): Promise<void> {
   try {
     const page = await getPage(ctx);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await dismissConsent(page);
     if (isBlocked(page.url())) throw new Error('blocked at home page');
     await sleep(800);
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scoreResult, filterOrganic, aggregateScores, getAdMarker } from '../src/score.js';
+import { scoreResult, filterOrganic, aggregateScores, getAdMarker, markerLocaleFor } from '../src/score.js';
 import type { SearchResult, GeometricVerification } from '../src/types.js';
 
 const baseResult: SearchResult = {
@@ -157,5 +157,39 @@ describe('getAdMarker', () => {
 
   it('falls back to en for unknown locale', () => {
     expect(getAdMarker('xx-YY').source).toBe(getAdMarker('en-US').source);
+  });
+
+  // Titles taken verbatim from a live ko SERP for "vpn 추천"; none are ads.
+  it('does not treat 광고 as a marker when it is ordinary vocabulary', () => {
+    const ko = getAdMarker('ko-KR');
+    expect(ko.test('광고 및 속도 제한 없는 무료 VPN 추천')).toBe(false);
+    expect(ko.test('광고를 차단해 주는 브라우저')).toBe(false);
+    expect(ko.test('무료 광고 차단기 비교')).toBe(false);
+    expect(ko.test('광고')).toBe(true);
+    expect(ko.test('광고 · example.com')).toBe(true);
+  });
+
+  it('does not treat 広告/广告 as a marker mid-sentence', () => {
+    expect(getAdMarker('ja-JP').test('広告を消す方法')).toBe(false);
+    expect(getAdMarker('ja-JP').test('広告')).toBe(true);
+    expect(getAdMarker('zh-CN').test('广告拦截器推荐')).toBe(false);
+    expect(getAdMarker('zh-CN').test('广告')).toBe(true);
+  });
+});
+
+describe('markerLocaleFor', () => {
+  it('adopts the SERP language when its marker is anchored', () => {
+    expect(markerLocaleFor('ko', 'en-US')).toBe('ko');
+    expect(markerLocaleFor('ja-JP', 'en-US')).toBe('ja-JP');
+    expect(markerLocaleFor('en', 'ko-KR')).toBe('en');
+  });
+
+  it('keeps the configured locale for languages with unanchored markers', () => {
+    expect(markerLocaleFor('de', 'en-US')).toBe('en-US');
+    expect(markerLocaleFor('fr-FR', 'en-US')).toBe('en-US');
+  });
+
+  it('keeps the configured locale when the page reports no language', () => {
+    expect(markerLocaleFor('', 'ko-KR')).toBe('ko-KR');
   });
 });

@@ -3,14 +3,9 @@
 
 import type { ParserStrategy, ParseSignals } from './types.js';
 
+// Ordered by measured win rate, not presumed stability: div[data-ved] matches
+// ~190 blocks per page and loses on geometry.
 export const STRATEGIES: ParserStrategy[] = [
-  {
-    id: 'data-ved-anchor-v1',
-    blockSelector: 'div[data-ved], div[data-snc], div[data-hveid]',
-    snippetSelector: '[data-sncf="1"], .VwiC3b, div[style*="-webkit-line-clamp"]',
-    adFilter: '#tads, #tadsb, #bottomads, [aria-label*="Sponsored" i], [data-text-ad], [data-pcu]',
-    description: 'data-ved attribute first',
-  },
   {
     id: 'class-mjjyud-v1',
     blockSelector: 'div.g, div.MjjYud, div.tF2Cxc',
@@ -24,6 +19,13 @@ export const STRATEGIES: ParserStrategy[] = [
     snippetSelector: '[data-sncf="1"], .VwiC3b, div[style*="-webkit-line-clamp"]',
     adFilter: '#tads, #tadsb, #bottomads, [aria-label*="Sponsored" i], [data-text-ad], [data-pcu]',
     description: 'hveid + jscontroller combo',
+  },
+  {
+    id: 'data-ved-anchor-v1',
+    blockSelector: 'div[data-ved], div[data-snc], div[data-hveid]',
+    snippetSelector: '[data-sncf="1"], .VwiC3b, div[style*="-webkit-line-clamp"]',
+    adFilter: '#tads, #tadsb, #bottomads, [aria-label*="Sponsored" i], [data-text-ad], [data-pcu]',
+    description: 'data-ved attribute, broad fallback',
   },
 ];
 
@@ -70,6 +72,7 @@ export function parseResultsInBrowser(args: {
     } catch { /* malformed href */ }
   });
   const hveidCount = document.querySelectorAll('[data-hveid]').length;
+  const lang = document.documentElement.lang || '';
 
   const classTokens = new Set<string>();
   allElements.forEach((el) => {
@@ -132,12 +135,12 @@ export function parseResultsInBrowser(args: {
   return {
     results,
     blockIndices,
-    signals: { h3Count, externalLinkCount, hveidCount, classTokenSize: classTokens.size, layoutSignature },
+    signals: { h3Count, externalLinkCount, hveidCount, classTokenSize: classTokens.size, layoutSignature, lang },
   };
 }
 
 export function parseResults(max: number): LegacyParseOutput {
-  const out = parseResultsInBrowser({ strategy: STRATEGIES[1], max });
+  const out = parseResultsInBrowser({ strategy: STRATEGIES[0], max });
   return { results: out.results, h3Count: out.signals.h3Count };
 }
 

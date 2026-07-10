@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { rm, cp } from 'node:fs/promises';
+import { rm, cp, readdir } from 'node:fs/promises';
 import { platform, homedir } from 'node:os';
 import { resolve, join, basename } from 'node:path';
 import { chromium as chromiumBare } from 'playwright';
@@ -263,10 +263,45 @@ export function profileExists(): boolean {
   return existsSync(PROFILE_MAIN);
 }
 
-export const isBlocked = (url: string) =>
-  url.includes('/sorry/') || url.includes('consent.google.');
+const WORKER_DIR_RE = /^w(\d+)_\d+$/;
 
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// Worker dirs are per-PID, so a crashed run leaves its clones behind forever.
+export async function cleanupOrphanProfiles(): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await readdir(PROFILE_ROOT);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of entries) {
+    const m = WORKER_DIR_RE.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pidAlive(pid)) continue;
+    await rm(resolve(PROFILE_ROOT, name), { recursive: true, force: true }).catch(() => {});
+    removed++;
+  }
+  return removed;
+}
+
+const isConsent = (url: string) => url.includes('consent.google.');
+
+export const isBlocked = (url: string) =>
+  url.includes('/sorry/') || isConsent(url);
+
+// Consent is dismissible; calling it a block charges the cascade a captcha.
 export async function detectBlock(page: Page): Promise<boolean> {
+  if (isConsent(page.url())) return false;
   if (isBlocked(page.url())) return true;
   try {
     return await page.evaluate(() =>

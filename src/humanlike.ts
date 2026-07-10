@@ -25,8 +25,9 @@ export function generateBehaviorParams(): BehaviorParams {
       speed: rand(1.0, 2.0),
       overshoot: rand(0.05, 0.15),
     },
+    // Human search-box typing runs ~80-200ms/char.
     typing: {
-      delay: [randInt(5, 12), randInt(18, 28)],
+      delay: [randInt(70, 110), randInt(150, 220)],
     },
     delays: {
       afterSearch: [randInt(40, 70), randInt(100, 140)],
@@ -63,6 +64,7 @@ export class HumanlikeBehavior {
     const [minD, maxD] = this.params.typing.delay;
     for (const ch of query) {
       await page.keyboard.type(ch, { delay: rand(minD, maxD) });
+      if (Math.random() < 0.08) await sleep(rand(200, 600));
     }
   }
 

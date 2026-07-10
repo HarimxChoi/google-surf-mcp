@@ -12,10 +12,15 @@ export interface StrategyStat {
 export interface PersistedState {
   schema: 1;
   stats: Record<string, StrategyStat>;
+  // Without this history a uniform degradation, where every strategy drops
+  // together, is invisible.
+  recentResults?: number[];
 }
 
 const WIN_MARGIN_FOR_REORDER = 3;
 const FLUSH_DEBOUNCE_MS = 5_000;
+const BASELINE_WINDOW = 20;
+const BASELINE_MIN_SAMPLES = 5;
 
 function emptyStat(): StrategyStat {
   return { wins: 0, zeros: 0, losses: 0, lastWinAt: null };
@@ -88,9 +93,32 @@ export class StrategyHealing {
           };
         }
         this.state.stats = merged;
+        if (Array.isArray(parsed.recentResults)) {
+          const persisted = parsed.recentResults
+            .filter((n) => typeof n === 'number' && Number.isFinite(n) && n >= 0)
+            .map((n) => n | 0);
+          this.state.recentResults = [...persisted, ...(this.state.recentResults ?? [])]
+            .slice(-BASELINE_WINDOW);
+        }
       }
     } catch {}
     this.loaded = true;
+  }
+
+  recordResultCount(count: number): void {
+    if (!this.enabled || !Number.isFinite(count) || count < 0) return;
+    const ring = this.state.recentResults ?? (this.state.recentResults = []);
+    ring.push(count | 0);
+    if (ring.length > BASELINE_WINDOW) ring.splice(0, ring.length - BASELINE_WINDOW);
+    this.scheduleFlush();
+  }
+
+  baselineResults(): number | undefined {
+    const ring = this.state.recentResults ?? [];
+    if (ring.length < BASELINE_MIN_SAMPLES) return undefined;
+    const sorted = [...ring].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
   recordOutcome(id: string, kind: 'win' | 'loss' | 'zero'): void {

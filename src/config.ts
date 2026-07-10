@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { cascadeStatePath } from './cascadeStore.js';
 
 export { detectChrome as detectChromePath } from './browser.js';
 
@@ -33,6 +34,7 @@ export interface Config {
 
   selfHealingEnabled: boolean;
   selfHealingFile: string;
+  cascadeStateFile: string;
 }
 
 function parseBool(v: string | undefined, defaultVal: boolean): boolean {
@@ -70,8 +72,8 @@ function parseTz(v: string | undefined): string {
 }
 
 function parseHumanlike(v: string | undefined): 'off' | 'background' | 'inline' {
-  if (v === 'background' || v === 'inline') return v;
-  return 'off';
+  if (v === 'off' || v === 'inline') return v;
+  return 'background';
 }
 
 function parseChromePath(v: string | undefined): string | undefined {
@@ -111,5 +113,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     selfHealingEnabled: parseBool(env.SURF_SELF_HEALING, true),
     selfHealingFile: env.SURF_SELF_HEALING_FILE || join(profileRoot, '.heal', 'strategy-order.json'),
+    cascadeStateFile: env.SURF_CASCADE_STATE_FILE || cascadeStatePath(profileRoot),
   };
 }

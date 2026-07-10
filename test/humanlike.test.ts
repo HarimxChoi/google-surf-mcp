@@ -38,10 +38,10 @@ describe('generateBehaviorParams', () => {
 
   it('generated ranges fall within meta-bounds', () => {
     const p = generateBehaviorParams();
-    expect(p.typing.delay[0]).toBeGreaterThanOrEqual(5);
-    expect(p.typing.delay[0]).toBeLessThanOrEqual(12);
-    expect(p.typing.delay[1]).toBeGreaterThanOrEqual(18);
-    expect(p.typing.delay[1]).toBeLessThanOrEqual(28);
+    expect(p.typing.delay[0]).toBeGreaterThanOrEqual(70);
+    expect(p.typing.delay[0]).toBeLessThanOrEqual(110);
+    expect(p.typing.delay[1]).toBeGreaterThanOrEqual(150);
+    expect(p.typing.delay[1]).toBeLessThanOrEqual(220);
     expect(p.mouse.steps[0]).toBeGreaterThanOrEqual(15);
     expect(p.mouse.steps[0]).toBeLessThanOrEqual(25);
   });
@@ -101,6 +101,15 @@ describe('HumanlikeBehavior', () => {
     expect(page.keyboard.type).toHaveBeenCalledTimes(5);
     const firstCall = page.keyboard.type.mock.calls[0];
     expect(firstCall[1]).toMatchObject({ delay: expect.any(Number) });
+  });
+
+  it('typeQuery spends human time per keystroke', async () => {
+    const b = new HumanlikeBehavior(params, 'inline');
+    const page = mockPage();
+    await b.typeQuery(page, 'github actions ci');
+    const delays = page.keyboard.type.mock.calls.map((c: unknown[]) => (c[1] as { delay: number }).delay);
+    const mean = delays.reduce((s: number, d: number) => s + d, 0) / delays.length;
+    expect(mean).toBeGreaterThan(70);
   });
 
   it('does not throw when single action fails (swallow)', async () => {

@@ -10,6 +10,7 @@ import { formatToolResponse, toErrorInfo } from './response.js';
 import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
 } from './cascade.js';
+import { loadCascadeMode, saveCascadeMode } from './cascadeStore.js';
 import { Telemetry, getTelemetry } from './telemetry.js';
 import { StrategyHealing, getStrategyHealing } from './strategyHealing.js';
 import { STRATEGIES } from './parse.js';
@@ -48,7 +49,8 @@ export interface Deps {
 export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel' | 'healing'> {
   const config = loadConfig(env);
   const cache = getCache(config.cacheRoot, config.cacheMaxEntries);
-  const cascade = createCascadeState();
+  // Without this, every process restart repays the captcha that taught us the mode.
+  const cascade = createCascadeState(loadCascadeMode(config.cascadeStateFile, 'off'));
   const limiter = new RateLimiter(config.rateLimitPerMin);
   const tel = getTelemetry(config.telemetryRoot, config.telemetryEnabled);
   const healing = getStrategyHealing(
@@ -58,6 +60,11 @@ export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'conf
   );
   healing.load().catch(() => {});
   return { config, cache, cascade, limiter, tel, healing };
+}
+
+function makeHumanlike(deps: Deps): HumanlikeBehavior | undefined {
+  if (deps.config.humanlikeMode === 'off') return undefined;
+  return new HumanlikeBehavior(generateBehaviorParams(), deps.config.humanlikeMode);
 }
 
 function tier3Recovery(deps: Deps, seedQuery?: string): () => Promise<void> {
@@ -88,9 +95,15 @@ async function executeSeqWithCascade<T>(
     tier3Recovery: tier3Recovery(deps, seedQuery),
     isCaptchaError: (e) => e instanceof CaptchaError,
     onTransition: (from, to, reason) => {
-      console.error(`[cascade] ${from} → ${to}: ${reason}`);
+      console.error(`[cascade] ${from} -> ${to}: ${reason}`);
+      persistCascadeMode(deps, to);
     },
   });
+}
+
+function persistCascadeMode(deps: Deps, to: StealthMode | 'tier3'): void {
+  if (to === 'tier3') return;
+  saveCascadeMode(deps.config.cascadeStateFile, to);
 }
 
 async function executePoolWithCascade<T>(
@@ -118,7 +131,8 @@ async function executePoolWithCascade<T>(
     tier3Recovery: tier3Recovery(deps, seedQuery),
     isCaptchaError: (e) => e instanceof CaptchaError,
     onTransition: (from, to, reason) => {
-      console.error(`[cascade pool] ${from} → ${to}: ${reason}`);
+      console.error(`[cascade pool] ${from} -> ${to}: ${reason}`);
+      persistCascadeMode(deps, to);
     },
   });
 }
@@ -151,25 +165,37 @@ export async function searchTool(
 
   try {
     await deps.limiter.acquire();
+    // params live outside the callback so a cascade retry keeps one fingerprint.
     const params = generateBehaviorParams();
     const outcome = await executeSeqWithCascade(deps, async (ctx) => {
       const page = (await ctx.pages())[0] ?? (await ctx.newPage());
-      const behavior = new HumanlikeBehavior(params, deps.config.humanlikeMode);
+      const humanlike = deps.config.humanlikeMode !== 'off'
+        ? new HumanlikeBehavior(params, deps.config.humanlikeMode)
+        : undefined;
       const r = await legacySearch(page, query, limit, {
         locale: deps.config.locale,
         healing: deps.healing,
+        humanlike,
       });
-      if (deps.config.humanlikeMode !== 'off') {
-        await behavior.simulateBrowsing(page, []).catch(() => {});
-      }
+      await humanlike?.simulateBrowsing(page, []).catch(() => {});
       return r;
     }, query);
+
+    if (outcome.degraded_reasons?.length) {
+      console.error(`[google-surf-mcp] parser degraded: ${outcome.degraded_reasons.join(', ')}`);
+      deps.tel.record('parse.degraded', {
+        tool: 'search',
+        reasons: outcome.degraded_reasons,
+        resultsLen: outcome.results.length,
+      }).catch(() => {});
+    }
 
     const meta = {
       strategy: 'legacy-v0.4',
       stealth_mode: deps.cascade.mode,
       dropped: outcome.dropped,
       dropped_reasons: outcome.dropped_reasons,
+      ...(outcome.degraded_reasons?.length ? { degraded_reasons: outcome.degraded_reasons } : {}),
     };
     await deps.cache.set('search', cacheKey, { results: outcome.results, meta }, deps.config.cacheTtlSearchMs);
 
@@ -217,7 +243,11 @@ export async function searchParallelTool(
   try {
     for (let i = 0; i < queries.length; i++) await deps.limiter.acquire();
     const results = await executePoolWithCascade(deps, async (pool) => {
-      return await pool.runMany(queries, limit, { locale: deps.config.locale, healing: deps.healing });
+      return await pool.runMany(queries, limit, {
+        locale: deps.config.locale,
+        healing: deps.healing,
+        humanlike: makeHumanlike(deps),
+      });
     }, queries[0]);
 
     const elapsed = Date.now() - t0;
@@ -248,7 +278,7 @@ export async function extractTool(
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const url = input.url.trim();
-  const maxChars = Math.min(Math.max(input.max_chars ?? 8_000, 200), 50_000);
+  const maxChars = Math.min(Math.max(input.max_chars ?? deps.config.extractMaxChars, 200), 50_000);
   const mode: ExtractMode = input.mode ?? 'full';
 
   if (!url) {
@@ -294,7 +324,7 @@ export async function searchExtractTool(
   const query = input.query.trim();
   const limit = Math.min(Math.max(input.limit ?? 5, 1), 10);
   const mode: ExtractMode = input.mode ?? 'abstract';
-  const defaultMax = mode === 'abstract' ? 1_500 : 8_000;
+  const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
   const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 20_000);
 
   if (!query) {
@@ -314,7 +344,11 @@ export async function searchExtractTool(
   try {
     await deps.limiter.acquire();
     const data = await executePoolWithCascade(deps, async (pool) => {
-      const sr = await pool.searchOne(query, limit, { locale: deps.config.locale, healing: deps.healing });
+      const sr = await pool.searchOne(query, limit, {
+        locale: deps.config.locale,
+        healing: deps.healing,
+        humanlike: makeHumanlike(deps),
+      });
       if (!sr.results.length) return { results: [], searchError: sr.error, droppedCount: sr.dropped ?? 0 };
       const enriched = await Promise.all(sr.results.map(async (r) => {
         const ex = await pool.extractOne(r.url, maxChars, mode);
@@ -384,6 +418,7 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
       enabled: deps.config.selfHealingEnabled,
       order: deps.healing.getOrderedStrategyIds(STRATEGIES.map((s) => s.id)),
       stats: deps.healing.getStats(),
+      baselineResults: deps.healing.baselineResults() ?? null,
     },
     config: {
       cloudMode: deps.config.cloudMode,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isBlocked, dismissConsent } from '../src/browser.js';
+import { isBlocked, detectBlock, dismissConsent } from '../src/browser.js';
 import type { Page } from 'playwright';
 
 describe('isBlocked', () => {
@@ -13,6 +13,21 @@ describe('isBlocked', () => {
     expect(isBlocked('https://www.google.com/search?q=foo')).toBe(false);
     expect(isBlocked('https://www.google.com/')).toBe(false);
     expect(isBlocked('')).toBe(false);
+  });
+});
+
+describe('detectBlock', () => {
+  const pageAt = (url: string) => ({
+    url: () => url,
+    evaluate: async () => false,
+  }) as unknown as Page;
+
+  it('does not report the consent screen as a block, so the cascade is not charged a captcha', async () => {
+    expect(await detectBlock(pageAt('https://consent.google.com/m?continue=foo'))).toBe(false);
+  });
+
+  it('still reports /sorry/', async () => {
+    expect(await detectBlock(pageAt('https://www.google.com/sorry/index'))).toBe(true);
   });
 });
 

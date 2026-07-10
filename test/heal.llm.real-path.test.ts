@@ -69,7 +69,7 @@ describe('repairWithLLM real-path (SDK mocked, tool_use forced)', () => {
     expect(call.tools[0].name).toBe('submit_selector_repair');
     expect(call.tools[0].input_schema.required).toContain('decision');
     expect(call.tool_choice).toEqual({ type: 'tool', name: 'submit_selector_repair' });
-    expect(call.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(call.system[0].cache_control).toBeUndefined();
 
     expect(out).toEqual({
       decision: 'approve_candidate',

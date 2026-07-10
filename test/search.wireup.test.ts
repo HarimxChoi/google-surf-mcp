@@ -59,6 +59,63 @@ describe('wire-up: pickAndScoreResults', () => {
     expect(outcome.dropped).toBe(0);
   });
 
+  // Google serves ko by IP even when we ask for en-US. The organic result
+  // mentions 광고 as ordinary vocabulary; only the ad carries it as a label.
+  const koSerp = `
+    <!DOCTYPE html>
+    <html lang="ko"><body>
+      <div id="search">
+        <div class="MjjYud">
+          <a href="https://ad.example.com/x"><h3>광고 · ad.example.com</h3></a>
+          <div class="VwiC3b">광고주가 제공한 설명이며 임계값을 넘길 만큼 깁니다.</div>
+        </div>
+        <div class="MjjYud">
+          <a href="https://organic.example.com/y"><h3>광고 없는 무료 VPN 추천</h3></a>
+          <div class="VwiC3b">유기적 결과 스니펫이며 설명 임계값을 넘길 만큼 깁니다.</div>
+        </div>
+      </div>
+    </body></html>`;
+
+  it('picks ad markers from the SERP language, not the configured locale', async () => {
+    await page.setContent(koSerp, { waitUntil: 'domcontentloaded' });
+    const outcome = await pickAndScoreResults(page, 10, { locale: 'en-US' });
+    expect(outcome.results.map((r) => r.url)).toEqual(['https://organic.example.com/y']);
+    expect(outcome.dropped_reasons).toContain('sponsored');
+  });
+
+  it('keeps an organic result that merely mentions 광고', async () => {
+    await page.setContent(koSerp, { waitUntil: 'domcontentloaded' });
+    const outcome = await pickAndScoreResults(page, 10, { locale: 'ko-KR' });
+    expect(outcome.results.map((r) => r.title)).toContain('광고 없는 무료 VPN 추천');
+  });
+
+  // The leader finds one result, the peer finds five: broken but never empty.
+  it('flags partial degradation when a peer strategy finds far more', async () => {
+    const rows = Array.from({ length: 5 }, (_, i) => `
+      <div data-hveid="h${i}" jscontroller="c${i}">
+        <a href="https://peer.example.com/${i}"><h3>Peer Result ${i}</h3></a>
+        <div class="VwiC3b">peer snippet long enough to pass the description threshold</div>
+      </div>`).join('');
+    const html = `
+      <!DOCTYPE html>
+      <html><body><div id="search">
+        <div class="MjjYud">
+          <a href="https://leader.example.com/only"><h3>Leader Result</h3></a>
+          <div class="VwiC3b">leader snippet long enough to pass the description threshold</div>
+        </div>
+        ${rows}
+      </div></body></html>`;
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const outcome = await pickAndScoreResults(page, 10, { locale: 'en-US' });
+    expect(outcome.degraded_reasons).toContain('peer_strategy_outperforms');
+  });
+
+  it('reports no degradation on a plain healthy page', async () => {
+    await page.setContent(loadFixture('serp-basic.html'), { waitUntil: 'domcontentloaded' });
+    const outcome = await pickAndScoreResults(page, 10, { locale: 'en-US' });
+    expect(outcome.degraded_reasons).toBeUndefined();
+  });
+
   it('aligns verify entries with filtered results when ads precede organics', async () => {
     const html = `
       <!DOCTYPE html>

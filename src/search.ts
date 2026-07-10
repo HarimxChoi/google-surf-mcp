@@ -3,8 +3,10 @@ import type { SearchResult, ResultClassification, ParserStrategy } from './types
 import { detectBlock, dismissConsent } from './browser.js';
 import { STRATEGIES, parseResultsInBrowser } from './parse.js';
 import { verifyResultsGeometricInBrowser, aggregateConfidence } from './verify.js';
-import { scoreResult } from './score.js';
+import { scoreResult, markerLocaleFor } from './score.js';
+import { degradationVotes } from './triage.js';
 import type { StrategyHealing } from './strategyHealing.js';
+import type { HumanlikeBehavior } from './humanlike.js';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -29,12 +31,15 @@ const EARLY_EXIT_MIN_CONFIDENCE = 0.7;
 export interface SearchOptions {
   locale?: string;
   healing?: StrategyHealing;
+  humanlike?: HumanlikeBehavior;
 }
 
 export interface SearchOutcome {
   results: SearchResult[];
   dropped: number;
   dropped_reasons: ResultClassification[];
+  // Partial loss only; a total failure throws instead.
+  degraded_reasons?: string[];
 }
 
 interface StrategyCandidate {
@@ -42,6 +47,7 @@ interface StrategyCandidate {
   results: SearchResult[];
   blockIndices: number[];
   h3Count: number;
+  lang: string;
   verify: ReturnType<typeof verifyResultsGeometricInBrowser>;
   conf: number;
 }
@@ -60,7 +66,7 @@ async function evaluateStrategy(
     max: parseMax,
   });
   if (out.results.length === 0) {
-    return { strategy, results: [], blockIndices: [], h3Count: out.signals.h3Count, verify: [], conf: 0 };
+    return { strategy, results: [], blockIndices: [], h3Count: out.signals.h3Count, lang: out.signals.lang, verify: [], conf: 0 };
   }
   const verify = await page.evaluate(verifyResultsGeometricInBrowser, {
     blockSelector: strategy.blockSelector,
@@ -70,6 +76,7 @@ async function evaluateStrategy(
     results: out.results,
     blockIndices: out.blockIndices,
     h3Count: out.signals.h3Count,
+    lang: out.signals.lang,
     verify,
     conf: aggregateConfidence(verify),
   };
@@ -90,9 +97,9 @@ export async function search(
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 10_000 });
     await sleep(rand(80, 160));
   }
+  await dismissConsent(page);
   if (await detectBlock(page)) throw new CaptchaError('home');
 
-  await dismissConsent(page);
   const sb = page.locator('textarea[name="q"], input[name="q"]').first();
   await sb.focus({ timeout: 6_000 });
   await sleep(rand(30, 70));
@@ -102,8 +109,12 @@ export async function search(
     await page.keyboard.press('Delete');
   }
 
-  for (const ch of query) {
-    await page.keyboard.type(ch, { delay: rand(8, 20) });
+  if (opts.humanlike) {
+    await opts.humanlike.typeQuery(page, query);
+  } else {
+    for (const ch of query) {
+      await page.keyboard.type(ch, { delay: rand(8, 20) });
+    }
   }
   await sleep(rand(250, 600));
   const beforeUrl = page.url();
@@ -178,6 +189,24 @@ export async function pickAndScoreResults(
     }
   }
 
+  // A peer rescuing the search hides that the leader broke. Early exit means no peer ran.
+  const leader = candidates[0];
+  const peerResults = candidates.length > 1
+    ? Math.max(...candidates.slice(1).map((c) => c.results.length))
+    : undefined;
+  const degraded = degradationVotes({
+    resultsLen: leader.results.length,
+    h3Count: leader.h3Count,
+    geometricConfidence: leader.results.length ? leader.conf : undefined,
+    peerResults,
+    baselineResults: opts.healing?.baselineResults(),
+  });
+
+  // A degraded count would drag the baseline down toward the broken value.
+  if (opts.healing && leader.results.length > 0 && degraded.length === 0) {
+    opts.healing.recordResultCount(leader.results.length);
+  }
+
   if (best.results.length === 0) {
     if (opts.waitErr) {
       throw new Error(`search wait failed and no results: ${opts.waitErr.message.slice(0, 120)}`);
@@ -189,7 +218,8 @@ export async function pickAndScoreResults(
     return { results: [], dropped: 0, dropped_reasons: [] };
   }
 
-  const locale = opts.locale ?? 'en-US';
+  // Google picks SERP language by IP, so the page's lang beats our config.
+  const locale = markerLocaleFor(best.lang, opts.locale ?? 'en-US');
   const results: SearchResult[] = [];
   const droppedSet = new Set<ResultClassification>();
   let droppedCount = 0;
@@ -204,5 +234,10 @@ export async function pickAndScoreResults(
     }
     results.push(r);
   }
-  return { results, dropped: droppedCount, dropped_reasons: Array.from(droppedSet) };
+  return {
+    results,
+    dropped: droppedCount,
+    dropped_reasons: Array.from(droppedSet),
+    ...(degraded.length ? { degraded_reasons: degraded } : {}),
+  };
 }

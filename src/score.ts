@@ -1,17 +1,22 @@
 import type { SearchResult, ResultScore, ResultClassification, GeometricVerification } from './types.js';
 
-// "Ad/Ads" must look like a SERP label: standalone, or at the start/end of
-// the field, or before a typographic separator. Skips "Google Ads API docs".
+// A marker must look like a SERP label, or it hits ordinary vocabulary:
+// "Google Ads API docs", "광고 없는 무료 VPN". CJK has no \b, hence the
+// explicit separator class.
 const AD_MARKERS_BY_LOCALE: Record<string, RegExp> = {
   en: /\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-—]|\s*$)/i,
-  ko: /광고|스폰서/,
-  ja: /広告|スポンサー/,
+  ko: /(?:^|\s)(광고|스폰서)(?:\s*[·•‧▾:：\-—]|\s*$)/,
+  ja: /(?:^|\s)(広告|スポンサー)(?:\s*[·•‧▾:：\-—]|\s*$)/,
+  zh: /(?:^|\s)(广告|赞助|廣告)(?:\s*[·•‧▾:：\-—]|\s*$)/,
   fr: /(sponsorisé|annonce)/i,
   de: /(anzeige|gesponsert)/i,
   es: /(anuncio|patrocinado)/i,
-  zh: /广告|赞助|廣告/,
   pt: /(patrocinado|anúncio)/i,
 };
+
+// fr/de/es/pt markers are unanchored, so never adopt them from a page we did
+// not configure ourselves.
+const LABEL_ANCHORED = new Set(['en', 'ko', 'ja', 'zh']);
 
 export interface ScoreContext {
   locale: string;
@@ -21,6 +26,11 @@ export interface ScoreContext {
 export function getAdMarker(locale: string): RegExp {
   const lang = locale.split('-')[0].toLowerCase();
   return AD_MARKERS_BY_LOCALE[lang] || AD_MARKERS_BY_LOCALE.en;
+}
+
+export function markerLocaleFor(serpLang: string, configuredLocale: string): string {
+  const lang = serpLang.split('-')[0].toLowerCase();
+  return LABEL_ANCHORED.has(lang) ? serpLang : configuredLocale;
 }
 
 function classify(

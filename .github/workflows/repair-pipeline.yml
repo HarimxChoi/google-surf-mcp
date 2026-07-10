@@ -40,14 +40,15 @@ jobs:
       - name: build repair scripts
         run: npx tsc -p tsconfig.scripts.json
 
-      - name: bootstrap profile (auto, headed via Xvfb)
+      # bootstrap.js blocks 10 minutes waiting for a human to run a search.
+      - name: bootstrap profile (unattended, headed via Xvfb)
         env:
           DISPLAY: ':99'
         run: |
           sudo apt-get install -y xvfb
           Xvfb :99 -screen 0 1366x768x24 &
           sleep 2
-          node build/bootstrap.js || true
+          node build/bootstrap-auto.js || true
 
       - name: run repair pipeline
         id: repair
@@ -56,20 +57,36 @@ jobs:
       - name: report repair decision
         if: steps.repair.outputs.should_open_pr == 'true'
         run: |
-          # Automated PR creation is intentionally not implemented — the
-          # pipeline only proposes a selector; a human applies it to src/parse.ts.
+          # The pipeline only proposes a selector; a human applies it to src/parse.ts.
           echo "Repair pipeline proposed a selector fix (caution=${{ steps.repair.outputs.caution }})."
           echo "Review the run artifacts and the drift issue, then patch src/parse.ts manually."
 
-      - name: open issue on failure
-        if: failure() || steps.repair.outputs.trigger == 'detected'
+      # Datacenter IPs get /sorry/, so a blocked probe verified nothing.
+      - name: fail on blocked probe
+        if: steps.repair.outputs.trigger == 'blocked'
+        run: |
+          echo "::error::Repair probe was blocked by Google; selector drift was NOT checked this run."
+          exit 1
+
+      - name: open drift issue
+        if: steps.repair.outputs.trigger == 'detected'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue create \
             --title "SERP selector drift detected $(date +%Y-%m-%d)" \
-            --body "Repair pipeline triggered. Check workflow logs." \
+            --body "Repair pipeline detected selector drift. Check workflow logs and the repair-report.json artifact." \
             --label "automated,parser-drift" || true
+
+      - name: open infra failure issue
+        if: failure() && steps.repair.outputs.trigger != 'detected'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "repair-pipeline infrastructure failure $(date +%Y-%m-%d)" \
+            --body "The pipeline failed before or without reaching a drift verdict (trigger=${{ steps.repair.outputs.trigger }}). This is not a selector problem." \
+            --label "automated,ci" || true
 
       - name: upload artifacts
         if: always()
@@ -77,6 +94,7 @@ jobs:
         with:
           name: repair-run-${{ github.run_id }}
           path: |
-            build-scripts/scripts/repair/*.json
+            build-scripts/scripts/repair/repair-report.json
             *.log
+          if-no-files-found: error
           retention-days: 30

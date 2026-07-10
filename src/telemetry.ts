@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 export type TelemetryEventType =
   | 'search.outcome'
   | 'parse.stale'
+  | 'parse.degraded'
   | 'cache.hit'
   | 'cache.miss'
   | 'tool.error';

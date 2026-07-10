@@ -33,9 +33,9 @@ export const DEFAULT_CASCADE_CONFIG: CascadeConfig = {
   maxIterations: 5,
 };
 
-export function createCascadeState(): CascadeState {
+export function createCascadeState(initialMode: StealthMode = 'off'): CascadeState {
   return {
-    mode: 'off',
+    mode: initialMode,
     captchaCountInMode: 0,
     captchasByMode: { off: 0, on: 0 },
     totalCaptchas: 0,
