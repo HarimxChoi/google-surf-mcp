@@ -118,7 +118,7 @@ Local clone variant:
 
 ## Docker
 
-The repo ships a [Dockerfile](Dockerfile) (Node 22 + Playwright Chromium; stdio transport, so pipe it into the MCP client exactly like `npx`):
+The repo ships a [Dockerfile](Dockerfile) (Node 22 + system Chromium + Xvfb; stdio transport, so pipe it into the MCP client exactly like `npx`):
 
 ```bash
 # build

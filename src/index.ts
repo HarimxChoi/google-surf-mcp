@@ -229,22 +229,18 @@ async function shutdown() {
 const baseDeps = initDeps();
 
 async function ensureProfileReady(): Promise<{ ok: true } | { ok: false; message: string }> {
-  if (baseDeps.config.cloudMode) {
-    if (profileExists()) return { ok: true };
-    // Cloud mode has no desktop to bootstrap on, but an exported cookies file
-    // can warm the profile headlessly instead.
-    if (process.env.SURF_COOKIES_FILE) {
-      try {
-        await warmProfileFromCookiesFile();
-        if (profileExists()) return { ok: true };
-        return {
-          ok: false,
-          message: `SURF_COOKIES_FILE set but profile still missing after warm (${process.env.SURF_COOKIES_FILE}).`,
-        };
-      } catch (e) {
-        return { ok: false, message: `cookie warm failed: ${(e as Error).message}` };
-      }
+  if (profileExists()) return { ok: true };
+  // A cookies export can warm the profile headlessly in any mode (cloud or
+  // not) and is preferable to an interactive/auto bootstrap.
+  if (process.env.SURF_COOKIES_FILE) {
+    try {
+      await warmProfileFromCookiesFile();
+      if (profileExists()) return { ok: true };
+    } catch (e) {
+      return { ok: false, message: `cookie warm failed: ${(e as Error).message}` };
     }
+  }
+  if (baseDeps.config.cloudMode) {
     return {
       ok: false,
       message: 'cloud mode requires a pre-warmed profile mounted at SURF_PROFILE_ROOT. Bootstrap externally, mount it, or set SURF_COOKIES_FILE to an exported cookies JSON.',
