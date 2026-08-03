@@ -116,6 +116,39 @@ Local clone variant:
 }
 ```
 
+## Docker
+
+The repo ships a [Dockerfile](Dockerfile) (Node 22 + Playwright Chromium; stdio transport, so pipe it into the MCP client exactly like `npx`):
+
+```bash
+# build
+docker build -t google-surf-mcp .
+
+# run (stdio over stdin/stdout — add to your MCP client as a command)
+docker run -i --rm \
+  -e SURF_PROXY=socks5://172.18.0.1:18200 \
+  -v google-surf-data:/data \
+  google-surf-mcp
+```
+
+MCP client config (Docker variant):
+
+```json
+{
+  "mcpServers": {
+    "google-surf": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "SURF_PROXY=socks5://172.18.0.1:18200", "-v", "google-surf-data:/data", "google-surf-mcp"]
+    }
+  }
+}
+```
+
+Notes:
+- The image defaults to `SURF_PROFILE_ROOT=/data`, `SURF_NO_SANDBOX=true`, `SURF_CLOUD_MODE=true` (fail-fast CAPTCHA, worker pool off). Mount a volume to keep the warm profile across restarts.
+- The profile lives on the host, so `SURF_PROXY` is the sane way to give the container an exit route (e.g. `172.18.0.1` = host's Docker bridge gateway when the proxy listens on the host).
+- CAPTCHA: a container has no desktop to pop a window on, so keep `SURF_REMOTE_DEBUG=true` handy if you need to solve one manually over an SSH port-forward.
+
 ## Tools
 
 - `search(query, limit?)` - single query, ~1.5s. Returns title / url / snippet. Sponsored ads + knowledge-panel dropped (response includes `dropped` count + `dropped_reasons`). Results cached 24h (`SURF_CACHE_TTL_SEARCH_MS=0` to bypass).
@@ -140,6 +173,7 @@ Local clone variant:
 | `SURF_REMOTE_DEBUG` | `false` | set `true` on a headless server with remote DevTools. CAPTCHA path emits the DevTools port and throws instead of spawning a window; attach `chrome://inspect` from a local machine over SSH port-forward to solve. |
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 | `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
+| `SURF_PROXY` | — | optional HTTP/SOCKS proxy for all browser traffic: `socks5://user:pass@host:port`, `http://host:port`, or bare `host:port` (assumed `http`). Passed straight to Playwright as the context proxy. Useful for datacenter IPs, geo-routing, or rate-limit relief. |
 | `SURF_EXTRACT_MAX_CHARS` | `8000` | default `extract` truncation (200–50000); per-call `max_chars` still overrides |
 | `SURF_EXTRACT_OCR` | `false` | OCR scanned/image PDFs via Tesseract (slower; off by default) |
 | `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |

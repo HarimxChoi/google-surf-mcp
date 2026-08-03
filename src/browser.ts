@@ -77,6 +77,23 @@ function readBoolEnv(name: string, defaultVal: boolean): boolean {
   return v.toLowerCase() === 'true';
 }
 
+export interface ProxyOpts {
+  server: string;
+  username?: string;
+  password?: string;
+}
+
+// SURF_PROXY accepts: socks5://host:port, http://host:port,
+// socks5://user:pass@host:port, or bare host:port (assumed http).
+export function readProxy(env: NodeJS.ProcessEnv = process.env): ProxyOpts | undefined {
+  const raw = env.SURF_PROXY?.trim();
+  if (!raw) return undefined;
+  const m = raw.match(/^(\w+:\/\/)?(?:([^:@/]+):([^@/]*)@)?(.+)$/);
+  if (!m) return undefined;
+  const server = (m[1] || 'http://') + m[4];
+  return { server, username: m[2] || undefined, password: m[3] || undefined };
+}
+
 export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
   const cloudMode = readBoolEnv('SURF_CLOUD_MODE', false);
   const useStealth = opts.stealth ?? readBoolEnv('SURF_USE_STEALTH', true);
@@ -113,6 +130,7 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     timezoneId: process.env.SURF_TZ || SYSTEM_TZ,
     ignoreDefaultArgs: ['--enable-automation'],
     ignoreHTTPSErrors: insecureTls,
+    proxy: readProxy(),
     args,
   });
 
