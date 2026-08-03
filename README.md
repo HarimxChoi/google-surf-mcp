@@ -124,9 +124,13 @@ The repo ships a [Dockerfile](Dockerfile) (Node 22 + Playwright Chromium; stdio 
 # build
 docker build -t google-surf-mcp .
 
-# run (stdio over stdin/stdout — add to your MCP client as a command)
+# run with a warm-profile cookie export (first start warms headlessly):
+# 1) export google.com cookies from your desktop browser via Cookie-Editor (JSON)
+# 2) mount the export and the profile volume
 docker run -i --rm \
   -e SURF_PROXY=socks5://172.18.0.1:18200 \
+  -e SURF_COOKIES_FILE=/data/cookies.json \
+  -v ./cookies.json:/data/cookies.json:ro \
   -v google-surf-data:/data \
   google-surf-mcp
 ```
@@ -138,7 +142,7 @@ MCP client config (Docker variant):
   "mcpServers": {
     "google-surf": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "SURF_PROXY=socks5://172.18.0.1:18200", "-v", "google-surf-data:/data", "google-surf-mcp"]
+      "args": ["run", "-i", "--rm", "-e", "SURF_PROXY=socks5://172.18.0.1:18200", "-e", "SURF_COOKIES_FILE=/data/cookies.json", "-v", "/path/to/cookies.json:/data/cookies.json:ro", "-v", "google-surf-data:/data", "google-surf-mcp"]
     }
   }
 }
@@ -146,6 +150,7 @@ MCP client config (Docker variant):
 
 Notes:
 - The image defaults to `SURF_PROFILE_ROOT=/data`, `SURF_NO_SANDBOX=true`, `SURF_CLOUD_MODE=true` (fail-fast CAPTCHA, worker pool off). Mount a volume to keep the warm profile across restarts.
+- First run with `SURF_COOKIES_FILE` set (and an empty profile volume) warms the profile headlessly from your desktop browser's exported cookies — no manual bootstrap needed. Remove the var on later runs once the volume has a warm profile.
 - The profile lives on the host, so `SURF_PROXY` is the sane way to give the container an exit route (e.g. `172.18.0.1` = host's Docker bridge gateway when the proxy listens on the host).
 - CAPTCHA: a container has no desktop to pop a window on, so keep `SURF_REMOTE_DEBUG=true` handy if you need to solve one manually over an SSH port-forward.
 
@@ -174,6 +179,7 @@ Notes:
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 | `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
 | `SURF_PROXY` | — | optional HTTP/SOCKS proxy for all browser traffic: `socks5://user:pass@host:port`, `http://host:port`, or bare `host:port` (assumed `http`). Passed straight to Playwright as the context proxy. Useful for datacenter IPs, geo-routing, or rate-limit relief. |
+| `SURF_COOKIES_FILE` | — | path to a Cookie-Editor style JSON export (`[{name, value, domain, path, expirationDate, ...}]`). In cloud mode, when no profile exists yet, the server warms one headlessly: injects the cookies into a fresh profile and hits google.com once. Lets a container start from your desktop browser's warm cookies without a manual bootstrap. |
 | `SURF_EXTRACT_MAX_CHARS` | `8000` | default `extract` truncation (200–50000); per-call `max_chars` still overrides |
 | `SURF_EXTRACT_OCR` | `false` | OCR scanned/image PDFs via Tesseract (slower; off by default) |
 | `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |

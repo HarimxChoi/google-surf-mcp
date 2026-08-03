@@ -9,6 +9,7 @@ import { extract, type ExtractMode } from './extract.js';
 import { recoverFromCaptcha } from './captchaRecover.js';
 import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
+import { warmProfileFromCookiesFile } from './cookies.js';
 import { withTimeout } from './timeout.js';
 import {
   searchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
@@ -229,12 +230,25 @@ const baseDeps = initDeps();
 
 async function ensureProfileReady(): Promise<{ ok: true } | { ok: false; message: string }> {
   if (baseDeps.config.cloudMode) {
-    return profileExists()
-      ? { ok: true }
-      : {
+    if (profileExists()) return { ok: true };
+    // Cloud mode has no desktop to bootstrap on, but an exported cookies file
+    // can warm the profile headlessly instead.
+    if (process.env.SURF_COOKIES_FILE) {
+      try {
+        await warmProfileFromCookiesFile();
+        if (profileExists()) return { ok: true };
+        return {
           ok: false,
-          message: 'cloud mode requires a pre-warmed profile mounted at SURF_PROFILE_ROOT. Bootstrap externally then mount.',
+          message: `SURF_COOKIES_FILE set but profile still missing after warm (${process.env.SURF_COOKIES_FILE}).`,
         };
+      } catch (e) {
+        return { ok: false, message: `cookie warm failed: ${(e as Error).message}` };
+      }
+    }
+    return {
+      ok: false,
+      message: 'cloud mode requires a pre-warmed profile mounted at SURF_PROFILE_ROOT. Bootstrap externally, mount it, or set SURF_COOKIES_FILE to an exported cookies JSON.',
+    };
   }
   try {
     await autoBootstrap();
