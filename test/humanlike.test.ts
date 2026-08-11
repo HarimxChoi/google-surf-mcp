@@ -32,7 +32,6 @@ describe('generateBehaviorParams', () => {
   it('successive calls produce different params (Layer 1 randomization)', () => {
     const samples = Array.from({ length: 20 }, () => generateBehaviorParams());
     const typingMins = samples.map(p => p.typing.delay[0]);
-    // 20 calls 모두 같은 값일 확률은 사실상 0 → 다양성 검증
     expect(new Set(typingMins).size).toBeGreaterThan(1);
   });
 
@@ -69,10 +68,17 @@ describe('HumanlikeBehavior', () => {
     const results: BBox[] = Array.from({ length: 10 }, (_, i) => ({
       x: 100, y: 200 + i * 100, w: 600, h: 80,
     }));
-    await b.simulateBrowsing(page, results);
-
-    const totalCalls = page.mouse.move.mock.calls.length + page.mouse.wheel.mock.calls.length;
-    expect(totalCalls).toBeGreaterThanOrEqual(0);
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.1);
+    try {
+      const run = b.simulateBrowsing(page, results);
+      await vi.runAllTimersAsync();
+      await run;
+      expect(page.mouse.move).toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('targets results from index 6+ (smoke)', async () => {

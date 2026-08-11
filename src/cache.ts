@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile, rename, unlink, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
-export type CacheNamespace = 'search' | 'extract' | 'selector' | 'layoutSig' | 'fingerprint';
+export type CacheNamespace = 'search' | 'scholar' | 'extract' | 'selector' | 'layoutSig' | 'fingerprint';
 
 interface CacheEntry<T> {
   value: T;

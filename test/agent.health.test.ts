@@ -90,4 +90,21 @@ describe('healthTool', () => {
       expect(data, `missing ${key}`).toHaveProperty(key);
     }
   });
+
+  it('reports provider modes and key presence without exposing the key', async () => {
+    const deps = mkDeps(dir);
+    deps.config.searchProvider = 'fallback';
+    deps.config.scholarProvider = 'searchapi';
+    deps.config.searchApiKey = 'secret';
+
+    const out = await healthTool(deps);
+    const config = (out.structuredContent as Record<string, any>).config;
+
+    expect(config).toMatchObject({
+      searchProvider: 'fallback',
+      scholarProvider: 'searchapi',
+      searchApiConfigured: true,
+    });
+    expect(JSON.stringify(config)).not.toContain('secret');
+  });
 });

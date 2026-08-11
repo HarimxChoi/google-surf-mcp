@@ -10,11 +10,16 @@ English | [한국어](./README.ko.md)
 [![MCP Toplist](https://mcptoplist.com/badge/io.github.HarimxChoi%2Fgoogle-surf-mcp.svg)](https://mcptoplist.com/server/io.github.HarimxChoi%2Fgoogle-surf-mcp)
 [![google-surf-mcp MCP server](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp)
 
+<p align="center">
+  <a href="https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp"><img src="./assets/searchapi-banner.png" width="100%" alt="SearchApi Google Search API" /></a>
+</p>
+<p align="center">Sponsored by <a href="https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp">SearchApi</a></p>
+
 ![demo](./assets/demo.gif)
 
 > Demo only. Actual searches run **headless** by default (no visible browser). Set `SURF_HEADLESS=false` to make Chrome visible like in the clip above.
 
-Google search MCP. No API key. Just works.
+Google search MCP. Browser mode needs no API key. SearchApi is optional.
 
 One MCP replaces three: search + URL fetcher + academic-paper extractor.
 
@@ -24,9 +29,9 @@ One MCP replaces three: search + URL fetcher + academic-paper extractor.
 - ✅ `search_extract` defaults to abstract mode (~1500 chars/result, token-cheap), `mode="full"` for whole bodies
 - ✅ Sponsored ads + knowledge panels dropped (geometric verification, not just text matching)
 - ✅ CAPTCHA recovery in 4 modes: OS notification (default) / `SURF_HEADLESS=false` / `SURF_REMOTE_DEBUG` / `SURF_CLOUD_MODE` (fail-fast)
-- ✅ No API key, no proxies, no solver
+- ✅ Browser mode needs no API key, proxy, or solver
 
-5 tools: `search` / `search_parallel` / `extract` / `search_extract` / `health`
+6 tools: `search` / `scholar_search` / `search_parallel` / `extract` / `search_extract` / `health`
 
 ## What
 
@@ -60,7 +65,7 @@ Measured on a workstation with a 1Gb/s connection.
 
 ## Install
 
-Requires Node 18+ and Google Chrome (or Chromium) on the system.
+Requires Node 18+. Browser mode also requires Google Chrome or Chromium.
 
 ```bash
 npx google-surf-mcp   # actual MCP - register in client config
@@ -101,9 +106,37 @@ Paste this into your `~/.claude.json`:
 }
 ```
 
-Restart Claude Code. Done. `search`, `search_parallel`, `extract`, `search_extract`, `health` are now available.
+Restart Claude Code. Done. `search`, `scholar_search`, `search_parallel`, `extract`, `search_extract`, `health` are now available.
 
 For other MCP clients, use the same JSON shape in their config file.
+
+## Search providers
+
+Browser search remains the default. [SearchApi](https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp) can be selected as the primary provider or used only when browser search fails.
+
+| value | behavior |
+|---|---|
+| `browser` | Default. Uses the existing Google Surf browser path and does not require `SEARCH_API`. |
+| `searchapi` | Uses SearchApi as the primary provider and does not initialize Chrome for that tool. |
+| `fallback` | Uses the browser first, then SearchApi on browser errors, CAPTCHA/rate limits, profile failure, or parser degradation. Successful and normal empty browser responses are not repeated. |
+
+`SURF_SEARCH_PROVIDER` controls `search` and `search_parallel`. `SURF_SCHOLAR_PROVIDER` controls `scholar_search`. SearchApi modes require your own SearchApi account, key, and available credits.
+
+```json
+{
+  "mcpServers": {
+    "google-surf": {
+      "command": "npx",
+      "args": ["-y", "google-surf-mcp"],
+      "env": {
+        "SEARCH_API": "your-searchapi-key",
+        "SURF_SEARCH_PROVIDER": "fallback",
+        "SURF_SCHOLAR_PROVIDER": "searchapi"
+      }
+    }
+  }
+}
+```
 
 Local clone variant:
 ```json
@@ -119,8 +152,9 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?)` - single query, ~1.5s. Returns title / url / snippet. Sponsored ads + knowledge-panel dropped (response includes `dropped` count + `dropped_reasons`). Results cached 24h (`SURF_CACHE_TTL_SEARCH_MS=0` to bypass).
-- `search_parallel(queries[], limit?)` - pool of 4, max 10 queries per call.
+- `search(query, limit?)` - single query, ~1.5s in browser mode. Returns title / url / snippet. Sponsored ads + knowledge-panel dropped on the browser path. Results cached 24h (`SURF_CACHE_TTL_SEARCH_MS=0` to bypass).
+- `scholar_search(query, limit?)` - Google Scholar search, max 10 papers. Returns authors, publication, year, snippet, citation count, related/version links, and an available full-text link. Supports browser, SearchApi primary, and fallback modes.
+- `search_parallel(queries[], limit?)` - pool of 4 in browser mode, max 10 queries per call. Follows `SURF_SEARCH_PROVIDER`.
 - `extract(url, max_chars?, mode?)` - fetch a URL, return article content.
   - `mode="full"` (default): whole body. HTML via Readability, PDFs via `liteparse` (spatial parsing, multi-column reading order).
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Triage relevance before paying for full text.
@@ -133,6 +167,10 @@ Local clone variant:
 
 | var | default | notes |
 |---|---|---|
+| `SEARCH_API` | unset | SearchApi API key. Required only when either provider setting is `searchapi` or `fallback`. Sent as a bearer token and never placed in the request URL. |
+| `SEARCHAPI_API_KEY` | unset | Alias for `SEARCH_API`. |
+| `SURF_SEARCH_PROVIDER` | `browser` | Provider for `search` and `search_parallel`: `browser`, `searchapi`, or `fallback`. |
+| `SURF_SCHOLAR_PROVIDER` | `browser` | Provider for `scholar_search`: `browser`, `searchapi`, or `fallback`. |
 | `CHROME_PATH` | auto-detected | absolute path to Chrome binary |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | where the warm profile lives |
 | `SURF_LOCALE` | `en-US` | browser locale |
@@ -146,7 +184,7 @@ Local clone variant:
 | `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |
 | `SURF_CASCADE_DISABLED` | `false` | pin a single stealth mode (chosen by `SURF_USE_STEALTH`) instead of the 3-tier auto-cascade |
 | `SURF_USE_STEALTH` | `true` | initial stealth tier — only consulted when `SURF_CASCADE_DISABLED=true` |
-| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` (fire-and-forget after returning results) / `inline` (await before returning, slower) — opt-in humanlike browsing |
+| `SURF_HUMANLIKE_MODE` | `background` | `off` / `background` (fire-and-forget after returning results) / `inline` (await before returning, slower) |
 | `SURF_RATE_LIMIT_PER_MIN` | `10` | internal cap on Google-facing requests per minute |
 | `SURF_CACHE_TTL_SEARCH_MS` | `86400000` | search cache TTL (24h); `0` disables caching |
 | `SURF_CACHE_MAX_ENTRIES` | `1000` | LRU cap per cache namespace |

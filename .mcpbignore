@@ -1,0 +1,9 @@
+*
+!manifest.json
+!LICENSE
+!README.md
+!README.ko.md
+!assets
+assets/*
+!assets/icon512.png
+!assets/searchapi-banner.png

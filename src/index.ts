@@ -11,7 +11,7 @@ import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
 import { withTimeout } from './timeout.js';
 import {
-  searchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
+  searchTool, scholarSearchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
   initDeps, type Deps, type PoolHandle,
 } from './agent.js';
 import type { StealthMode } from './cascade.js';
@@ -244,6 +244,17 @@ async function ensureProfileReady(): Promise<{ ok: true } | { ok: false; message
   }
 }
 
+async function prepareSearchProvider(
+  mode: 'browser' | 'searchapi' | 'fallback',
+): Promise<{ browserUnavailable?: string; error?: string }> {
+  if (mode === 'searchapi') return {};
+  const ready = await ensureProfileReady();
+  if (ready.ok) return {};
+  return mode === 'fallback'
+    ? { browserUnavailable: ready.message }
+    : { error: ready.message };
+}
+
 function buildDeps(): Deps {
   const acquireSeqCtx = async (mode: StealthMode) => {
     return await trackSeq(() => getSequentialCtx(mode));
@@ -262,6 +273,7 @@ function buildDeps(): Deps {
             return {
               query, results: outcome.results,
               dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons,
+              degraded_reasons: outcome.degraded_reasons,
             } as PoolSearchResult;
           } catch (e) {
             if (e instanceof CaptchaError) throw e;
@@ -379,6 +391,11 @@ const SearchInput = {
   limit: z.number().int().min(1).max(20).default(10).describe('Max results (default 10).'),
 };
 
+const ScholarSearchInput = {
+  query: z.string().min(1).max(400).describe('Google Scholar query. Supports quotes and author: operators.'),
+  limit: z.number().int().min(1).max(10).default(10).describe('Max papers (default 10).'),
+};
+
 const SearchParallelInput = {
   queries: z.array(z.string()).min(1).max(10).describe('2-10 queries to run concurrently.'),
   limit: z.number().int().min(1).max(20).default(10).describe('Max results per query.'),
@@ -427,12 +444,40 @@ const SearchOutput = {
   error: ErrorInfoShape.optional(),
 };
 
+const ScholarSearchOutput = {
+  query: z.string().optional(),
+  results: z.array(z.object({
+    rank: z.number().int(),
+    title: z.string(),
+    url: z.string().optional(),
+    authors: z.string().optional(),
+    publication: z.string().optional(),
+    year: z.number().int().optional(),
+    source: z.string().optional(),
+    snippet: z.string(),
+    cited_by_count: z.number().int(),
+    cited_by_url: z.string().optional(),
+    related_articles_url: z.string().optional(),
+    versions_count: z.number().int().optional(),
+    versions_url: z.string().optional(),
+    full_text_url: z.string().optional(),
+    scholar_id: z.string().optional(),
+    metadata: z.string(),
+  })).optional(),
+  elapsed_ms: z.number().optional(),
+  meta: MetaShape.optional(),
+  error: ErrorInfoShape.optional(),
+};
+
 const SearchParallelOutput = {
   results: z.array(z.object({
     query: z.string(),
     results: z.array(ResultItem),
     dropped: z.number().optional(),
     dropped_reasons: z.array(z.string()).optional(),
+    degraded_reasons: z.array(z.string()).optional(),
+    provider: z.enum(['browser', 'searchapi']).optional(),
+    fallback_reason: z.string().optional(),
     error: z.string().optional(),
   })).optional(),
   elapsed_ms: z.number().optional(),
@@ -488,39 +533,54 @@ const HealthOutput = {
 server.registerTool('search', {
   title: 'Google Search',
   description:
-    'Single Google search -> title/url/snippet per result. Results are cached 24h, ' +
-    'so repeating a query is free -- prefer re-querying over caching results yourself. ' +
+    'Single Google search via browser, SearchApi primary, or browser-to-SearchApi fallback. ' +
+    'Returns title, URL, and snippet. Results are cached 24h. ' +
     'For latest/today/breaking queries set SURF_CACHE_TTL_SEARCH_MS=0 to bypass the cache. ' +
-    'Default limit 10 (max 20). First call ~4s (Chromium warmup), then ~2s. ' +
-    'On CAPTCHA a visible Chrome opens for a human to solve (shared-IP protection); ' +
-    'SURF_CLOUD_MODE=true makes it fail-fast instead.',
+    'Browser is the default provider and requires no API key. Default limit 10, max 20.',
   inputSchema: SearchInput,
   outputSchema: SearchOutput,
   annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
 }, async (args: { query: string; limit: number }) => {
-  const ready = await ensureProfileReady();
-  if (!ready.ok) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${ready.message}` }], isError: true };
+  const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
+  if (provider.error) {
+    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${provider.error}` }], isError: true };
   }
-  return await searchTool(args, buildDeps());
+  return await searchTool(args, buildDeps(), provider);
+});
+
+server.registerTool('scholar_search', {
+  title: 'Google Scholar Search',
+  description:
+    'Search Google Scholar via browser, SearchApi primary, or fallback. ' +
+    'Returns title, authors, publication, year, snippet, ' +
+    'citation count, related/version links, and an available full-text link. ' +
+    'Results are cached with the same TTL as search. Max 10 papers per call.',
+  inputSchema: ScholarSearchInput,
+  outputSchema: ScholarSearchOutput,
+  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
+}, async (args: { query: string; limit: number }) => {
+  const provider = await prepareSearchProvider(baseDeps.config.scholarProvider);
+  if (provider.error) {
+    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${provider.error}` }], isError: true };
+  }
+  return await scholarSearchTool(args, buildDeps(), provider);
 });
 
 server.registerTool('search_parallel', {
   title: 'Google Search Parallel',
   description:
-    'Run 2-10 Google searches concurrently. Use to compare multiple angles in one call. ' +
-    'Each query counts against the internal rate limit (~10/min) -- do not loop this for bulk scraping. ' +
-    'First call adds 5-10s pool warmup. Per-query failures are isolated in the results array. ' +
-    'Disabled in cloud mode.',
+    'Run 2-10 Google searches with the provider selected by SURF_SEARCH_PROVIDER. ' +
+    'Browser mode uses a worker pool. SearchApi primary and fallback work in cloud mode. ' +
+    'Per-query browser failures are isolated and replaced individually in fallback mode.',
   inputSchema: SearchParallelInput,
   outputSchema: SearchParallelOutput,
   annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
 }, async (args: { queries: string[]; limit: number }) => {
-  const ready = await ensureProfileReady();
-  if (!ready.ok) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${ready.message}` }], isError: true };
+  const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
+  if (provider.error) {
+    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${provider.error}` }], isError: true };
   }
-  return await searchParallelTool(args, buildDeps());
+  return await searchParallelTool(args, buildDeps(), provider);
 });
 
 server.registerTool('extract', {
@@ -576,7 +636,10 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`[${NAME}@${VERSION}] running on stdio`);
 
-if (!baseDeps.config.cloudMode) {
+if (
+  !baseDeps.config.cloudMode
+  && (baseDeps.config.searchProvider !== 'searchapi' || baseDeps.config.scholarProvider !== 'searchapi')
+) {
   (async () => {
     try {
       if (!profileExists()) await autoBootstrap();

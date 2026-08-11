@@ -1,10 +1,11 @@
 {
-  "manifest_version": "0.3",
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "0.7.0",
-  "description": "Free Google search MCP that actually works — no API key, no proxies, no solvers. Search + extraction in one MCP.",
-  "long_description": "Free Google search MCP that actually works — no API key, no proxies, no solvers (most free Google search MCPs fail in practice; this one drives a warm Chrome profile via Playwright + stealth). Search + page extraction in one MCP: `search_extract` returns SERP results already enriched with article bodies — replaces the usual search-MCP + fetch-MCP combo. CAPTCHA opens a visible Chrome window for a human to solve (shared-IP reputation protection); `SURF_CLOUD_MODE=true` for headless/serverless fail-fast.",
+  "version": "0.8.0",
+  "description": "Google and Google Scholar search with browser and optional SearchApi providers.",
+  "long_description": "Google and Google Scholar search with page extraction. Browser mode uses a warm Chrome profile and requires no API key. SearchApi can be configured as the primary provider or as fallback for browser errors, CAPTCHA, rate limits, profile failure, and parser degradation.",
   "author": {
     "name": "harimxchoi",
     "url": "https://github.com/HarimxChoi"
@@ -20,15 +21,15 @@
   "keywords": [
     "google",
     "google-search",
+    "google-scholar",
+    "academic-search",
     "search",
     "web-search",
     "serp",
     "playwright",
     "headless-browser"
   ],
-  "icons": {
-    "default": "https://raw.githubusercontent.com/HarimxChoi/google-surf-mcp/main/assets/icon-512.png"
-  },
+  "icon": "assets/icon512.png",
   "server": {
     "type": "node",
     "entry_point": "build/index.js",
@@ -36,9 +37,12 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@0.7.0"
+        "google-surf-mcp@0.8.0"
       ],
       "env": {
+        "SEARCH_API": "${user_config.search_api_key}",
+        "SURF_SEARCH_PROVIDER": "${user_config.search_provider}",
+        "SURF_SCHOLAR_PROVIDER": "${user_config.scholar_provider}",
         "CHROME_PATH": "${user_config.chrome_path}",
         "SURF_PROFILE_ROOT": "${user_config.profile_root}",
         "SURF_LOCALE": "${user_config.locale}",
@@ -56,11 +60,15 @@
   "tools": [
     {
       "name": "search",
-      "description": "Single Google search -> title/url/snippet per result. Results cached 24h. First call ~4s, then ~2s. On CAPTCHA opens visible Chrome for human solving; SURF_CLOUD_MODE=true for fail-fast."
+      "description": "Single Google search via browser, SearchApi primary, or browser-to-SearchApi fallback. Returns title, URL, and snippet."
+    },
+    {
+      "name": "scholar_search",
+      "description": "Google Scholar search via browser, SearchApi primary, or fallback. Returns paper metadata, citations, links, and available full text."
     },
     {
       "name": "search_parallel",
-      "description": "Run 2-10 Google searches concurrently. Rate-limited (~10/min). Disabled in cloud mode."
+      "description": "Run 2-10 Google searches using the provider selected by SURF_SEARCH_PROVIDER. SearchApi works in cloud mode."
     },
     {
       "name": "extract",
@@ -76,6 +84,27 @@
     }
   ],
   "user_config": {
+    "search_api_key": {
+      "type": "string",
+      "title": "SearchApi API key",
+      "description": "Required only for SearchApi primary or fallback modes.",
+      "sensitive": true,
+      "required": false
+    },
+    "search_provider": {
+      "type": "string",
+      "title": "Google search provider",
+      "description": "browser, searchapi, or fallback.",
+      "default": "browser",
+      "required": false
+    },
+    "scholar_provider": {
+      "type": "string",
+      "title": "Google Scholar provider",
+      "description": "browser, searchapi, or fallback.",
+      "default": "browser",
+      "required": false
+    },
     "chrome_path": {
       "type": "file",
       "title": "Chrome binary path",

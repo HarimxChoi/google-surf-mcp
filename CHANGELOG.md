@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0]
+
+### Added
+- `scholar_search` for Google Scholar paper metadata, citations, related versions, and available full text.
+- SearchApi primary and browser fallback modes for `search`, `search_parallel`, and `scholar_search`.
+- `SEARCH_API`, `SURF_SEARCH_PROVIDER`, and `SURF_SCHOLAR_PROVIDER` configuration.
+- SearchApi sponsorship banner and provider documentation.
+
+### Changed
+- Browser search remains the default and requires no API key.
+- Provider selection and SearchApi key status are visible in `health` without exposing the key.
+
 ## [0.6.6]
 
 ### Changed

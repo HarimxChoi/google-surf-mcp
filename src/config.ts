@@ -4,6 +4,8 @@ import { cascadeStatePath } from './cascadeStore.js';
 
 export { detectChrome as detectChromePath } from './browser.js';
 
+export type SearchProviderMode = 'browser' | 'searchapi' | 'fallback';
+
 export interface Config {
   chromePath?: string;
   profileRoot: string;
@@ -17,6 +19,9 @@ export interface Config {
   cacheTtlSearchMs: number;
   cacheMaxEntries: number;
   rateLimitPerMin: number;
+  searchProvider: SearchProviderMode;
+  scholarProvider: SearchProviderMode;
+  searchApiKey?: string;
   extractMaxChars: number;
   extractOcr: boolean;
 
@@ -76,6 +81,10 @@ function parseHumanlike(v: string | undefined): 'off' | 'background' | 'inline' 
   return 'background';
 }
 
+function parseProvider(v: string | undefined): SearchProviderMode {
+  return v === 'searchapi' || v === 'fallback' ? v : 'browser';
+}
+
 function parseChromePath(v: string | undefined): string | undefined {
   return v || undefined;
 }
@@ -98,6 +107,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheTtlSearchMs: parseInt0(env.SURF_CACHE_TTL_SEARCH_MS, 24 * 60 * 60_000, 0, 7 * 24 * 60 * 60_000),
     cacheMaxEntries: parseInt0(env.SURF_CACHE_MAX_ENTRIES, 1000, 10, 100_000),
     rateLimitPerMin: parseInt0(env.SURF_RATE_LIMIT_PER_MIN, 10, 1, 600),
+    searchProvider: parseProvider(env.SURF_SEARCH_PROVIDER),
+    scholarProvider: parseProvider(env.SURF_SCHOLAR_PROVIDER),
+    searchApiKey: env.SEARCH_API?.trim()
+      || env.SEARCHAPI_API_KEY?.trim()
+      || env.SURF_SEARCH_API_KEY?.trim()
+      || undefined,
     extractMaxChars: parseInt0(env.SURF_EXTRACT_MAX_CHARS, 8_000, 200, 50_000),
     extractOcr: parseBool(env.SURF_EXTRACT_OCR, false),
 

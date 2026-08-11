@@ -1,14 +1,15 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
-  "description": "MCP server for Google search via warm Chrome profile. No API key.",
+  "description": "Google and Google Scholar MCP with browser and optional SearchApi providers.",
   "type": "module",
   "bin": {
     "google-surf-mcp": "build/index.js"
   },
   "files": [
     "build",
+    "assets/searchapi-banner.png",
     "README.md",
     "LICENSE"
   ],
@@ -29,6 +30,8 @@
     "model-context-protocol",
     "google",
     "google-search",
+    "google-scholar",
+    "academic-search",
     "search",
     "web-search",
     "serp",

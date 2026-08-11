@@ -27,6 +27,9 @@ export interface PoolSearchResult {
   results: SearchResult[];
   dropped?: number;
   dropped_reasons?: ResultClassification[];
+  degraded_reasons?: string[];
+  provider?: 'browser' | 'searchapi';
+  fallback_reason?: string;
   error?: string;
 }
 
@@ -91,7 +94,13 @@ export class SearchPool {
     try {
       const page = await getPage(w.ctx);
       const outcome = await search(page, query, limit, opts);
-      return { query, results: outcome.results, dropped: outcome.dropped, dropped_reasons: outcome.dropped_reasons };
+      return {
+        query,
+        results: outcome.results,
+        dropped: outcome.dropped,
+        dropped_reasons: outcome.dropped_reasons,
+        degraded_reasons: outcome.degraded_reasons,
+      };
     } catch (e) {
       if (e instanceof CaptchaError) throw e;
       return { query, results: [], error: (e as Error).message };

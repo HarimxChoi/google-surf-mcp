@@ -9,11 +9,16 @@
 [![ci](https://github.com/HarimxChoi/google-surf-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/HarimxChoi/google-surf-mcp/actions/workflows/ci.yml)
 [![google-surf-mcp MCP server](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HarimxChoi/google-surf-mcp)
 
+<p align="center">
+  <a href="https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp"><img src="./assets/searchapi-banner.png" width="100%" alt="SearchApi Google Search API" /></a>
+</p>
+<p align="center"><a href="https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp">SearchApi</a> 후원</p>
+
 ![demo](./assets/demo.gif)
 
 > 실제 사용은 기본 **headless**로 동작합니다 (Chrome 창 안 보임). 영상처럼 보이게 하려면 `SURF_HEADLESS=false` 설정
 
-무료 Google 검색 MCP가 전부 안 돼서 직접 만든 MCP
+브라우저 모드는 API 키 없이 동작하고 SearchApi는 선택 사항입니다.
 
 MCP 1개가 3개 역할: 검색 + URL fetcher + 학술 페이퍼 추출
 
@@ -23,9 +28,9 @@ MCP 1개가 3개 역할: 검색 + URL fetcher + 학술 페이퍼 추출
 ✅ `search_extract` 기본 abstract 모드 (~1500자/결과, 토큰 절약), `mode="full"`로 본문 전체  
 ✅ 스폰서 광고 + 지식 패널 자동 제거 (geometric verification, 텍스트 매칭 아님)  
 ✅ CAPTCHA 자동 복구 4모드: OS 알림 (기본) / `SURF_HEADLESS=false` / `SURF_REMOTE_DEBUG` / `SURF_CLOUD_MODE` (fail-fast)  
-✅ API 키 / 프록시 / 솔버 X  
+✅ 브라우저 모드는 API 키, 프록시, 솔버 불필요
 
-도구 5개: `search` / `search_parallel` / `extract` / `search_extract` / `health`
+도구 6개: `search` / `scholar_search` / `search_parallel` / `extract` / `search_extract` / `health`
 
 ## How
 
@@ -58,7 +63,7 @@ CAPTCHA는 사람이 직접 함 (프로필 평판 유지 → 지속가능한 운
 
 ## Install
 
-Node 18+, 시스템에 Google Chrome (또는 Chromium) 필요
+Node 18+ 필요. 브라우저 모드는 Google Chrome 또는 Chromium도 필요합니다.
 
 ```bash
 npx google-surf-mcp   # 실제 MCP, 클라이언트 config에 등록
@@ -103,6 +108,34 @@ Claude Code 재시작
 
 다른 MCP 클라이언트도 같은 JSON 구조 그대로 (config 파일 경로만 다름)
 
+## 검색 provider
+
+기본값은 기존 브라우저 검색입니다. [SearchApi](https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp)를 메인 provider 또는 브라우저 실패 시 fallback으로 설정할 수 있습니다.
+
+| 값 | 동작 |
+|---|---|
+| `browser` | 기본값. 기존 Google Surf 브라우저 경로를 사용하며 `SEARCH_API`가 필요하지 않습니다. |
+| `searchapi` | SearchApi를 메인 provider로 사용합니다. 해당 도구 실행 시 Chrome을 초기화하지 않습니다. |
+| `fallback` | 브라우저를 먼저 사용합니다. 브라우저 오류, CAPTCHA나 rate limit, 프로필 실패, 파서 열화 시에만 SearchApi로 전환합니다. 성공 응답과 정상적인 빈 결과는 다시 요청하지 않습니다. |
+
+`SURF_SEARCH_PROVIDER`는 `search`, `search_parallel`에 적용됩니다. `SURF_SCHOLAR_PROVIDER`는 `scholar_search`에 적용됩니다. SearchApi 모드는 본인의 SearchApi 계정, API 키, 사용 가능한 크레딧이 필요합니다.
+
+```json
+{
+  "mcpServers": {
+    "google-surf": {
+      "command": "npx",
+      "args": ["-y", "google-surf-mcp"],
+      "env": {
+        "SEARCH_API": "your-searchapi-key",
+        "SURF_SEARCH_PROVIDER": "fallback",
+        "SURF_SCHOLAR_PROVIDER": "searchapi"
+      }
+    }
+  }
+}
+```
+
 로컬 클론 사용 시:
 ```json
 {
@@ -117,8 +150,9 @@ Claude Code 재시작
 
 ## Tools
 
-- `search(query, limit?)` - 단일 검색, ~1.5초. title / url / snippet 반환. 스폰서 광고 + 지식 패널 자동 제거 (응답에 `dropped` 카운트 + `dropped_reasons` 포함). 결과 24h 캐시 (`SURF_CACHE_TTL_SEARCH_MS=0`으로 우회)
-- `search_parallel(queries[], limit?)` - 4-워커 풀, 호출당 최대 10개 쿼리
+- `search(query, limit?)` - 브라우저 모드 기준 단일 검색, ~1.5초. title / url / snippet 반환. 브라우저 경로에서는 스폰서 광고와 지식 패널을 제거합니다. 결과 24h 캐시 (`SURF_CACHE_TTL_SEARCH_MS=0`으로 우회)
+- `scholar_search(query, limit?)` - Google Scholar 논문 검색, 최대 10개. 저자, 출판 정보, 연도, 초록 일부, 인용 수, 관련 논문/버전 링크, 원문 링크 반환. 브라우저, SearchApi 메인, fallback 모드를 지원합니다.
+- `search_parallel(queries[], limit?)` - 브라우저 모드에서는 4-워커 풀을 사용합니다. 호출당 최대 10개 쿼리이며 `SURF_SEARCH_PROVIDER`를 따릅니다.
 - `extract(url, max_chars?, mode?)` - URL 가져와서 본문 반환
   - `mode="full"` (기본): 본문 전체, PDF는 `liteparse`(spatial parsing, 다단 읽기)
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). 본문 가져오기 전 관련성 판단용
@@ -131,6 +165,10 @@ Claude Code 재시작
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
+| `SEARCH_API` | 미설정 | SearchApi API 키. provider가 `searchapi` 또는 `fallback`일 때만 필요합니다. bearer token으로 전송하며 URL에는 넣지 않습니다. |
+| `SEARCHAPI_API_KEY` | 미설정 | `SEARCH_API` 별칭 |
+| `SURF_SEARCH_PROVIDER` | `browser` | `search`, `search_parallel` provider: `browser`, `searchapi`, `fallback` |
+| `SURF_SCHOLAR_PROVIDER` | `browser` | `scholar_search` provider: `browser`, `searchapi`, `fallback` |
 | `CHROME_PATH` | 자동 감지 | Chrome 바이너리 절대 경로 |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | warm 프로필 위치 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |
@@ -144,7 +182,7 @@ Claude Code 재시작
 | `SURF_CLOUD_MODE` | `false` | headless/서버리스 모드: TLS 우회 + `--no-sandbox` + `--disable-dev-shm-usage` + 워커 풀 비활성 + CAPTCHA fail-fast |
 | `SURF_CASCADE_DISABLED` | `false` | 3-tier 자동 cascade 대신 단일 stealth 모드(`SURF_USE_STEALTH`로 선택)로 고정 |
 | `SURF_USE_STEALTH` | `true` | 초기 stealth tier — `SURF_CASCADE_DISABLED=true`일 때만 적용 |
-| `SURF_HUMANLIKE_MODE` | `off` | `off` / `background` (결과 반환 후 비동기 실행) / `inline` (반환 전 대기, 더 느림) — opt-in humanlike 브라우징 |
+| `SURF_HUMANLIKE_MODE` | `background` | `off` / `background` (결과 반환 후 비동기 실행) / `inline` (반환 전 대기, 더 느림) |
 | `SURF_RATE_LIMIT_PER_MIN` | `10` | 분당 Google 요청 내부 상한 |
 | `SURF_CACHE_TTL_SEARCH_MS` | `86400000` | search 캐시 TTL (24h); `0`이면 캐시 비활성화 |
 | `SURF_CACHE_MAX_ENTRIES` | `1000` | 캐시 namespace별 LRU 상한 |

@@ -1,21 +1,40 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.HarimxChoi/google-surf-mcp",
-  "description": "Google search via Playwright with a warm Chrome profile. No API key, no proxies.",
+  "description": "Google and Google Scholar search with browser and optional SearchApi providers.",
   "repository": {
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.8.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
+        {
+          "name": "SEARCH_API",
+          "description": "SearchApi API key. Required only for SearchApi primary or fallback modes.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "SURF_SEARCH_PROVIDER",
+          "description": "Provider for search and search_parallel: browser, searchapi, or fallback. Defaults to browser.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_SCHOLAR_PROVIDER",
+          "description": "Provider for scholar_search: browser, searchapi, or fallback. Defaults to browser.",
+          "isRequired": false,
+          "format": "string"
+        },
         {
           "name": "CHROME_PATH",
           "description": "Absolute path to the Chrome binary. Auto-detected on Windows/macOS/Linux when omitted.",

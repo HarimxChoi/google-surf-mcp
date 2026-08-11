@@ -9,6 +9,9 @@ describe('loadConfig', () => {
     expect(c.idleCloseMs).toBe(30_000);
     expect(c.allowPrivate).toBe(false);
     expect(c.humanlikeMode).toBe('background');
+    expect(c.searchProvider).toBe('browser');
+    expect(c.scholarProvider).toBe('browser');
+    expect(c.searchApiKey).toBeUndefined();
     expect(c.timezone).toBeTypeOf('string');
     expect(c.timezone.length).toBeGreaterThan(0);
   });
@@ -95,5 +98,18 @@ describe('loadConfig', () => {
   it('extractOcr: default off, env opt-in', () => {
     expect(loadConfig({}).extractOcr).toBe(false);
     expect(loadConfig({ SURF_EXTRACT_OCR: 'true' }).extractOcr).toBe(true);
+  });
+
+  it('parses SearchApi provider modes and key aliases', () => {
+    const configured = loadConfig({
+      SURF_SEARCH_PROVIDER: 'searchapi',
+      SURF_SCHOLAR_PROVIDER: 'fallback',
+      SEARCH_API: ' secret ',
+    });
+    expect(configured.searchProvider).toBe('searchapi');
+    expect(configured.scholarProvider).toBe('fallback');
+    expect(configured.searchApiKey).toBe('secret');
+    expect(loadConfig({ SURF_SEARCH_PROVIDER: 'unknown' }).searchProvider).toBe('browser');
+    expect(loadConfig({ SEARCHAPI_API_KEY: 'alias' }).searchApiKey).toBe('alias');
   });
 });

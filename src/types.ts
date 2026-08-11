@@ -112,6 +112,8 @@ export type ErrorCode =
   | 'PROFILE_MISSING'
   | 'PARSER_STALE'
   | 'RATE_LIMITED'
+  | 'API_KEY_MISSING'
+  | 'SEARCH_API_ERROR'
   | 'INTERNAL';
 
 export interface ErrorInfo {
@@ -129,6 +131,9 @@ export interface CallToolMeta {
   resource_uri?: string;
   fetched_at?: string;
   stealth_mode?: 'on' | 'off';
+  provider?: 'browser' | 'searchapi' | 'mixed';
+  fallback_from?: 'browser';
+  fallback_reason?: string;
 }
 
 export interface BehaviorParams {

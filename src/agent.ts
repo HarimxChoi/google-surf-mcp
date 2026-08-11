@@ -1,11 +1,17 @@
 import type { BrowserContext } from 'playwright';
 import type { CallToolResult } from './response.js';
 import type { SearchResult } from './types.js';
-import { loadConfig, type Config } from './config.js';
+import { loadConfig, type Config, type SearchProviderMode } from './config.js';
 import { UnifiedCache, getCache } from './cache.js';
 import { RateLimiter, RateLimitedError } from './limiter.js';
 import { HumanlikeBehavior, generateBehaviorParams } from './humanlike.js';
 import { search as legacySearch, CaptchaError } from './search.js';
+import {
+  scholarSearch, ScholarRateLimitError, type ScholarResult,
+} from './scholar.js';
+import {
+  SearchApiClient, SearchApiConfigError, SearchApiError, type SearchApiHandle,
+} from './searchApi.js';
 import { formatToolResponse, toErrorInfo } from './response.js';
 import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
@@ -44,6 +50,11 @@ export interface Deps {
   resetPool: () => Promise<void>;
   recoverHuman: (seedQuery?: string) => Promise<void>;
   getPoolHealth: () => PoolHealthSnapshot;
+  searchApi?: SearchApiHandle;
+}
+
+export interface SearchRunOptions {
+  browserUnavailable?: string;
 }
 
 export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel' | 'healing'> {
@@ -140,10 +151,12 @@ async function executePoolWithCascade<T>(
 export async function searchTool(
   input: { query: string; limit?: number },
   deps: Deps,
+  options: SearchRunOptions = {},
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const query = input.query.trim();
   const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const mode = deps.config.searchProvider;
 
   if (!query) {
     return formatToolResponse(null, {
@@ -151,21 +164,39 @@ export async function searchTool(
     });
   }
 
-  const cacheKey = deps.cache.searchKey(query, deps.config.locale, limit);
+  const configError = providerConfigError(mode, deps);
+  if (configError) return configError;
+
+  const cacheKey = providerCacheKey(deps, query, limit, mode);
   const cached = await deps.cache.get<{ results: SearchResult[]; meta: any }>('search', cacheKey);
   if (cached) {
     deps.tel.record('cache.hit', { tool: 'search', namespace: 'search' }).catch(() => {});
     return formatToolResponse(
       { query, results: cached.results, elapsed_ms: Date.now() - t0 },
       undefined,
-      { ...cached.meta, cache: 'hit' },
+      { ...cached.meta, provider: cached.meta.provider ?? 'browser', cache: 'hit' },
     );
   }
   deps.tel.record('cache.miss', { tool: 'search', namespace: 'search' }).catch(() => {});
 
+  if (mode === 'searchapi' || options.browserUnavailable) {
+    try {
+      return await runSearchApiGoogle(
+        query,
+        limit,
+        cacheKey,
+        deps,
+        t0,
+        options.browserUnavailable ? 'PROFILE_MISSING' : undefined,
+      );
+    } catch (e) {
+      recordToolError(deps, 'search', e);
+      return searchApiErrorResponse(e) ?? handleError(e, deps);
+    }
+  }
+
   try {
     await deps.limiter.acquire();
-    // params live outside the callback so a cascade retry keeps one fingerprint.
     const params = generateBehaviorParams();
     const outcome = await executeSeqWithCascade(deps, async (ctx) => {
       const page = (await ctx.pages())[0] ?? (await ctx.newPage());
@@ -190,8 +221,13 @@ export async function searchTool(
       }).catch(() => {});
     }
 
+    if (mode === 'fallback' && outcome.degraded_reasons?.length) {
+      return await runSearchApiGoogle(query, limit, cacheKey, deps, t0, 'PARSER_STALE');
+    }
+
     const meta = {
       strategy: 'legacy-v0.4',
+      provider: 'browser' as const,
       stealth_mode: deps.cascade.mode,
       dropped: outcome.dropped,
       dropped_reasons: outcome.dropped_reasons,
@@ -214,22 +250,275 @@ export async function searchTool(
     );
   } catch (e) {
     recordToolError(deps, 'search', e);
+    if (mode === 'fallback') {
+      try {
+        const reason = toErrorInfo(e, { cloudMode: deps.config.cloudMode }).code;
+        return await runSearchApiGoogle(query, limit, cacheKey, deps, t0, reason);
+      } catch (apiError) {
+        recordToolError(deps, 'search', apiError);
+        return searchApiErrorResponse(apiError) ?? handleError(apiError, deps);
+      }
+    }
     return rateLimitResponse(e) ?? handleError(e, deps);
   }
+}
+
+async function runSearchApiGoogle(
+  query: string,
+  limit: number,
+  cacheKey: string,
+  deps: Deps,
+  t0: number,
+  fallbackReason?: string,
+): Promise<CallToolResult> {
+  const results = await searchApi(deps).searchGoogle(query, limit, deps.config.locale);
+  const meta = providerMeta('searchapi-google-v1', fallbackReason);
+  await deps.cache.set('search', cacheKey, { results, meta }, deps.config.cacheTtlSearchMs);
+  deps.tel.record('search.outcome', {
+    tool: 'search',
+    provider: 'searchapi',
+    resultsLen: results.length,
+    droppedCount: 0,
+    elapsedMs: Date.now() - t0,
+  }).catch(() => {});
+  return formatToolResponse(
+    { query, results, elapsed_ms: Date.now() - t0 },
+    undefined,
+    { ...meta, cache: 'miss' },
+  );
+}
+
+function searchApi(deps: Deps): SearchApiHandle {
+  return deps.searchApi ?? new SearchApiClient(deps.config.searchApiKey);
+}
+
+function providerConfigError(mode: SearchProviderMode, deps: Deps): CallToolResult | null {
+  if (mode === 'browser' || deps.searchApi || deps.config.searchApiKey) return null;
+  return formatToolResponse(null, {
+    code: 'API_KEY_MISSING',
+    message: 'SEARCH_API is required for SearchApi provider modes.',
+    retryable: false,
+    user_action: 'Set SEARCH_API to a valid SearchApi API key.',
+  });
+}
+
+function searchApiErrorResponse(e: unknown): CallToolResult | null {
+  if (e instanceof SearchApiConfigError) {
+    return formatToolResponse(null, {
+      code: 'API_KEY_MISSING',
+      message: e.message,
+      retryable: false,
+      user_action: 'Set SEARCH_API to a valid SearchApi API key.',
+    });
+  }
+  if (!(e instanceof SearchApiError)) return null;
+  if (e.status === 429) {
+    return formatToolResponse(null, {
+      code: 'RATE_LIMITED',
+      message: e.message,
+      retryable: true,
+      retry_after_ms: e.retryAfterMs ?? 60_000,
+    });
+  }
+  return formatToolResponse(null, {
+    code: 'SEARCH_API_ERROR',
+    message: e.message,
+    retryable: e.status === undefined || e.status >= 500,
+    ...(e.status === 401 || e.status === 403
+      ? { user_action: 'Check SEARCH_API and SearchApi account access.' }
+      : {}),
+  });
+}
+
+function providerCacheKey(
+  deps: Deps,
+  query: string,
+  limit: number,
+  mode: SearchProviderMode,
+): string {
+  const scopedQuery = mode === 'browser' ? query : `${query}\nprovider:${mode}`;
+  return deps.cache.searchKey(scopedQuery, deps.config.locale, limit);
+}
+
+function providerMeta(strategy: string, fallbackReason?: string) {
+  return {
+    strategy,
+    provider: 'searchapi' as const,
+    ...(fallbackReason ? { fallback_from: 'browser' as const, fallback_reason: fallbackReason } : {}),
+  };
+}
+
+export async function scholarSearchTool(
+  input: { query: string; limit?: number },
+  deps: Deps,
+  options: SearchRunOptions = {},
+): Promise<CallToolResult> {
+  const t0 = Date.now();
+  const query = input.query.trim();
+  const limit = Math.min(Math.max(input.limit ?? 10, 1), 10);
+  const mode = deps.config.scholarProvider;
+
+  if (!query) {
+    return formatToolResponse(null, {
+      code: 'INTERNAL', message: 'query required', retryable: false,
+    });
+  }
+
+  const configError = providerConfigError(mode, deps);
+  if (configError) return configError;
+
+  const cacheKey = providerCacheKey(deps, query, limit, mode);
+  const cached = await deps.cache.get<{ results: ScholarResult[]; meta: any }>('scholar', cacheKey);
+  if (cached) {
+    deps.tel.record('cache.hit', { tool: 'scholar_search', namespace: 'scholar' }).catch(() => {});
+    return formatToolResponse(
+      { query, results: cached.results, elapsed_ms: Date.now() - t0 },
+      undefined,
+      { ...cached.meta, provider: cached.meta.provider ?? 'browser', cache: 'hit' },
+    );
+  }
+  deps.tel.record('cache.miss', { tool: 'scholar_search', namespace: 'scholar' }).catch(() => {});
+
+  if (mode === 'searchapi' || options.browserUnavailable) {
+    try {
+      return await runSearchApiScholar(
+        query,
+        limit,
+        cacheKey,
+        deps,
+        t0,
+        options.browserUnavailable ? 'PROFILE_MISSING' : undefined,
+      );
+    } catch (e) {
+      recordToolError(deps, 'scholar_search', e);
+      return searchApiErrorResponse(e) ?? handleError(e, deps);
+    }
+  }
+
+  const cooldownKey = deps.cache.searchKey('__scholar_rate_limit__', deps.config.locale, 0);
+  const cooldown = await deps.cache.get<{ until: number }>('scholar', cooldownKey);
+  if (cooldown && cooldown.until > Date.now()) {
+    if (mode === 'fallback') {
+      try {
+        return await runSearchApiScholar(query, limit, cacheKey, deps, t0, 'RATE_LIMITED');
+      } catch (e) {
+        recordToolError(deps, 'scholar_search', e);
+        return searchApiErrorResponse(e) ?? handleError(e, deps);
+      }
+    }
+    return rateLimitResponse(new ScholarRateLimitError(cooldown.until - Date.now()))!;
+  }
+
+  try {
+    await deps.limiter.acquire();
+    const params = generateBehaviorParams();
+    const mode = deps.config.cascadeDisabled
+      ? (deps.config.useStealth ? 'on' : 'off')
+      : deps.cascade.mode;
+    const ctx = await deps.acquireSeqCtx(mode);
+    const page = (await ctx.pages())[0] ?? (await ctx.newPage());
+    const humanlike = deps.config.humanlikeMode !== 'off'
+      ? new HumanlikeBehavior(params, deps.config.humanlikeMode)
+      : undefined;
+    const results = await scholarSearch(page, query, limit, {
+      humanlike,
+      locale: deps.config.locale,
+    });
+    await humanlike?.simulateBrowsing(page, []).catch(() => {});
+
+    const meta = { strategy: 'scholar-v1', provider: 'browser' as const, stealth_mode: mode };
+    await deps.cache.set('scholar', cacheKey, { results, meta }, deps.config.cacheTtlSearchMs);
+    deps.tel.record('search.outcome', {
+      tool: 'scholar_search',
+      resultsLen: results.length,
+      droppedCount: 0,
+      elapsedMs: Date.now() - t0,
+      stealthMode: deps.cascade.mode,
+    }).catch(() => {});
+
+    return formatToolResponse(
+      { query, results, elapsed_ms: Date.now() - t0 },
+      undefined,
+      { ...meta, cache: 'miss' },
+    );
+  } catch (e) {
+    if (e instanceof ScholarRateLimitError) {
+      await deps.cache.set(
+        'scholar',
+        cooldownKey,
+        { until: Date.now() + e.retryAfterMs },
+        e.retryAfterMs,
+      ).catch(() => {});
+    }
+    recordToolError(deps, 'scholar_search', e);
+    if (mode === 'fallback') {
+      try {
+        const reason = toErrorInfo(e, { cloudMode: deps.config.cloudMode }).code;
+        return await runSearchApiScholar(query, limit, cacheKey, deps, t0, reason);
+      } catch (apiError) {
+        recordToolError(deps, 'scholar_search', apiError);
+        return searchApiErrorResponse(apiError) ?? handleError(apiError, deps);
+      }
+    }
+    return rateLimitResponse(e) ?? handleError(e, deps);
+  }
+}
+
+async function runSearchApiScholar(
+  query: string,
+  limit: number,
+  cacheKey: string,
+  deps: Deps,
+  t0: number,
+  fallbackReason?: string,
+): Promise<CallToolResult> {
+  const results = await searchApi(deps).searchScholar(query, limit, deps.config.locale);
+  const meta = providerMeta('searchapi-scholar-v1', fallbackReason);
+  await deps.cache.set('scholar', cacheKey, { results, meta }, deps.config.cacheTtlSearchMs);
+  deps.tel.record('search.outcome', {
+    tool: 'scholar_search',
+    provider: 'searchapi',
+    resultsLen: results.length,
+    droppedCount: 0,
+    elapsedMs: Date.now() - t0,
+  }).catch(() => {});
+  return formatToolResponse(
+    { query, results, elapsed_ms: Date.now() - t0 },
+    undefined,
+    { ...meta, cache: 'miss' },
+  );
 }
 
 export async function searchParallelTool(
   input: { queries: string[]; limit?: number },
   deps: Deps,
+  options: SearchRunOptions = {},
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const queries = input.queries.map(q => String(q).trim()).filter(Boolean);
   const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  const mode = deps.config.searchProvider;
 
   if (queries.length === 0) {
     return formatToolResponse(null, {
       code: 'INTERNAL', message: 'queries required', retryable: false,
     });
+  }
+
+  const configError = providerConfigError(mode, deps);
+  if (configError) return configError;
+
+  if (mode === 'searchapi' || options.browserUnavailable || (mode === 'fallback' && deps.config.cloudMode)) {
+    try {
+      const fallbackReason = options.browserUnavailable
+        ? 'PROFILE_MISSING'
+        : mode === 'fallback' && deps.config.cloudMode ? 'CLOUD_MODE' : undefined;
+      const results = await runSearchApiParallel(queries, limit, deps, fallbackReason);
+      return parallelResponse(results, t0, deps, 'searchapi');
+    } catch (e) {
+      recordToolError(deps, 'search_parallel', e);
+      return searchApiErrorResponse(e) ?? handleError(e, deps);
+    }
   }
 
   if (deps.config.cloudMode) {
@@ -250,26 +539,79 @@ export async function searchParallelTool(
       });
     }, queries[0]);
 
-    const elapsed = Date.now() - t0;
-    for (const r of results) {
-      deps.tel.record('search.outcome', {
-        tool: 'search_parallel',
-        resultsLen: r.results.length,
-        droppedCount: r.dropped ?? 0,
-        elapsedMs: elapsed,
-        stealthMode: deps.cascade.mode,
-      }).catch(() => {});
+    if (mode === 'fallback') {
+      const fallbackRows = results.filter((row) => row.error || row.degraded_reasons?.length);
+      if (fallbackRows.length) {
+        const apiRows = (await Promise.all(fallbackRows.map((row) => runSearchApiParallel(
+          [row.query],
+          limit,
+          deps,
+          row.degraded_reasons?.length ? 'PARSER_STALE' : 'BROWSER_ERROR',
+        )))).flat();
+        const replacements = new Map(apiRows.map((row) => [row.query, row]));
+        const merged = results.map((row) => replacements.get(row.query) ?? { ...row, provider: 'browser' as const });
+        const provider = merged.every((row) => row.provider === 'searchapi') ? 'searchapi' : 'mixed';
+        return parallelResponse(merged, t0, deps, provider);
+      }
     }
-
-    return formatToolResponse(
-      { results, elapsed_ms: elapsed },
-      undefined,
-      { stealth_mode: deps.cascade.mode, cache: 'miss' },
+    return parallelResponse(
+      results.map((row) => ({ ...row, provider: 'browser' as const })),
+      t0,
+      deps,
+      'browser',
     );
   } catch (e) {
     recordToolError(deps, 'search_parallel', e);
+    if (mode === 'fallback') {
+      try {
+        const reason = toErrorInfo(e, { cloudMode: deps.config.cloudMode }).code;
+        const results = await runSearchApiParallel(queries, limit, deps, reason);
+        return parallelResponse(results, t0, deps, 'searchapi');
+      } catch (apiError) {
+        recordToolError(deps, 'search_parallel', apiError);
+        return searchApiErrorResponse(apiError) ?? handleError(apiError, deps);
+      }
+    }
     return rateLimitResponse(e) ?? handleError(e, deps);
   }
+}
+
+async function runSearchApiParallel(
+  queries: string[],
+  limit: number,
+  deps: Deps,
+  fallbackReason?: string,
+): Promise<PoolSearchResult[]> {
+  return await Promise.all(queries.map(async (query) => ({
+    query,
+    results: await searchApi(deps).searchGoogle(query, limit, deps.config.locale),
+    provider: 'searchapi' as const,
+    ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+  })));
+}
+
+function parallelResponse(
+  results: PoolSearchResult[],
+  t0: number,
+  deps: Deps,
+  provider: 'browser' | 'searchapi' | 'mixed',
+): CallToolResult {
+  const elapsed = Date.now() - t0;
+  for (const row of results) {
+    deps.tel.record('search.outcome', {
+      tool: 'search_parallel',
+      provider: row.provider ?? provider,
+      resultsLen: row.results.length,
+      droppedCount: row.dropped ?? 0,
+      elapsedMs: elapsed,
+      stealthMode: deps.cascade.mode,
+    }).catch(() => {});
+  }
+  return formatToolResponse(
+    { results, elapsed_ms: elapsed },
+    undefined,
+    { provider, stealth_mode: deps.cascade.mode, cache: 'miss' },
+  );
 }
 
 export async function extractTool(
@@ -391,6 +733,7 @@ export async function searchExtractTool(
 export async function healthTool(deps: Deps): Promise<CallToolResult> {
   const cacheStats = {
     search: await deps.cache.size('search'),
+    scholar: await deps.cache.size('scholar'),
     extract: await deps.cache.size('extract'),
   };
   return formatToolResponse({
@@ -423,6 +766,9 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
     config: {
       cloudMode: deps.config.cloudMode,
       humanlikeMode: deps.config.humanlikeMode,
+      searchProvider: deps.config.searchProvider,
+      scholarProvider: deps.config.scholarProvider,
+      searchApiConfigured: Boolean(deps.config.searchApiKey),
       useStealth: deps.config.useStealth,
       insecureTls: deps.config.insecureTls,
       noSandbox: deps.config.noSandbox,
@@ -431,6 +777,14 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
 }
 
 function rateLimitResponse(e: unknown): CallToolResult | null {
+  if (e instanceof ScholarRateLimitError) {
+    return formatToolResponse(null, {
+      code: 'RATE_LIMITED',
+      message: e.message,
+      retryable: true,
+      retry_after_ms: e.retryAfterMs,
+    });
+  }
   if (!(e instanceof RateLimitedError)) return null;
   return formatToolResponse(null, {
     code: 'RATE_LIMITED',
