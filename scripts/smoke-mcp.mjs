@@ -19,7 +19,7 @@ const offTransport = new StdioClientTransport({
   command: process.execPath,
   args: ['build/index.js'],
   cwd: process.cwd(),
-  env: baseEnv,
+  env: { ...baseEnv, SURF_RESEARCH: 'false' },
   stderr: 'pipe',
 });
 try {
@@ -30,7 +30,7 @@ try {
     'extract', 'health', 'scholar_search', 'search', 'search_parallel',
   ].sort();
   if (JSON.stringify(names) !== JSON.stringify(expected)) {
-    throw new Error('default tool list mismatch');
+    throw new Error('research-off tool list mismatch');
   }
   const descriptions = new Map(listed.tools.map((tool) => [tool.name, tool.description ?? '']));
   const requiredDescriptions = {
@@ -67,7 +67,6 @@ const transport = new StdioClientTransport({
   cwd: process.cwd(),
   env: {
     ...baseEnv,
-    SURF_RESEARCH: 'true',
     SURF_RESEARCH_ROOT: root,
   },
   stderr: 'pipe',
