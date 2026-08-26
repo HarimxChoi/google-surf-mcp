@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Research mode is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
   "author": {
@@ -40,7 +40,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@0.9.5"
+        "google-surf-mcp@0.9.6"
       ],
       "env": {
         "SEARCH_API": "${user_config.search_api_key}",
@@ -72,7 +72,7 @@
   "tools": [
     {
       "name": "search",
-      "description": "Default web, paper, and repository discovery with optional extraction, graph hybrid RAG, prior-search context, data lineage, and ontology-linked cross-project retrieval."
+      "description": "Always runs new live Google discovery for web, papers, and repositories, with optional extraction and graph hybrid RAG over stored project knowledge."
     },
     {
       "name": "scholar_search",
@@ -80,7 +80,7 @@
     },
     {
       "name": "search_parallel",
-      "description": "Run 2-10 independent discovery queries with one extraction budget and optional graph hybrid RAG, lineage, ontology, and schema linking."
+      "description": "Run 2-10 independent new live Google queries with one extraction budget and optional graph hybrid RAG over stored project knowledge."
     },
     {
       "name": "extract",
@@ -88,7 +88,7 @@
     },
     {
       "name": "project_memory",
-      "description": "Manage sessions, immutable plans, experiments, decisions, versioned ontology, bitemporal data lineage corrections, entity merge/split, rebuilds, interactive HTML/DOT/D3/Neo4j export, and reversible deletion."
+      "description": "Search stored local knowledge with exact, BM25, vector, graph, RRF, and a local reranker without live web access; also manage project memory, lineage, ontology, rebuilds, exports, and reversible deletion."
     },
     {
       "name": "health",

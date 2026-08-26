@@ -182,17 +182,26 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - default entry point for web, paper, and repository discovery. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
+- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - default entry point for new web, paper, and repository discovery. It always runs a live Google search. With `project_id`, stored project knowledge is fused with the live results. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
 - `scholar_search(query, limit?)` - Google Scholar metadata search, max 10 papers. Supports browser, SearchApi primary, and fallback modes.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 2-10 independent web, paper, and repository queries. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 2-10 independent new web, paper, and repository queries. Every query runs live Google search. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
 - `extract(url, max_chars?, mode?)` - fetch a URL.
   - `mode="full"` (default): up to 50000 characters. HTML via Readability, PDFs via `liteparse` (spatial parsing, multi-column reading order). Document metadata is included and stored with the extracted body when research mode is enabled.
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when research mode is enabled.
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.
   - Response: content fields plus available document metadata. Failures return `{ error }`, never throw.
-- `project_memory(action, ...)` - available only when `SURF_RESEARCH=true`. `action="export"` writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`. Use `project_id` for one project, add `include_project_ids` for a selected combined graph, or set `all_projects=true` for every named project.
+- `project_memory(action, ...)` - available only when `SURF_RESEARCH=true`.
+  - `action="search"`: searches stored local knowledge only. It combines exact, BM25, vector, and graph retrieval with RRF and a local reranker without opening a browser or calling Google or SearchApi. Use `project_id` for one project, `include_project_ids` for selected cross-project retrieval, or `all_projects=true` for every named project.
+  - `action="export"`: writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`.
 - `health()` - server status, including the local research runtime.
+
+| Need | Tool |
+|---|---|
+| Search only previously stored research and project memory | `project_memory(action="search")` |
+| Find new information on the web | `search` |
+| Compare new web results with stored project knowledge | `search` with `project_id` |
+| Run several new web queries | `search_parallel` |
 
 ## Graph hybrid RAG with ontology and lineage
 

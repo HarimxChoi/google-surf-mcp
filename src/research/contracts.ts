@@ -392,8 +392,10 @@ export interface LocalSearchHit extends SearchResult {
   document_id: string;
   content: string;
   score: number;
+  project_ids: string[];
   source_family: 'document' | 'code' | 'graph';
   retrieval_family?: 'exact' | 'bm25' | 'vector' | 'graph';
+  retrieval_families?: Array<'exact' | 'bm25' | 'vector' | 'graph'>;
 }
 
 export interface LocalSearchFamilies {

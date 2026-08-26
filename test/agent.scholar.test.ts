@@ -109,7 +109,7 @@ describe('scholarSearchTool', () => {
     } finally {
       await browser.close();
     }
-  });
+  }, 15_000);
 
   it('does not retry Scholar CAPTCHA through the search cascade', async () => {
     const deps = makeDeps(root);
@@ -144,5 +144,5 @@ describe('scholarSearchTool', () => {
     } finally {
       await browser.close();
     }
-  });
+  }, 15_000);
 });

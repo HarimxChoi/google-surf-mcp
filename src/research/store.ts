@@ -1509,6 +1509,7 @@ export class ResearchStore {
           description: row.text.slice(0, 500),
           content: row.text,
           score: reference.score,
+          project_ids: [reference.project_id],
           source_family: 'document' as const,
           retrieval_family: retrievalFamily,
         }];
@@ -1524,6 +1525,7 @@ export class ResearchStore {
         description: text.slice(0, 500),
         content: text,
         score: reference.score,
+        project_ids: [reference.project_id],
         source_family: 'code' as const,
         retrieval_family: retrievalFamily,
       }];
@@ -1617,6 +1619,7 @@ export class ResearchStore {
         description: row.text.slice(0, 500),
         content: row.text,
         score: Number(row.score),
+        project_ids: [projectId],
         source_family: 'code' as const,
         retrieval_family: 'bm25' as const,
       }];
@@ -1650,6 +1653,7 @@ export class ResearchStore {
       description: row.text.slice(0, 500),
       content: row.text,
       score: Number(row.score),
+      project_ids: [projectId],
       source_family: 'document' as const,
       retrieval_family: 'bm25' as const,
     }));

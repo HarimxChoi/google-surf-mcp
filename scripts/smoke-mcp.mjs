@@ -13,6 +13,7 @@ const baseEnv = {
   SURF_CLOUD_MODE: 'true',
   SURF_SEARCH_PROVIDER: 'searchapi',
   SURF_SCHOLAR_PROVIDER: 'searchapi',
+  SURF_RESEARCH_VECTOR_MODEL: 'off',
 };
 const offClient = new Client({ name: 'google-surf-smoke-off', version: '1.0.0' });
 const offTransport = new StdioClientTransport({
@@ -94,7 +95,9 @@ try {
   }
   const memoryProperties = listed.tools.find((tool) => tool.name === 'project_memory')
     ?.inputSchema?.properties ?? {};
-  if (!memoryProperties.action?.enum?.includes('export')
+  if (!memoryProperties.action?.enum?.includes('search')
+    || !memoryProperties.action?.enum?.includes('export')
+    || !('query' in memoryProperties) || !('limit' in memoryProperties)
     || !('export_format' in memoryProperties) || !('export_view' in memoryProperties)
     || !memoryProperties.export_format?.enum?.includes('html')
     || !memoryProperties.export_format?.enum?.includes('neo4j')
@@ -104,7 +107,8 @@ try {
   const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
     ?.description ?? '';
   for (const phrase of [
-    'Management tool', 'session intent', 'immutable plan revisions',
+    'Local project knowledge retrieval', 'exact, BM25, vector, and graph',
+    'RRF', 'never opens a browser', 'session intent', 'immutable plan revisions',
     'versioned ontology', 'bitemporal data lineage', 'entity merge or split',
     'rebuild', 'export', 'interactive HTML', 'Graphviz DOT', 'D3 JSON', 'Neo4j', 'forget',
     'search_parallel', 'scholar_search', 'extract',
@@ -116,6 +120,7 @@ try {
   const searchDescription = listed.tools.find((tool) => tool.name === 'search')
     ?.description ?? '';
   for (const phrase of [
+    'Always performs a live Google search', 'action=search',
     'live web', 'exact', 'BM25', 'vector', 'code', 'graph',
     'prior searches', 'data lineage', 'versioned ontology', 'schema/entity links',
   ]) {
@@ -168,6 +173,28 @@ try {
   });
   if (reused.isError || reused.structuredContent?.index?.reused !== true) {
     throw new Error('project index reuse failed');
+  }
+  const localSearch = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'search',
+      project_id: 'smoke',
+      query: 'smoke_index_token',
+      limit: 5,
+    },
+  });
+  if (localSearch.isError
+    || localSearch.structuredContent?.results?.[0]?.source_family !== 'code'
+    || localSearch.structuredContent?.meta?.provider !== 'local'
+    || localSearch.structuredContent?.meta?.live_web_used !== false) {
+    throw new Error('project local search failed');
+  }
+  const afterSearch = await client.callTool({
+    name: 'project_memory',
+    arguments: { action: 'show', project_id: 'smoke' },
+  });
+  if (afterSearch.isError || afterSearch.structuredContent?.search_event_count !== 0) {
+    throw new Error('project local search mutated search history');
   }
   const visualization = await client.callTool({
     name: 'project_memory',

@@ -88,6 +88,73 @@ describe('project_memory tool', () => {
     expect(await service.getOntologyTerm(firstId)).toMatchObject({ status: 'superseded' });
   });
 
+  it('searches stored project knowledge without creating a live search event', async () => {
+    await service.createProject('Memory A', 'memory-a');
+    await service.createProject('Memory B', 'memory-b');
+    for (const projectId of ['memory-a', 'memory-b']) {
+      await service.capture({
+        tool: 'extract',
+        project_id: projectId,
+        payload: {
+          title: 'Shared local evidence',
+          url: 'https://example.com/shared-local-evidence',
+          content: `localmemoryneedle ${'bounded content '.repeat(150)}`,
+          extraction_quality: 'full_text',
+        },
+      });
+    }
+    await service.waitForIdle();
+    const before = await service.getProject('memory-a');
+    const result = await projectMemoryTool({
+      action: 'search',
+      project_id: 'memory-a',
+      include_project_ids: ['memory-b'],
+      query: 'localmemoryneedle',
+      limit: 5,
+    }, service);
+    const after = await service.getProject('memory-a');
+    const rows = result.structuredContent?.results as Array<Record<string, any>>;
+
+    expect(result.isError).not.toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: 'Shared local evidence',
+      project_ids: ['memory-a', 'memory-b'],
+      source_family: 'document',
+    });
+    expect(rows[0].retrieval_families).toEqual(expect.arrayContaining(['bm25', 'graph']));
+    expect(rows[0].content.length).toBeLessThanOrEqual(1_500);
+    expect(result.structuredContent?.meta).toMatchObject({
+      provider: 'local',
+      project_ids: ['memory-a', 'memory-b'],
+      retrieval_lanes: ['exact', 'bm25', 'graph'],
+      fusion: 'rrf',
+      reranker: 'rrf_only',
+      live_web_used: false,
+      browser_used: false,
+      searchapi_used: false,
+      captured: false,
+    });
+    expect(after.search_event_count).toBe(before.search_event_count);
+
+    const allProjects = await projectMemoryTool({
+      action: 'search',
+      all_projects: true,
+      query: 'localmemoryneedle',
+      limit: 5,
+    }, service);
+    expect(allProjects.structuredContent?.results).toHaveLength(1);
+
+    const invalid = await projectMemoryTool({
+      action: 'search',
+      project_id: 'memory-a',
+      all_projects: true,
+      query: 'localmemoryneedle',
+    }, service);
+    expect(invalid.isError).toBe(true);
+    expect(invalid.structuredContent?.error?.message).toContain('cannot be combined');
+  });
+
   it('exports one project or all named projects without node bodies', async () => {
     await service.createProject('Export A', 'export-a');
     await service.createProject('Export B', 'export-b');

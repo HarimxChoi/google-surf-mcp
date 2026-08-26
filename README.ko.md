@@ -152,17 +152,26 @@ Claude Code를 재시작하면 기본 도구 6개를 사용할 수 있습니다.
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 웹, 논문, 저장소를 찾는 단일 검색 기본 진입점. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
+- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 신규 웹, 논문, 저장소를 찾는 기본 진입점. 항상 라이브 Google 검색을 실행하며 `project_id`가 있으면 저장된 프로젝트 지식과 함께 결합합니다. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
 - `scholar_search(query, limit?)` - Google Scholar metadata 검색. 브라우저, SearchApi 메인, fallback을 지원합니다.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 웹, 논문, 저장소를 찾는 독립 쿼리 2-10개. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 신규 웹, 논문, 저장소를 찾는 독립 쿼리 2-10개. 각 쿼리가 라이브 Google 검색을 실행합니다. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
 - `extract(url, max_chars?, mode?)` - URL 본문 읽기
   - `mode="full"` (기본): 최대 50000자, PDF는 `liteparse`(spatial parsing, 다단 읽기). research 모드에서는 문서 메타데이터도 본문과 함께 저장
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). research 모드에서는 문서 메타데이터도 요약과 함께 저장
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
   - 응답: 본문 필드와 확인 가능한 문서 메타데이터. 실패는 `{ error }` 반환, throw 안 함
-- `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때만 제공. `action="export"`는 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다. 단일 프로젝트는 `project_id`, 선택 통합은 `include_project_ids`, 전체 통합은 `all_projects=true`를 사용합니다.
+- `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때만 제공
+  - `action="search"`: 저장된 로컬 지식만 검색합니다. 브라우저, Google, SearchApi를 호출하지 않고 exact, BM25, vector, graph 결과를 RRF와 로컬 리랭커로 결합합니다. 단일 프로젝트는 `project_id`, 선택 통합은 `include_project_ids`, 전체 통합은 `all_projects=true`를 사용합니다.
+  - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
 - `health()` - 검색과 로컬 research runtime 상태
+
+| 목적 | 도구 |
+|---|---|
+| 이전에 저장한 리서치와 프로젝트 메모리만 검색 | `project_memory(action="search")` |
+| 웹에서 신규 정보 검색 | `search` |
+| 신규 웹 결과와 저장된 프로젝트 지식을 함께 비교 | `project_id`를 지정한 `search` |
+| 여러 신규 웹 쿼리 실행 | `search_parallel` |
 
 ## 온톨로지와 데이터 리니지가 적용된 그래프 하이브리드 RAG 구조
 

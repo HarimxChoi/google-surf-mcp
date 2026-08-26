@@ -546,7 +546,10 @@ const ResultItem = z.object({
   ...DocumentMetadataOutput,
   extract_error: z.string().optional(),
   document_id: z.string().optional(),
+  project_ids: z.array(z.string()).optional(),
   source_family: z.enum(['live', 'document', 'code', 'graph']).optional(),
+  retrieval_families: z.array(z.enum(['exact', 'bm25', 'vector', 'graph'])).optional(),
+  score: z.number().optional(),
   fresh_web: z.boolean().optional(),
 });
 const ErrorInfoShape = z.object({
@@ -657,6 +660,10 @@ const HealthOutput = {
 };
 
 const ProjectMemoryOutput = {
+  query: z.string().optional(),
+  results: z.array(ResultItem).optional(),
+  elapsed_ms: z.number().optional(),
+  meta: MetaShape.optional(),
   project: MetaShape.optional(),
   projects: z.array(MetaShape).optional(),
   index: MetaShape.optional(),
@@ -689,9 +696,10 @@ const ProjectMemoryOutput = {
 server.registerTool('search', {
   title: 'Google Search',
   description:
-    'Default entry point for web, paper, and repository discovery. ' +
+    'Default entry point for new web, paper, and repository discovery. Always performs a live Google search. ' +
     'Use extract_mode=abstract for bounded inspection and full only for complete text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
+    'For stored local knowledge without any Google, browser, or SearchApi search, use project_memory with action=search instead. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
     'Captured search, source, session, and project provenance form data lineage; extracted bodies become evidence while unread hits remain metadata. ' +
     'include_project_ids adds read-only cross-project retrieval through versioned ontology and verified schema/entity links without merging records. ' +
@@ -759,9 +767,10 @@ server.registerTool('scholar_search', {
 server.registerTool('search_parallel', {
   title: 'Google Search Parallel',
   description:
-    'Use for 2-10 independent web queries known in advance. ' +
+    'Use for 2-10 independent new web queries known in advance. Every query performs a live Google search. ' +
     'extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
+    'For stored local knowledge without live web requests, use project_memory with action=search instead. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
     'Extracted bodies become evidence while unread hits remain metadata. ' +
     'Native Chrome serializes profile use; the Playwright compatibility path uses a worker pool. ' +
@@ -862,19 +871,22 @@ server.registerTool('extract', {
 if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
   title: 'Project Memory',
   description:
-    'Management tool for durable project knowledge, not content discovery. ' +
+    'Local project knowledge retrieval and management tool. ' +
+    'search queries stored papers, web evidence, code, plans, experiments, decisions, and graph records only. It uses exact, BM25, vector, and graph retrieval, then RRF and a local reranker. It never opens a browser or calls Google or SearchApi. Use search or search_parallel when new web information is required. ' +
     'create and show manage projects; record stores session intent, immutable plan revisions, experiments, decisions, versioned ontology entity types or relations, and evidence-preserving corrections. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
     'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
     'forget previews impact before reversible project or assertion deletion. ' +
     'Search, search_parallel, scholar_search, and extract automatically capture sources and provenance; project_memory manages their durable structure.',
   inputSchema: {
-    action: z.enum(['create', 'show', 'record', 'rebuild', 'export', 'forget']).describe(
-      'create: project_id and name required. show: project_id optional; target_id or name narrows inspection. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
+    action: z.enum(['create', 'show', 'search', 'record', 'rebuild', 'export', 'forget']).describe(
+      'create: project_id and name required. show: project_id optional; target_id or name narrows inspection. search: query plus project_id or all_projects=true required; reads stored local knowledge only. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
     ),
-    project_id: z.string().min(1).max(64).optional().describe('Stable project id. Omit to list projects or export all projects.'),
-    include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional projects included in one integrated visualization export.'),
-    all_projects: z.boolean().optional().describe('Embed every active named project and an All projects option in one export. Excludes Inbox and cannot be combined with project ids.'),
+    project_id: z.string().min(1).max(64).optional().describe('Stable project id. For search, this is the write-isolated primary scope. Omit to list projects or use all_projects.'),
+    include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects for one local search or integrated visualization export.'),
+    all_projects: z.boolean().optional().describe('Search or export every active named project. Excludes Inbox and cannot be combined with project ids.'),
+    query: z.string().min(1).max(400).optional().describe('Required for action=search. Searches stored local knowledge only and does not start live web discovery.'),
+    limit: z.number().int().min(1).max(20).default(10).describe('Maximum local RAG results for action=search.'),
     export_format: z.enum(['dot', 'd3', 'html', 'neo4j']).default('d3').describe('Visualization file format. html writes one offline explorer with PKM, Lineage, Ontology, project selection, and current-view PNG or anonymized JSON download; d3 writes node-link JSON; dot writes Graphviz DOT; neo4j writes an import-ready CSV and Cypher bundle.'),
     export_view: z.enum(['graph', 'ontology', 'lineage']).default('graph').describe('Initial HTML tab or non-HTML export scope. graph is PKM; ontology shows types, shared schema, verified identity links, and typed instances; lineage shows aligned data and research lineage.'),
     name: z.string().min(1).max(120).optional().describe('Project name for create, or entity name lookup for show.'),

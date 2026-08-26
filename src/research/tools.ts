@@ -5,10 +5,12 @@ import { isTransactionConflict } from './errors.js';
 import { ResearchService } from './service.js';
 
 export interface ProjectMemoryInput {
-  action: 'create' | 'show' | 'record' | 'rebuild' | 'export' | 'forget';
+  action: 'create' | 'show' | 'search' | 'record' | 'rebuild' | 'export' | 'forget';
   project_id?: string;
   include_project_ids?: string[];
   all_projects?: boolean;
+  query?: string;
+  limit?: number;
   export_format?: 'dot' | 'd3' | 'html' | 'neo4j';
   export_view?: 'graph' | 'ontology' | 'lineage';
   name?: string;
@@ -105,6 +107,57 @@ export async function projectMemoryTool(
       return formatToolResponse({
         ...detail,
         memory: `Project: ${detail.project.name} | Sources: ${detail.document_count + detail.source_entry_count} | Records: plans ${detail.plans.length}, experiments ${detail.experiments.length}, decisions ${detail.decisions.length}, assertions ${detail.assertion_count}, entities ${detail.entity_count} | Sessions: ${detail.session_count} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'search') {
+      if (!input.query) throw new Error('query required');
+      if (input.all_projects && (input.project_id || input.include_project_ids?.length)) {
+        throw new Error('all_projects cannot be combined with project_id or include_project_ids');
+      }
+      if (!input.all_projects && !input.project_id) {
+        throw new Error('project_id or all_projects=true required');
+      }
+      const scope = input.all_projects
+        ? (await service.listProjects())
+          .filter((project) => project.status !== 'forgotten' && project.project_id !== 'inbox')
+          .map((project) => project.project_id)
+          .sort()
+        : [input.project_id!, ...[...new Set(input.include_project_ids ?? [])]
+          .filter((projectId) => projectId !== input.project_id)
+          .sort()];
+      if (!scope.length) throw new Error('project_id or all_projects=true required');
+      const started = Date.now();
+      const hits = await service.search(scope[0], input.query, input.limit ?? 10, scope.slice(1));
+      const results = hits.map((hit) => ({
+        title: hit.title,
+        url: hit.url,
+        description: hit.description,
+        content: hit.content.slice(0, 1_500),
+        document_id: hit.document_id,
+        project_ids: hit.project_ids,
+        source_family: hit.source_family,
+        retrieval_families: hit.retrieval_families
+          ?? (hit.retrieval_family ? [hit.retrieval_family] : []),
+        score: hit.score,
+      }));
+      const vectorEnabled = service.status().vector === 'on';
+      return formatToolResponse({
+        query: input.query,
+        results,
+        elapsed_ms: Date.now() - started,
+        meta: {
+          provider: 'local',
+          project_ids: scope,
+          retrieval_lanes: ['exact', 'bm25', ...(vectorEnabled ? ['vector'] : []), 'graph'],
+          fusion: 'rrf',
+          reranker: vectorEnabled ? 'local_vector' : 'rrf_only',
+          live_web_used: false,
+          browser_used: false,
+          searchapi_used: false,
+          captured: false,
+        },
+        memory: `Projects: ${scope.length} | Local RAG: ${results.length} results | Live web: no | Status: ready`,
       });
     }
 

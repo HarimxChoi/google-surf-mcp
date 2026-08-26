@@ -276,14 +276,30 @@ function fuseRankedGroups(
       const key = row.url || row.document_id;
       const contribution = 1 / (60 + index + 1);
       const existing = ranked.get(key);
-      if (existing) existing.score += contribution;
+      if (existing) {
+        existing.score += contribution;
+        existing.row = {
+          ...existing.row,
+          project_ids: [...new Set([...existing.row.project_ids, ...row.project_ids])].sort(),
+          retrieval_families: [...new Set([
+            ...(existing.row.retrieval_families ?? (existing.row.retrieval_family
+              ? [existing.row.retrieval_family]
+              : [])),
+            ...(row.retrieval_families ?? (row.retrieval_family ? [row.retrieval_family] : [])),
+          ])],
+        };
+      }
       else ranked.set(key, { row, score: contribution, order: order++ });
     });
   }
   return [...ranked.values()]
     .sort((a, b) => b.score - a.score || a.order - b.order)
     .slice(0, limit)
-    .map(({ row, score }) => ({ ...row, score, ...(family ? { retrieval_family: family } : {}) }));
+    .map(({ row, score }) => ({
+      ...row,
+      score,
+      ...(family ? { retrieval_family: family, retrieval_families: [family] } : {}),
+    }));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -2512,6 +2528,7 @@ export class ResearchService {
         description: (node.text ?? node.label).slice(0, 500),
         content: node.text ?? node.label,
         score: score + (pagerank[node.node_id] ?? 0),
+        project_ids: [node.project_id],
         source_family: node.kind === 'source' || node.kind === 'symbol'
           ? 'code' as const
           : 'graph' as const,
