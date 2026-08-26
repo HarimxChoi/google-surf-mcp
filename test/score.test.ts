@@ -48,37 +48,37 @@ describe('scoreResult', () => {
   });
 
   it('multi-locale ad detection: Korean', () => {
-    const r = { ...baseResult, title: '광고 - Sample Brand' };
+    const r = { ...baseResult, title: '\uAD11\uACE0 - Sample Brand' };
     const score = scoreResult(r, goodGeometry, { locale: 'ko-KR' });
     expect(score.classification).toBe('sponsored');
   });
 
   it('multi-locale ad detection: Japanese', () => {
-    const r = { ...baseResult, description: '広告: Sample product' };
+    const r = { ...baseResult, description: '\u5E83\u544A: Sample product' };
     const score = scoreResult(r, goodGeometry, { locale: 'ja-JP' });
     expect(score.classification).toBe('sponsored');
   });
 
-  it('multi-locale ad detection: French sponsorisé', () => {
-    const r = { ...baseResult, title: 'sponsorisé Example' };
+  it('detects a French sponsored label', () => {
+    const r = { ...baseResult, title: '\u0073\u0070\u006F\u006E\u0073\u006F\u0072\u0069\u0073\u00E9 Example' };
     const score = scoreResult(r, goodGeometry, { locale: 'fr-FR' });
     expect(score.classification).toBe('sponsored');
   });
 
-  it('multi-locale ad detection: German Anzeige', () => {
-    const r = { ...baseResult, title: 'Anzeige · Example' };
+  it('detects a German sponsored label', () => {
+    const r = { ...baseResult, title: '\u0041\u006E\u007A\u0065\u0069\u0067\u0065 \u00B7 Example' };
     const score = scoreResult(r, goodGeometry, { locale: 'de-DE' });
     expect(score.classification).toBe('sponsored');
   });
 
-  it('multi-locale ad detection: Spanish Anuncio', () => {
-    const r = { ...baseResult, description: 'Anuncio: Sample' };
+  it('detects a Spanish sponsored label', () => {
+    const r = { ...baseResult, description: '\u0041\u006E\u0075\u006E\u0063\u0069\u006F: Sample' };
     const score = scoreResult(r, goodGeometry, { locale: 'es-ES' });
     expect(score.classification).toBe('sponsored');
   });
 
-  it('multi-locale ad detection: Chinese 广告', () => {
-    const r = { ...baseResult, title: '广告 - 样品' };
+  it('multi-locale ad detection: Chinese', () => {
+    const r = { ...baseResult, title: '\u5E7F\u544A - \u6837\u54C1' };
     const score = scoreResult(r, goodGeometry, { locale: 'zh-CN' });
     expect(score.classification).toBe('sponsored');
   });
@@ -142,8 +142,8 @@ describe('aggregateScores', () => {
 
 describe('getAdMarker', () => {
   it('returns appropriate regex for each locale', () => {
-    expect(getAdMarker('ko-KR').test('광고')).toBe(true);
-    expect(getAdMarker('ja-JP').test('広告')).toBe(true);
+    expect(getAdMarker('ko-KR').test('\uAD11\uACE0')).toBe(true);
+    expect(getAdMarker('ja-JP').test('\u5E83\u544A')).toBe(true);
     expect(getAdMarker('en-US').test('Sponsored')).toBe(true);
     expect(getAdMarker('en-US').test('Sponsored - Brand')).toBe(true);
     expect(getAdMarker('en-US').test('Ad · brand.com')).toBe(true);
@@ -159,21 +159,21 @@ describe('getAdMarker', () => {
     expect(getAdMarker('xx-YY').source).toBe(getAdMarker('en-US').source);
   });
 
-  // Titles taken verbatim from a live ko SERP for "vpn 추천"; none are ads.
-  it('does not treat 광고 as a marker when it is ordinary vocabulary', () => {
+  // Titles are encoded from a live Korean SERP; none are ads.
+  it('does not treat the Korean ad term as a marker in ordinary vocabulary', () => {
     const ko = getAdMarker('ko-KR');
-    expect(ko.test('광고 및 속도 제한 없는 무료 VPN 추천')).toBe(false);
-    expect(ko.test('광고를 차단해 주는 브라우저')).toBe(false);
-    expect(ko.test('무료 광고 차단기 비교')).toBe(false);
-    expect(ko.test('광고')).toBe(true);
-    expect(ko.test('광고 · example.com')).toBe(true);
+    expect(ko.test('\uAD11\uACE0 \uBC0F \uC18D\uB3C4 \uC81C\uD55C \uC5C6\uB294 \uBB34\uB8CC VPN \uCD94\uCC9C')).toBe(false);
+    expect(ko.test('\uAD11\uACE0\uB97C \uCC28\uB2E8\uD574 \uC8FC\uB294 \uBE0C\uB77C\uC6B0\uC800')).toBe(false);
+    expect(ko.test('\uBB34\uB8CC \uAD11\uACE0 \uCC28\uB2E8\uAE30 \uBE44\uAD50')).toBe(false);
+    expect(ko.test('\uAD11\uACE0')).toBe(true);
+    expect(ko.test('\uAD11\uACE0 · example.com')).toBe(true);
   });
 
-  it('does not treat 広告/广告 as a marker mid-sentence', () => {
-    expect(getAdMarker('ja-JP').test('広告を消す方法')).toBe(false);
-    expect(getAdMarker('ja-JP').test('広告')).toBe(true);
-    expect(getAdMarker('zh-CN').test('广告拦截器推荐')).toBe(false);
-    expect(getAdMarker('zh-CN').test('广告')).toBe(true);
+  it('does not treat Japanese or Chinese ad terms as markers mid-sentence', () => {
+    expect(getAdMarker('ja-JP').test('\u5E83\u544A\u3092\u6D88\u3059\u65B9\u6CD5')).toBe(false);
+    expect(getAdMarker('ja-JP').test('\u5E83\u544A')).toBe(true);
+    expect(getAdMarker('zh-CN').test('\u5E7F\u544A\u62E6\u622A\u5668\u63A8\u8350')).toBe(false);
+    expect(getAdMarker('zh-CN').test('\u5E7F\u544A')).toBe(true);
   });
 });
 

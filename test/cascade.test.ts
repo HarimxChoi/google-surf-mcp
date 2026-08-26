@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   createCascadeState,
+  DEFAULT_CASCADE_CONFIG,
   executeWithCascade,
   type CascadeDeps,
   type CascadeConfig,
@@ -19,6 +20,22 @@ const fastConfig: CascadeConfig = {
 };
 
 describe('executeWithCascade', () => {
+  it('does not repeat a blocked tier 2 request by default', async () => {
+    const state = createCascadeState('on');
+    const runWithMode = vi.fn(async () => { throw new FakeCaptchaError(); });
+    const tier3 = vi.fn(async () => { throw new Error('human action required'); });
+
+    await expect(executeWithCascade(state, {
+      runWithMode,
+      resetContext: async () => {},
+      tier3Recovery: tier3,
+      isCaptchaError: isCaptcha,
+    }, DEFAULT_CASCADE_CONFIG)).rejects.toThrow(/human action required/);
+
+    expect(runWithMode).toHaveBeenCalledOnce();
+    expect(tier3).toHaveBeenCalledOnce();
+  });
+
   it('returns result on first success in tier 1', async () => {
     const state = createCascadeState();
     const runWithMode = vi.fn(async () => 'ok');

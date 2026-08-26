@@ -23,6 +23,7 @@ describe('extract: redirect SSRF guard', () => {
       const u = url.toString();
       calls.push(u);
       expect(opts?.redirect).toBe('manual');
+      expect(opts?.dispatcher).toBeDefined();
       if (u === PUBLIC_URL) {
         return new Response('', { status: 302, headers: { location: PRIVATE_TARGET } });
       }
@@ -62,6 +63,7 @@ describe('extract: redirect SSRF guard', () => {
       const u = url.toString();
       calls.push(u);
       expect(opts?.redirect).toBe('manual');
+      expect(opts?.dispatcher).toBeUndefined();
       if (u === PUBLIC_URL) {
         return new Response('', { status: 302, headers: { location: PRIVATE_TARGET } });
       }

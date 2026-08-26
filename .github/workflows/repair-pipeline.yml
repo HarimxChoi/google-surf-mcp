@@ -1,12 +1,9 @@
 name: serp-repair-pipeline
 
-# Triple Gate + 3-query empirical self-healing.
-# Daily cron checks if Google SERP selectors broke and proposes draft PR.
-# Auto-merge: NEVER. Always human review.
+# Manual Triple Gate and 3-query SERP drift check.
+# Auto-merge: never. Always human review.
 
 on:
-  schedule:
-    - cron: '17 3 * * *'   # 매일 03:17 UTC, 다른 cron과 충돌 방지
   workflow_dispatch: {}
 
 jobs:

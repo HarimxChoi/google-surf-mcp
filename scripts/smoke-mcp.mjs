@@ -1,0 +1,222 @@
+#!/usr/bin/env node
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const root = mkdtempSync(join(tmpdir(), 'surf-mcp-smoke-'));
+const source = mkdtempSync(join(tmpdir(), 'surf-mcp-source-'));
+mkdirSync(join(source, 'src'));
+writeFileSync(join(source, 'src', 'probe.ts'), 'export const smoke_index_token = 1;');
+const baseEnv = {
+  SURF_CLOUD_MODE: 'true',
+  SURF_SEARCH_PROVIDER: 'searchapi',
+  SURF_SCHOLAR_PROVIDER: 'searchapi',
+};
+const offClient = new Client({ name: 'google-surf-smoke-off', version: '1.0.0' });
+const offTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: ['build/index.js'],
+  cwd: process.cwd(),
+  env: baseEnv,
+  stderr: 'pipe',
+});
+try {
+  await offClient.connect(offTransport);
+  const listed = await offClient.listTools();
+  const names = listed.tools.map((tool) => tool.name).sort();
+  const expected = [
+    'extract', 'health', 'scholar_search', 'search', 'search_parallel',
+  ].sort();
+  if (JSON.stringify(names) !== JSON.stringify(expected)) {
+    throw new Error('default tool list mismatch');
+  }
+  const descriptions = new Map(listed.tools.map((tool) => [tool.name, tool.description ?? '']));
+  const requiredDescriptions = {
+    search: 'Default entry point',
+    search_parallel: '2-10 independent',
+    extract: 'exact URL',
+    scholar_search: 'Do not use',
+  };
+  for (const [name, phrase] of Object.entries(requiredDescriptions)) {
+    if (!descriptions.get(name)?.includes(phrase)) {
+      throw new Error(`${name} routing description mismatch`);
+    }
+  }
+  for (const name of ['search', 'search_parallel']) {
+    const properties = listed.tools.find((tool) => tool.name === name)?.inputSchema?.properties ?? {};
+    if (!('extract_mode' in properties) || 'project_id' in properties || 'retrieval_mode' in properties) {
+      throw new Error(`${name} default schema mismatch`);
+    }
+    if (properties.max_chars?.maximum !== 50_000) {
+      throw new Error(`${name} extraction limit mismatch`);
+    }
+  }
+  const parallel = listed.tools.find((tool) => tool.name === 'search_parallel');
+  if (parallel?.inputSchema?.properties?.queries?.minItems !== 2) {
+    throw new Error('search_parallel must require at least two queries');
+  }
+} finally {
+  await offTransport.close();
+}
+const client = new Client({ name: 'google-surf-smoke', version: '1.0.0' });
+const transport = new StdioClientTransport({
+  command: process.execPath,
+  args: ['build/index.js'],
+  cwd: process.cwd(),
+  env: {
+    ...baseEnv,
+    SURF_RESEARCH: 'true',
+    SURF_RESEARCH_ROOT: root,
+  },
+  stderr: 'pipe',
+});
+
+try {
+  await client.connect(transport);
+  const listed = await client.listTools();
+  const names = listed.tools.map((tool) => tool.name).sort();
+  const expected = [
+    'extract', 'health', 'project_memory', 'scholar_search',
+    'search', 'search_parallel',
+  ].sort();
+  if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error('tool list mismatch');
+  for (const name of ['search', 'search_parallel']) {
+    const properties = listed.tools.find((tool) => tool.name === name)?.inputSchema?.properties ?? {};
+    if (!('extract_mode' in properties) || !('project_id' in properties) || 'retrieval_mode' in properties) {
+      throw new Error(`${name} schema routing mismatch`);
+    }
+  }
+  const memoryAction = listed.tools.find((tool) => tool.name === 'project_memory')
+    ?.inputSchema?.properties?.action?.description ?? '';
+  if (!memoryAction.includes('create: project_id and name required')) {
+    throw new Error('project_memory action contract missing');
+  }
+  const memoryProperties = listed.tools.find((tool) => tool.name === 'project_memory')
+    ?.inputSchema?.properties ?? {};
+  if (!memoryProperties.action?.enum?.includes('export')
+    || !('export_format' in memoryProperties) || !('export_view' in memoryProperties)
+    || !memoryProperties.export_format?.enum?.includes('html')
+    || !memoryProperties.export_format?.enum?.includes('neo4j')
+    || !('all_projects' in memoryProperties)) {
+    throw new Error('project_memory visualization contract missing');
+  }
+  const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
+    ?.description ?? '';
+  for (const phrase of [
+    'Management tool', 'session intent', 'immutable plan revisions',
+    'versioned ontology', 'bitemporal data lineage', 'entity merge or split',
+    'rebuild', 'export', 'interactive HTML', 'Graphviz DOT', 'D3 JSON', 'Neo4j', 'forget',
+    'search_parallel', 'scholar_search', 'extract',
+  ]) {
+    if (!memoryDescription.includes(phrase)) {
+      throw new Error(`project_memory description missing: ${phrase}`);
+    }
+  }
+  const searchDescription = listed.tools.find((tool) => tool.name === 'search')
+    ?.description ?? '';
+  for (const phrase of [
+    'live web', 'exact', 'BM25', 'vector', 'code', 'graph',
+    'prior searches', 'data lineage', 'versioned ontology', 'schema/entity links',
+  ]) {
+    if (!searchDescription.includes(phrase)) {
+      throw new Error(`search research description missing: ${phrase}`);
+    }
+  }
+
+  const created = await client.callTool({
+    name: 'project_memory',
+    arguments: { action: 'create', project_id: 'smoke', name: 'Smoke project' },
+  });
+  if (created.isError) throw new Error('project create failed');
+  const planned = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'record',
+      record_type: 'plan',
+      project_id: 'smoke',
+      title: 'Smoke plan',
+      body: 'Validate MCP schemas.',
+    },
+  });
+  if (planned.isError) throw new Error('plan create failed');
+  const detail = await client.callTool({
+    name: 'project_memory',
+    arguments: { action: 'show', project_id: 'smoke' },
+  });
+  if (detail.isError || detail.structuredContent?.search_event_count !== 0) {
+    throw new Error('project get failed');
+  }
+  const indexed = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'rebuild',
+      project_id: 'smoke',
+      roots: [{ label: 'repo', path: source }],
+    },
+  });
+  if (indexed.isError || indexed.structuredContent?.index?.added_count !== 1) {
+    throw new Error('project index failed');
+  }
+  const reused = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'rebuild',
+      project_id: 'smoke',
+      roots: [{ label: 'repo', path: source }],
+    },
+  });
+  if (reused.isError || reused.structuredContent?.index?.reused !== true) {
+    throw new Error('project index reuse failed');
+  }
+  const visualization = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'export',
+      project_id: 'smoke',
+      export_format: 'neo4j',
+      export_view: 'lineage',
+    },
+  });
+  if (visualization.isError
+    || typeof visualization.structuredContent?.visualization?.path !== 'string'
+    || visualization.structuredContent.visualization.node_count < 1) {
+    throw new Error('project visualization export failed');
+  }
+  let forgotten;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const preview = await client.callTool({
+      name: 'project_memory',
+      arguments: { action: 'forget', project_id: 'smoke', forget_mode: 'preview' },
+    });
+    const confirmToken = preview.structuredContent?.forget?.confirm_token;
+    if (preview.isError || typeof confirmToken !== 'string') {
+      throw new Error('project forget preview failed');
+    }
+    forgotten = await client.callTool({
+      name: 'project_memory',
+      arguments: {
+        action: 'forget',
+        project_id: 'smoke',
+        forget_mode: 'apply',
+        confirm_token: confirmToken,
+      },
+    });
+    if (!forgotten.isError) break;
+    if (forgotten.structuredContent?.error?.message !== 'forget confirmation expired') break;
+  }
+  if (!forgotten || forgotten.isError) {
+    throw new Error(`project forget failed: ${JSON.stringify(forgotten?.structuredContent)}`);
+  }
+  const restored = await client.callTool({
+    name: 'project_memory',
+    arguments: { action: 'forget', project_id: 'smoke', forget_mode: 'restore' },
+  });
+  if (restored.isError) throw new Error('project restore failed');
+  console.log('MCP smoke passed');
+} finally {
+  await transport.close();
+  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  rmSync(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}

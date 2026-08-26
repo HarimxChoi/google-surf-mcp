@@ -1,8 +1,8 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.8.0",
+  "version": "0.9.5",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
-  "description": "Google and Google Scholar MCP with browser and optional SearchApi providers.",
+  "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "type": "module",
   "bin": {
     "google-surf-mcp": "build/index.js"
@@ -10,19 +10,32 @@
   "files": [
     "build",
     "assets/searchapi-banner.png",
+    "vendor",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "sync-versions": "node scripts/sync-versions.mjs",
     "prebuild": "npm run sync-versions",
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build": "npm run build:core",
+    "build:core": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "bootstrap": "node build/bootstrap.js",
+    "cache:clear": "node build/cache-clear.js",
     "start": "node build/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:prereg": "node scripts/check-prereg.mjs",
+    "research:reopen-probe": "node scripts/probe-research-reopen.mjs",
+    "research:storage-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-project-storage.js",
+    "research:graph-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-graph-engines.js",
+    "research:index-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-research-indexing.js",
+    "research:code-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-code-indexing.js",
+    "research:e2e-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-research-e2e.js",
+    "research:evaluate": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/evaluate-research-memory.js",
+    "research:vector-smoke": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/smoke-vector-retrieval.js",
+    "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "drift-check": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/repair/index.js"
   },
   "keywords": [
@@ -32,6 +45,9 @@
     "google-search",
     "google-scholar",
     "academic-search",
+    "codebase-search",
+    "graph-rag",
+    "rag",
     "search",
     "web-search",
     "serp",
@@ -46,18 +62,36 @@
     "url": "git+https://github.com/HarimxChoi/google-surf-mcp.git"
   },
   "homepage": "https://github.com/HarimxChoi/google-surf-mcp#readme",
-  "bugs": "https://github.com/HarimxChoi/google-surf-mcp/issues",
+  "bugs": {
+    "url": "https://github.com/HarimxChoi/google-surf-mcp/issues"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.18.1"
   },
   "dependencies": {
     "@llamaindex/liteparse": "^2.0.8",
     "@modelcontextprotocol/sdk": "^1.20.0",
     "@mozilla/readability": "^0.6.0",
+    "@surrealdb/node": "^3.0.3",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-components": "^1.5.4",
+    "graphology-metrics": "^2.4.0",
+    "graphology-shortest-path": "^2.1.0",
+    "onnxruntime-common": "1.29.0",
+    "onnxruntime-node": "1.29.0",
+    "pdf-lib": "^1.17.1",
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "sharp": "0.35.3",
+    "surrealdb": "^2.0.8",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-cpp": "^0.22.3",
+    "tree-sitter-python": "^0.21.0",
+    "tree-sitter-typescript": "^0.23.2",
     "turndown": "^7.2.4",
+    "undici": "7.29.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -66,7 +100,14 @@
     "@types/node": "^20.17.10",
     "@types/turndown": "^5.0.6",
     "jsdom": "^25.0.1",
+    "neo4j-driver": "^6.2.0",
     "typescript": "^5.3.3",
-    "vitest": "^2.1.9"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
+  },
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
   }
 }

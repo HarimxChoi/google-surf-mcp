@@ -29,7 +29,7 @@ export interface CascadeDeps {
 
 export const DEFAULT_CASCADE_CONFIG: CascadeConfig = {
   tier1ToTier2Threshold: 1,
-  tier2ToTier3Threshold: 2,
+  tier2ToTier3Threshold: 1,
   maxIterations: 5,
 };
 
@@ -51,7 +51,9 @@ export async function executeWithCascade<T>(
   let iterations = 0;
   while (iterations++ < config.maxIterations) {
     try {
-      return (await deps.runWithMode(state.mode)) as T;
+      const result = (await deps.runWithMode(state.mode)) as T;
+      state.captchaCountInMode = 0;
+      return result;
     } catch (e) {
       if (!deps.isCaptchaError(e)) throw e;
 

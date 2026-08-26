@@ -94,7 +94,7 @@ export function parseResultsInBrowser(args: {
     '|' +
     skeletonTags.slice(-20).join(',');
 
-  const READ_MORE = /\s*(?:\.{3}|…)?\s*(?:Read more|More results|더보기)\s*$/i; // i18n-data
+  const READ_MORE = /\s*(?:\.{3}|…)?\s*(?:Read more|More results|\uB354\uBCF4\uAE30)\s*$/i; // i18n data
 
   const blocks = document.querySelectorAll(args.strategy.blockSelector);
   const blocksArr = Array.from(blocks);

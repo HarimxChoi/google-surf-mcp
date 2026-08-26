@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { isPdfMagic, isPdfContentType } from '../src/extract-pdf.js';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { extractPdfTiered, isPdfMagic, isPdfContentType } from '../src/extract-pdf.js';
+
+async function metadataPdf(): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const page = pdf.addPage();
+  page.drawText('Metadata test body', { x: 50, y: 700, font });
+  pdf.setTitle('Metadata Test Paper');
+  pdf.setAuthor('Ada Lovelace; Grace Hopper');
+  pdf.setSubject('Graph retrieval');
+  pdf.setKeywords(['graph RAG', 'lineage']);
+  pdf.setCreator('Research Tool');
+  pdf.setProducer('PDF Producer');
+  pdf.setCreationDate(new Date('2026-08-25T01:02:03.000Z'));
+  pdf.setModificationDate(new Date('2026-08-26T04:05:06.000Z'));
+  return await pdf.save({ updateFieldAppearances: false });
+}
 
 describe('isPdfMagic', () => {
   it('detects the %PDF signature', () => {
@@ -46,4 +63,28 @@ describe('isPdfContentType', () => {
     expect(isPdfContentType(undefined)).toBe(false);
     expect(isPdfContentType('')).toBe(false);
   });
+});
+
+describe('extractPdfTiered metadata', () => {
+  it.each(['metadata', 'abstract', 'full'] as const)(
+    'returns document metadata in %s mode',
+    async (mode) => {
+      const result = await extractPdfTiered(await metadataPdf(), mode, 50_000);
+
+      expect(result).toMatchObject({
+        is_pdf: true,
+        page_count: 1,
+        title: 'Metadata Test Paper',
+        authors: 'Ada Lovelace; Grace Hopper',
+        subject: 'Graph retrieval',
+        keywords: ['graph RAG lineage'],
+        creator: 'Research Tool',
+        producer: 'PDF Producer',
+        created_at: '2026-08-25T01:02:03.000Z',
+        modified_at: '2026-08-26T04:05:06.000Z',
+      });
+      if (mode === 'metadata') expect(result.content).toBeUndefined();
+      else expect(result.content).toContain('Metadata test body');
+    },
+  );
 });

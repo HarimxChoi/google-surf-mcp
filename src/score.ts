@@ -1,17 +1,17 @@
 import type { SearchResult, ResultScore, ResultClassification, GeometricVerification } from './types.js';
 
 // A marker must look like a SERP label, or it hits ordinary vocabulary:
-// "Google Ads API docs", "광고 없는 무료 VPN". CJK has no \b, hence the
+// "Google Ads API docs" and ordinary CJK phrases. CJK has no \b, hence the
 // explicit separator class.
 const AD_MARKERS_BY_LOCALE: Record<string, RegExp> = {
-  en: /\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-—]|\s*$)/i,
-  ko: /(?:^|\s)(광고|스폰서)(?:\s*[·•‧▾:：\-—]|\s*$)/,
-  ja: /(?:^|\s)(広告|スポンサー)(?:\s*[·•‧▾:：\-—]|\s*$)/,
-  zh: /(?:^|\s)(广告|赞助|廣告)(?:\s*[·•‧▾:：\-—]|\s*$)/,
-  fr: /(sponsorisé|annonce)/i,
-  de: /(anzeige|gesponsert)/i,
-  es: /(anuncio|patrocinado)/i,
-  pt: /(patrocinado|anúncio)/i,
+  en: /\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[\u00B7\u2022\u2027\u25BE\-\u2014]|\s*$)/i,
+  ko: /(?:^|\s)(\uAD11\uACE0|\uC2A4\uD3F0\uC11C)(?:\s*[\u00B7\u2022\u2027\u25BE:\uFF1A\-\u2014]|\s*$)/,
+  ja: /(?:^|\s)(\u5E83\u544A|\u30B9\u30DD\u30F3\u30B5\u30FC)(?:\s*[\u00B7\u2022\u2027\u25BE:\uFF1A\-\u2014]|\s*$)/,
+  zh: /(?:^|\s)(\u5E7F\u544A|\u8D5E\u52A9|\u5EE3\u544A)(?:\s*[\u00B7\u2022\u2027\u25BE:\uFF1A\-\u2014]|\s*$)/,
+  fr: /(\u0073\u0070\u006F\u006E\u0073\u006F\u0072\u0069\u0073\u00E9|\u0061\u006E\u006E\u006F\u006E\u0063\u0065)/i,
+  de: /(\u0061\u006E\u007A\u0065\u0069\u0067\u0065|\u0067\u0065\u0073\u0070\u006F\u006E\u0073\u0065\u0072\u0074)/i,
+  es: /(\u0061\u006E\u0075\u006E\u0063\u0069\u006F|\u0070\u0061\u0074\u0072\u006F\u0063\u0069\u006E\u0061\u0064\u006F)/i,
+  pt: /(\u0070\u0061\u0074\u0072\u006F\u0063\u0069\u006E\u0061\u0064\u006F|\u0061\u006E\u00FA\u006E\u0063\u0069\u006F)/i,
 };
 
 // fr/de/es/pt markers are unanchored, so never adopt them from a page we did

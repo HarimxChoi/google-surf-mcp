@@ -11,7 +11,7 @@ const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const randInt = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1));
 
 const NOTIFY_TITLE = 'google-surf-mcp: CAPTCHA';
-const NOTIFY_BODY = 'Google CAPTCHA detected. A browser window will open — solve it to resume.';
+const NOTIFY_BODY = 'Google CAPTCHA detected. Solve it in the opened browser, then retry.';
 
 function readDevToolsPort(profileDir: string): string | null {
   const p = join(profileDir, 'DevToolsActivePort');
@@ -37,6 +37,17 @@ export interface RecoverOptions {
 }
 
 let recoveryInFlight: Promise<void> | null = null;
+
+export function isCaptchaRecoveryActive(): boolean {
+  return recoveryInFlight !== null;
+}
+
+export function beginCaptchaRecovery(opts: RecoverOptions = {}): void {
+  recoverFromCaptcha(opts).then(
+    () => console.error('[google-surf-mcp] captcha cleared; retry the request'),
+    (error) => console.error(`[google-surf-mcp] captcha recovery ended: ${(error as Error).message}`),
+  );
+}
 
 function parseMs(v: string | undefined, fallback: number): number {
   if (!v) return fallback;

@@ -1,10 +1,13 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { cascadeStatePath } from './cascadeStore.js';
+import { DEFAULT_RESEARCH_VECTOR_MODEL } from './research/dense.js';
 
 export { detectChrome as detectChromePath } from './browser.js';
 
 export type SearchProviderMode = 'browser' | 'searchapi' | 'fallback';
+export type BrowserEngine = 'auto' | 'native' | 'playwright';
+export type ResearchRetrievalMode = 'live' | 'hybrid';
 
 export interface Config {
   chromePath?: string;
@@ -21,9 +24,17 @@ export interface Config {
   rateLimitPerMin: number;
   searchProvider: SearchProviderMode;
   scholarProvider: SearchProviderMode;
+  browserEngine: BrowserEngine;
   searchApiKey?: string;
   extractMaxChars: number;
   extractOcr: boolean;
+  researchEnabled: boolean;
+  researchRetrievalMode: ResearchRetrievalMode;
+  researchRoot: string;
+  researchVectorModel?: string;
+  researchRepoAuto: boolean;
+  researchRepoAutoMaxMb: number;
+  researchRepoAutoMaxFiles: number;
 
   // Composite cloud flag: enables insecureTls + noSandbox + pool disabled +
   // tier-3 fail-fast. Cascade itself runs unchanged in cloud mode.
@@ -85,6 +96,19 @@ function parseProvider(v: string | undefined): SearchProviderMode {
   return v === 'searchapi' || v === 'fallback' ? v : 'browser';
 }
 
+function parseBrowserEngine(v: string | undefined): BrowserEngine {
+  return v === 'native' || v === 'playwright' ? v : 'auto';
+}
+
+function parseResearchRetrievalMode(v: string | undefined): ResearchRetrievalMode {
+  return v === 'live' ? 'live' : 'hybrid';
+}
+
+function parseResearchVectorModel(v: string | undefined): string | undefined {
+  const model = v?.trim();
+  return model?.toLowerCase() === 'off' ? undefined : model || DEFAULT_RESEARCH_VECTOR_MODEL;
+}
+
 function parseChromePath(v: string | undefined): string | undefined {
   return v || undefined;
 }
@@ -109,12 +133,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimitPerMin: parseInt0(env.SURF_RATE_LIMIT_PER_MIN, 10, 1, 600),
     searchProvider: parseProvider(env.SURF_SEARCH_PROVIDER),
     scholarProvider: parseProvider(env.SURF_SCHOLAR_PROVIDER),
+    browserEngine: parseBrowserEngine(env.SURF_BROWSER_ENGINE),
     searchApiKey: env.SEARCH_API?.trim()
       || env.SEARCHAPI_API_KEY?.trim()
       || env.SURF_SEARCH_API_KEY?.trim()
       || undefined,
-    extractMaxChars: parseInt0(env.SURF_EXTRACT_MAX_CHARS, 8_000, 200, 50_000),
+    extractMaxChars: parseInt0(env.SURF_EXTRACT_MAX_CHARS, 50_000, 200, 50_000),
     extractOcr: parseBool(env.SURF_EXTRACT_OCR, false),
+    researchEnabled: parseBool(env.SURF_RESEARCH, true),
+    researchRetrievalMode: parseResearchRetrievalMode(env.SURF_RETRIEVAL_MODE),
+    researchRoot: resolve(env.SURF_RESEARCH_ROOT || join(profileRoot, 'research')),
+    researchVectorModel: parseResearchVectorModel(
+      env.SURF_RESEARCH_VECTOR_MODEL ?? env.SURF_RESEARCH_DENSE_MODEL,
+    ),
+    researchRepoAuto: parseBool(env.SURF_RESEARCH_REPO_AUTO, true),
+    researchRepoAutoMaxMb: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_MB, 20, 1, 500),
+    researchRepoAutoMaxFiles: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_FILES, 2_000, 10, 20_000),
 
     cloudMode,
     remoteDebug: parseBool(env.SURF_REMOTE_DEBUG, false),

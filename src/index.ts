@@ -2,26 +2,39 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { launch, getPage, PROFILE_MAIN, profileExists, clearProfileLocks } from './browser.js';
+import {
+  launch, getPage, PROFILE_MAIN, PROFILE_NATIVE, profileExists, clearProfileLocks,
+  detectSystemChrome,
+} from './browser.js';
 import { search, CaptchaError } from './search.js';
 import { SearchPool, type PoolSearchResult } from './pool.js';
 import { extract, type ExtractMode } from './extract.js';
-import { recoverFromCaptcha } from './captchaRecover.js';
+import {
+  beginCaptchaRecovery, isCaptchaRecoveryActive, recoverFromCaptcha,
+} from './captchaRecover.js';
 import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
 import { withTimeout } from './timeout.js';
 import {
-  searchTool, scholarSearchTool, searchParallelTool, extractTool, searchExtractTool, healthTool,
-  initDeps, type Deps, type PoolHandle,
+  applyParallelSearchExtraction, applySearchExtraction, searchTool, scholarSearchTool,
+  searchParallelTool, extractTool, healthTool, initDeps, type Deps, type PoolHandle,
+  type SearchExtractionInput,
 } from './agent.js';
+import { formatToolResponse } from './response.js';
+import {
+  captureOnly, runParallelWithResearch, runSearchWithResearch,
+} from './research/orchestrator.js';
+import { ResearchService } from './research/service.js';
+import { projectMemoryTool, type ProjectMemoryInput } from './research/tools.js';
 import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
 import { PKG_NAME, VERSION } from './version.js';
+import { NativeChromeBrowser } from './nativeBrowser.js';
 
 const NAME = PKG_NAME;
 const REQUEST_TIMEOUT_MS = 30_000;
 const EXTRACT_BATCH_TIMEOUT_MS = 60_000;
-const POOL_SIZE = 4;
+const POOL_SIZE = 2;
 const POOL_FALLBACK_THRESHOLD = 3;
 
 function parseIdleMs(): number {
@@ -137,7 +150,7 @@ function ensurePool(mode: StealthMode = 'off'): Promise<SearchPool> {
 async function resetPool(): Promise<void> {
   if (poolClosing) return poolClosing;
   if (poolPromise) {
-    try { await poolPromise; } catch { /* */ }
+    try { await poolPromise; } catch {}
   }
   const cur = pool;
   pool = null;
@@ -219,13 +232,40 @@ async function shutdown() {
   await closeSequential();
   await pool?.close();
   pool = null;
+  await nativeBrowser?.close().catch(() => {});
   await baseDeps.healing.flush().catch(() => {});
   baseDeps.healing.shutdown();
+  await researchService.close().catch(() => {});
 }
 
 
 // Cascade state is process-level so seq + pool share it.
 const baseDeps = initDeps();
+let nativeBrowser: NativeChromeBrowser | undefined;
+let nativeBrowserError: string | undefined;
+if (!baseDeps.config.cloudMode
+  && !baseDeps.config.remoteDebug
+  && baseDeps.config.browserEngine !== 'playwright') {
+  try {
+    nativeBrowser = new NativeChromeBrowser({
+      executablePath: detectSystemChrome(),
+      profileDir: PROFILE_NATIVE,
+    });
+  } catch (error) {
+    nativeBrowserError = (error as Error).message;
+  }
+}
+if (baseDeps.config.browserEngine === 'native' && baseDeps.config.remoteDebug) {
+  nativeBrowserError = 'native Chrome is incompatible with SURF_REMOTE_DEBUG';
+}
+const researchService = new ResearchService({
+  enabled: baseDeps.config.researchEnabled,
+  root: baseDeps.config.researchRoot,
+  vectorModel: baseDeps.config.researchVectorModel,
+  repositoryAuto: baseDeps.config.researchRepoAuto,
+  repositoryMaxSourceBytes: baseDeps.config.researchRepoAutoMaxMb * 1024 * 1024,
+  repositoryMaxSourceFiles: baseDeps.config.researchRepoAutoMaxFiles,
+});
 
 async function ensureProfileReady(): Promise<{ ok: true } | { ok: false; message: string }> {
   if (baseDeps.config.cloudMode) {
@@ -248,6 +288,13 @@ async function prepareSearchProvider(
   mode: 'browser' | 'searchapi' | 'fallback',
 ): Promise<{ browserUnavailable?: string; error?: string }> {
   if (mode === 'searchapi') return {};
+  if (nativeBrowser) return {};
+  if (baseDeps.config.browserEngine === 'native') {
+    const message = nativeBrowserError ?? 'native Chrome unavailable';
+    return mode === 'fallback'
+      ? { browserUnavailable: message }
+      : { error: message };
+  }
   const ready = await ensureProfileReady();
   if (ready.ok) return {};
   return mode === 'fallback'
@@ -257,6 +304,12 @@ async function prepareSearchProvider(
 
 function buildDeps(): Deps {
   const acquireSeqCtx = async (mode: StealthMode) => {
+    if (isCaptchaRecoveryActive()) {
+      throw new CaptchaError(
+        'human recovery in progress',
+        'Solve CAPTCHA in the opened browser, then retry this request.',
+      );
+    }
     return await trackSeq(() => getSequentialCtx(mode));
   };
 
@@ -281,7 +334,7 @@ function buildDeps(): Deps {
           }
         })(),
         REQUEST_TIMEOUT_MS,
-        'search_extract:search',
+        'search',
         closeSequential,
       ));
     };
@@ -325,12 +378,18 @@ function buildDeps(): Deps {
       trackPool(() => withTimeout(
         p.searchOne(query, limit, opts),
         REQUEST_TIMEOUT_MS,
-        'search_extract:search',
+        'search',
         resetPool,
       )),
   });
 
   const acquirePool = async (mode: StealthMode): Promise<PoolHandle> => {
+    if (isCaptchaRecoveryActive()) {
+      throw new CaptchaError(
+        'human recovery in progress',
+        'Solve CAPTCHA in the opened browser, then retry this request.',
+      );
+    }
     if (poolFallbackMode) return seqBackedHandle(mode);
     try {
       const p = await trackPool(() => ensurePool(mode));
@@ -341,7 +400,7 @@ function buildDeps(): Deps {
       if (poolWarmFailures >= POOL_FALLBACK_THRESHOLD) {
         poolFallbackMode = true;
         console.error(
-          `[google-surf-mcp] pool warm failed ${poolWarmFailures}× — switching to single-context fallback`,
+          `[google-surf-mcp] pool warm failed ${poolWarmFailures}x; switching to single-context fallback`,
         );
         return seqBackedHandle(mode);
       }
@@ -364,11 +423,19 @@ function buildDeps(): Deps {
         closeSequential().catch(() => {}),
       ]);
     }
+    if (captchaMode === 'notify_spawn' || captchaMode === 'always_headed') {
+      beginCaptchaRecovery({ mode: captchaMode, seedQuery });
+      throw new CaptchaError(
+        'background human recovery started',
+        'Solve CAPTCHA in the opened browser, then retry this request.',
+      );
+    }
     await recoverFromCaptcha({ mode: captchaMode, seedQuery });
   };
 
   return {
     ...baseDeps,
+    nativeBrowser,
     acquireSeqCtx,
     acquirePool,
     closeSeq: closeSequential,
@@ -386,39 +453,83 @@ process.on('SIGINT', () => { shutdown().finally(() => process.exit(0)); });
 process.on('SIGTERM', () => { shutdown().finally(() => process.exit(0)); });
 process.stdin.on('end', () => { shutdown().finally(() => process.exit(0)); });
 
+const SessionMemoryInput = baseDeps.config.researchEnabled ? {
+  session_id: z.string().min(1).max(200).optional().describe('Stable host task id. Reuses the same project session after restart.'),
+  session_intent: z.string().min(1).max(2_000).optional().describe('Current durable task intent. A changed value creates an immutable revision.'),
+} : {};
+type SessionMemoryArgs = { session_id?: string; session_intent?: string };
+
+const ProjectSearchInput = baseDeps.config.researchEnabled ? {
+  project_id: z.string().min(1).max(64).optional().describe('Project memory id.'),
+  include_project_ids: z.array(z.string().min(1).max(64)).max(8).optional().describe('Additional read-only projects joined through ontology-aligned schema and identity links. New records stay in project_id.'),
+  memory_handle: z.string().uuid().optional().describe('Reuse the handle returned by a prior project-aware call.'),
+  ...SessionMemoryInput,
+} : {};
+
+const ProjectCaptureInput = baseDeps.config.researchEnabled ? {
+  project_id: z.string().min(1).max(64).optional().describe('Project memory id.'),
+  memory_handle: z.string().uuid().optional().describe('Reuse the handle returned by a prior project-aware call.'),
+  ...SessionMemoryInput,
+} : {};
+
+const SearchExtractionFields = {
+  extract_mode: z.enum(['none', 'abstract', 'full']).default('none').describe(
+    'Content depth after search. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
+  ),
+  extract_limit: z.number().int().min(1).max(10).default(5).describe(
+    'Maximum unique result URLs to extract. For parallel search this is one call-wide limit, not a per-query limit.',
+  ),
+  max_chars: z.number().int().min(200).max(50_000).optional().describe(
+    `Maximum characters per extracted result. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`,
+  ),
+};
+
 const SearchInput = {
   query: z.string().min(1).max(400).describe('Google search query. Use site: filters and quotes for exact match.'),
   limit: z.number().int().min(1).max(20).default(10).describe('Max results (default 10).'),
+  ...SearchExtractionFields,
+  ...ProjectSearchInput,
 };
 
 const ScholarSearchInput = {
   query: z.string().min(1).max(400).describe('Google Scholar query. Supports quotes and author: operators.'),
   limit: z.number().int().min(1).max(10).default(10).describe('Max papers (default 10).'),
+  ...ProjectCaptureInput,
 };
 
 const SearchParallelInput = {
-  queries: z.array(z.string()).min(1).max(10).describe('2-10 queries to run concurrently.'),
+  queries: z.array(z.string().min(1).max(400)).min(2).max(10).describe('2-10 independent queries to run concurrently.'),
   limit: z.number().int().min(1).max(20).default(10).describe('Max results per query.'),
+  ...SearchExtractionFields,
+  ...ProjectSearchInput,
 };
 
 const ExtractInput = {
   url: z.string().describe('Public http(s) URL. Loopback/private IPs blocked unless SURF_ALLOW_PRIVATE=true.'),
-  max_chars: z.number().int().min(200).max(50_000).default(baseDeps.config.extractMaxChars).describe(`Truncate body to this many chars (default ${baseDeps.config.extractMaxChars}, set via SURF_EXTRACT_MAX_CHARS).`),
+  ...ProjectCaptureInput,
+  max_chars: z.number().int().min(200).max(50_000).optional().describe(`Truncate body to this many chars. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`),
   mode: z.enum(['full', 'abstract', 'metadata']).default('full').describe(
     'Extraction depth. `full` = whole article body (default; uses Playwright if needed). ' +
     '`abstract` = cheap survey: PDF page 1 OR HTML meta description (~1500 chars); use to triage relevance before paying for full text. ' +
-    '`metadata` = page count only (PDF). Academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) are auto-detected; abstract mode skips Playwright for them.',
+    '`metadata` = document metadata without body text: title, authors, publication details, dates, DOI, keywords, canonical URL, and PDF properties when available. ' +
+    'Academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) are auto-detected; abstract mode skips Playwright for them.',
   ),
 };
 
-const SearchExtractInput = {
-  query: z.string().min(1).max(400).describe('Search query.'),
-  limit: z.number().int().min(1).max(10).default(5).describe('Number of results to extract (default 5, max 10).'),
-  max_chars: z.number().int().min(200).max(20_000).optional().describe(`Truncate each result body. Default depends on mode: ~1500 for abstract, ${Math.min(baseDeps.config.extractMaxChars, 20_000)} for full (SURF_EXTRACT_MAX_CHARS, capped at 20000 here).`),
-  mode: z.enum(['full', 'abstract']).default('abstract').describe(
-    'Extraction depth per result. `abstract` (default) = cheap survey, ~1500 chars/result, ideal for relevance triage. ' +
-    '`full` = whole body per result, slower and far more tokens; only when you actually need the article texts.',
-  ),
+const DocumentMetadataOutput = {
+  authors: z.string().optional(),
+  publication: z.string().optional(),
+  published_at: z.string().optional(),
+  year: z.number().int().optional(),
+  doi: z.string().optional(),
+  keywords: z.array(z.string()).optional(),
+  canonical_url: z.string().optional(),
+  language: z.string().optional(),
+  subject: z.string().optional(),
+  creator: z.string().optional(),
+  producer: z.string().optional(),
+  created_at: z.string().optional(),
+  modified_at: z.string().optional(),
 };
 
 // All-optional + `error` field: one schema validates success and error payloads.
@@ -426,6 +537,17 @@ const ResultItem = z.object({
   title: z.string(),
   url: z.string(),
   description: z.string(),
+  content: z.string().optional(),
+  excerpt: z.string().optional(),
+  length: z.number().optional(),
+  is_pdf: z.boolean().optional(),
+  page_count: z.number().optional(),
+  extraction_quality: z.enum(['full_text', 'abstract', 'meta_abstract', 'metadata_only']).optional(),
+  ...DocumentMetadataOutput,
+  extract_error: z.string().optional(),
+  document_id: z.string().optional(),
+  source_family: z.enum(['live', 'document', 'code', 'graph']).optional(),
+  fresh_web: z.boolean().optional(),
 });
 const ErrorInfoShape = z.object({
   code: z.string(),
@@ -435,11 +557,23 @@ const ErrorInfoShape = z.object({
   user_action: z.string().optional(),
 });
 const MetaShape = z.record(z.string(), z.unknown());
+const ResearchContextShape = z.object({
+  prior_searches: z.array(z.object({
+    query: z.string(),
+    relation: z.enum(['same', 'related', 'recent']),
+    searched_at: z.string(),
+    results: z.number().int(),
+    surface: z.string().optional(),
+  })).max(3),
+});
 
 const SearchOutput = {
   query: z.string().optional(),
   results: z.array(ResultItem).optional(),
   elapsed_ms: z.number().optional(),
+  memory: z.string().optional(),
+  memory_handle: z.string().optional(),
+  research_context: ResearchContextShape.optional(),
   meta: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };
@@ -465,6 +599,9 @@ const ScholarSearchOutput = {
     metadata: z.string(),
   })).optional(),
   elapsed_ms: z.number().optional(),
+  memory: z.string().optional(),
+  memory_handle: z.string().optional(),
+  research_context: ResearchContextShape.optional(),
   meta: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };
@@ -476,11 +613,14 @@ const SearchParallelOutput = {
     dropped: z.number().optional(),
     dropped_reasons: z.array(z.string()).optional(),
     degraded_reasons: z.array(z.string()).optional(),
-    provider: z.enum(['browser', 'searchapi']).optional(),
+    provider: z.enum(['browser', 'searchapi', 'local']).optional(),
     fallback_reason: z.string().optional(),
     error: z.string().optional(),
   })).optional(),
   elapsed_ms: z.number().optional(),
+  memory: z.string().optional(),
+  memory_handle: z.string().optional(),
+  research_context: ResearchContextShape.optional(),
   meta: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };
@@ -488,34 +628,19 @@ const SearchParallelOutput = {
 const ExtractOutput = {
   url: z.string().optional(),
   title: z.string().optional(),
+  description: z.string().optional(),
   content: z.string().optional(),
   excerpt: z.string().optional(),
   length: z.number().optional(),
   is_pdf: z.boolean().optional(),
   page_count: z.number().optional(),
   extraction_quality: z.enum(['full_text', 'abstract', 'meta_abstract', 'metadata_only']).optional(),
+  ...DocumentMetadataOutput,
   elapsed_ms: z.number().optional(),
+  memory: z.string().optional(),
+  memory_handle: z.string().optional(),
   error: z.union([z.string(), ErrorInfoShape]).optional(),
   meta: MetaShape.optional(),
-};
-
-const SearchExtractOutput = {
-  query: z.string().optional(),
-  results: z.array(z.object({
-    title: z.string(),
-    url: z.string(),
-    description: z.string(),
-    content: z.string().optional(),
-    excerpt: z.string().optional(),
-    length: z.number().optional(),
-    is_pdf: z.boolean().optional(),
-    page_count: z.number().optional(),
-    extraction_quality: z.enum(['full_text', 'abstract', 'meta_abstract', 'metadata_only']).optional(),
-    error: z.string().optional(),
-  })).optional(),
-  elapsed_ms: z.number().optional(),
-  meta: MetaShape.optional(),
-  error: ErrorInfoShape.optional(),
 };
 
 const HealthOutput = {
@@ -526,97 +651,273 @@ const HealthOutput = {
   pool: MetaShape.optional(),
   telemetry: MetaShape.optional(),
   selfHealing: MetaShape.optional(),
+  research: MetaShape.optional(),
   config: MetaShape.optional(),
+  error: ErrorInfoShape.optional(),
+};
+
+const ProjectMemoryOutput = {
+  project: MetaShape.optional(),
+  projects: z.array(MetaShape).optional(),
+  index: MetaShape.optional(),
+  visualization: MetaShape.optional(),
+  forget: MetaShape.optional(),
+  session: MetaShape.optional(),
+  record: MetaShape.optional(),
+  assertion: MetaShape.optional(),
+  entity: MetaShape.optional(),
+  entities: z.array(MetaShape).optional(),
+  memory: z.string().optional(),
+  memory_handle: z.string().optional(),
+  plans: z.array(MetaShape).optional(),
+  experiments: z.array(MetaShape).optional(),
+  decisions: z.array(MetaShape).optional(),
+  assertion_count: z.number().optional(),
+  correction_count: z.number().optional(),
+  entity_count: z.number().optional(),
+  entity_operation_count: z.number().optional(),
+  job_counts: MetaShape.optional(),
+  session_count: z.number().optional(),
+  search_event_count: z.number().optional(),
+  document_count: z.number().optional(),
+  citation_observation_count: z.number().optional(),
+  source_entry_count: z.number().optional(),
+  active_source_snapshot: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };
 
 server.registerTool('search', {
   title: 'Google Search',
   description:
-    'Single Google search via browser, SearchApi primary, or browser-to-SearchApi fallback. ' +
-    'Returns title, URL, and snippet. Results are cached 24h. ' +
-    'For latest/today/breaking queries set SURF_CACHE_TTL_SEARCH_MS=0 to bypass the cache. ' +
-    'Browser is the default provider and requires no API key. Default limit 10, max 20.',
+    'Default entry point for web, paper, and repository discovery. ' +
+    'Use extract_mode=abstract for bounded inspection and full only for complete text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
+    'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
+    'Captured search, source, session, and project provenance form data lineage; extracted bodies become evidence while unread hits remain metadata. ' +
+    'include_project_ids adds read-only cross-project retrieval through versioned ontology and verified schema/entity links without merging records. ' +
+    'Browser search is the no-key default and SearchApi is the configured primary or fallback provider. Results are cached for 24h unless the TTL is disabled.',
   inputSchema: SearchInput,
   outputSchema: SearchOutput,
-  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-}, async (args: { query: string; limit: number }) => {
-  const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
-  if (provider.error) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${provider.error}` }], isError: true };
-  }
-  return await searchTool(args, buildDeps(), provider);
+  annotations: { readOnlyHint: !baseDeps.config.researchEnabled, idempotentHint: false, openWorldHint: true },
+}, async (args: {
+  query: string;
+  limit: number;
+  project_id?: string;
+  include_project_ids?: string[];
+  memory_handle?: string;
+} & SessionMemoryArgs & SearchExtractionInput) => {
+  const runLive = async (requestedLimit = args.limit) => {
+    const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
+    if (provider.error) {
+      return formatToolResponse(null, {
+        code: 'PROFILE_MISSING', message: provider.error, retryable: false,
+      });
+    }
+    const deps = buildDeps();
+    const request = { ...args, limit: requestedLimit };
+    const result = await searchTool(request, deps, provider);
+    return await applySearchExtraction(result, request, deps);
+  };
+  return baseDeps.config.researchEnabled
+    ? await runSearchWithResearch({
+      ...args,
+      retrieval_mode: baseDeps.config.researchRetrievalMode,
+    }, researchService, runLive)
+    : await runLive();
 });
 
 server.registerTool('scholar_search', {
   title: 'Google Scholar Search',
   description:
-    'Search Google Scholar via browser, SearchApi primary, or fallback. ' +
-    'Returns title, authors, publication, year, snippet, ' +
-    'citation count, related/version links, and an available full-text link. ' +
+    'Use only for paper metadata such as authors, venue, year, versions, and citation counts. ' +
+    'Do not use it to discover or read paper content; use search with extract_mode instead. ' +
+    'Returns title, authors, publication, year, snippet, citation count, related/version links, and an available full-text link. ' +
+    'With research enabled, metadata and citation observations retain provider provenance and research_context exposes related prior searches. ' +
+    'Google Scholar uses browser search, SearchApi primary, or configured fallback. ' +
     'Results are cached with the same TTL as search. Max 10 papers per call.',
   inputSchema: ScholarSearchInput,
   outputSchema: ScholarSearchOutput,
-  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-}, async (args: { query: string; limit: number }) => {
+  annotations: { readOnlyHint: !baseDeps.config.researchEnabled, idempotentHint: false, openWorldHint: true },
+}, async (args: {
+  query: string;
+  limit: number;
+  project_id?: string;
+  memory_handle?: string;
+} & SessionMemoryArgs) => {
   const provider = await prepareSearchProvider(baseDeps.config.scholarProvider);
   if (provider.error) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${provider.error}` }], isError: true };
+    return formatToolResponse(null, {
+      code: 'PROFILE_MISSING', message: provider.error, retryable: false,
+    });
   }
-  return await scholarSearchTool(args, buildDeps(), provider);
+  const result = await scholarSearchTool(args, buildDeps(), provider);
+  return baseDeps.config.researchEnabled
+    ? await captureOnly(researchService, 'scholar_search', args, result)
+    : result;
 });
 
 server.registerTool('search_parallel', {
   title: 'Google Search Parallel',
   description:
-    'Run 2-10 Google searches with the provider selected by SURF_SEARCH_PROVIDER. ' +
-    'Browser mode uses a worker pool. SearchApi primary and fallback work in cloud mode. ' +
-    'Per-query browser failures are isolated and replaced individually in fallback mode.',
+    'Use for 2-10 independent web queries known in advance. ' +
+    'extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
+    'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
+    'Extracted bodies become evidence while unread hits remain metadata. ' +
+    'Native Chrome serializes profile use; the Playwright compatibility path uses a worker pool. ' +
+    'SearchApi fallback replaces failed queries individually.',
   inputSchema: SearchParallelInput,
   outputSchema: SearchParallelOutput,
-  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-}, async (args: { queries: string[]; limit: number }) => {
-  const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
-  if (provider.error) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${provider.error}` }], isError: true };
-  }
-  return await searchParallelTool(args, buildDeps(), provider);
+  annotations: { readOnlyHint: !baseDeps.config.researchEnabled, idempotentHint: false, openWorldHint: true },
+}, async (args: {
+  queries: string[];
+  limit: number;
+  project_id?: string;
+  include_project_ids?: string[];
+  memory_handle?: string;
+} & SessionMemoryArgs & SearchExtractionInput) => {
+  const runLive = async (requestedLimit = args.limit) => {
+    const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
+    if (provider.error) {
+      return formatToolResponse(null, {
+        code: 'PROFILE_MISSING', message: provider.error, retryable: false,
+      });
+    }
+    const deps = buildDeps();
+    const request = { ...args, limit: requestedLimit };
+    const result = await searchParallelTool(request, deps, provider);
+    return await applyParallelSearchExtraction(result, request, deps);
+  };
+  return baseDeps.config.researchEnabled
+    ? await runParallelWithResearch({
+      ...args,
+      retrieval_mode: baseDeps.config.researchRetrievalMode,
+    }, researchService, runLive)
+    : await runLive();
 });
 
 server.registerTool('extract', {
   title: 'Extract Article Content',
   description:
-    'Fetch one public URL -> clean article text. ' +
+    'Use when the exact URL is already known. Fetch one public URL and return clean article text. ' +
+    'For GitHub repository URLs, metadata reads the README; abstract and full use the same bounded download gate and differ only in indexed source depth. ' +
     'HTML via Mozilla Readability; academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) auto-detected via Content-Type, %PDF magic, citation_pdf_url meta, and per-domain URL rules. ' +
-    'Tiered depth: `mode="abstract"` returns ~1500 chars (PDF page 1 or HTML meta description) -- cheap survey to triage relevance before paying for full body. `mode="full"` (default) returns the whole article. ' +
+    'Tiered depth: `mode="metadata"` returns document metadata without body text, `mode="abstract"` returns about 1500 chars for relevance checks, and `mode="full"` returns up to the configured 50000 chars. ' +
+    'PDF and landing-page metadata are merged when available. With research enabled, abstract and full PDF reads are stored as searchable evidence with bibliographic metadata and provenance. ' +
     'Best-effort: failures return an errorInfo instead of throwing.',
   inputSchema: ExtractInput,
   outputSchema: ExtractOutput,
-  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-}, async (args: { url: string; max_chars: number; mode: 'full' | 'abstract' | 'metadata' }) => {
+  annotations: { readOnlyHint: !baseDeps.config.researchEnabled, idempotentHint: false, openWorldHint: true },
+}, async (args: {
+  url: string;
+  max_chars?: number;
+  mode: 'full' | 'abstract' | 'metadata';
+  project_id?: string;
+  memory_handle?: string;
+} & SessionMemoryArgs) => {
+  const prepared = baseDeps.config.researchEnabled
+    ? await researchService.prepareRepositoryResults(
+      args.project_id,
+      args.mode === 'metadata' ? 'none' : args.mode,
+      [{ title: args.url, url: args.url }],
+    ).catch(() => undefined)
+    : undefined;
+  const repositoryRow = prepared?.rows[0];
+  const repositoryContent = repositoryRow?.content;
+  if (prepared?.decisions.length && repositoryRow && repositoryContent) {
+    const result = formatToolResponse({
+      url: repositoryRow.url,
+      title: repositoryRow.title,
+      content: repositoryContent,
+      excerpt: repositoryContent.slice(0, 200),
+      length: repositoryContent.length,
+      is_pdf: false,
+      extraction_quality: repositoryRow.extraction_quality ?? 'abstract',
+      meta: { repository_ingest: prepared.decisions },
+    });
+    return await captureOnly(researchService, 'extract', args, result);
+  }
   const ready = await ensureProfileReady();
   if (!ready.ok) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${ready.message}` }], isError: true };
+    return formatToolResponse(null, {
+      code: 'PROFILE_MISSING', message: ready.message, retryable: false,
+    });
   }
-  return await extractTool(args, buildDeps());
+  let result = await extractTool(args, buildDeps());
+  if (prepared?.decisions.length && !result.isError && result.structuredContent) {
+    const row = result.structuredContent;
+    const meta = row.meta && typeof row.meta === 'object'
+      ? row.meta as Record<string, unknown>
+      : {};
+    result = formatToolResponse({
+      ...row,
+      meta: { ...meta, repository_ingest: prepared.decisions },
+    });
+  }
+  return baseDeps.config.researchEnabled
+    ? await captureOnly(researchService, 'extract', args, result)
+    : result;
 });
 
-server.registerTool('search_extract', {
-  title: 'Search + Parallel Extract',
+if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
+  title: 'Project Memory',
   description:
-    'One-shot Google search + parallel extract of the top results. ' +
-    'Default `mode="abstract"` returns SERP enriched with ~1500-char abstracts per result -- a cheap survey of what the top results actually contain, far fewer tokens than fetching all bodies. ' +
-    'Switch to `mode="full"` only when you need the actual article texts (slower, much more tokens). ' +
-    'Per-page extract failures are isolated. Disabled in cloud mode.',
-  inputSchema: SearchExtractInput,
-  outputSchema: SearchExtractOutput,
-  annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: true },
-}, async (args: { query: string; limit: number; max_chars?: number; mode: 'full' | 'abstract' }) => {
-  const ready = await ensureProfileReady();
-  if (!ready.ok) {
-    return { content: [{ type: 'text', text: `Error [PROFILE_MISSING]: ${ready.message}` }], isError: true };
-  }
-  return await searchExtractTool(args, buildDeps());
+    'Management tool for durable project knowledge, not content discovery. ' +
+    'create and show manage projects; record stores session intent, immutable plan revisions, experiments, decisions, versioned ontology entity types or relations, and evidence-preserving corrections. ' +
+    'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
+    'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
+    'forget previews impact before reversible project or assertion deletion. ' +
+    'Search, search_parallel, scholar_search, and extract automatically capture sources and provenance; project_memory manages their durable structure.',
+  inputSchema: {
+    action: z.enum(['create', 'show', 'record', 'rebuild', 'export', 'forget']).describe(
+      'create: project_id and name required. show: project_id optional; target_id or name narrows inspection. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
+    ),
+    project_id: z.string().min(1).max(64).optional().describe('Stable project id. Omit to list projects or export all projects.'),
+    include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional projects included in one integrated visualization export.'),
+    all_projects: z.boolean().optional().describe('Embed every active named project and an All projects option in one export. Excludes Inbox and cannot be combined with project ids.'),
+    export_format: z.enum(['dot', 'd3', 'html', 'neo4j']).default('d3').describe('Visualization file format. html writes one offline explorer with PKM, Lineage, Ontology, project selection, and current-view PNG or anonymized JSON download; d3 writes node-link JSON; dot writes Graphviz DOT; neo4j writes an import-ready CSV and Cypher bundle.'),
+    export_view: z.enum(['graph', 'ontology', 'lineage']).default('graph').describe('Initial HTML tab or non-HTML export scope. graph is PKM; ontology shows types, shared schema, verified identity links, and typed instances; lineage shows aligned data and research lineage.'),
+    name: z.string().min(1).max(120).optional().describe('Project name for create, or entity name lookup for show.'),
+    record_type: z.enum(['session', 'plan', 'experiment', 'decision', 'ontology', 'correction']).optional().describe(
+      'Required for record. session stores intent; plan creates an immutable revision; experiment starts or finishes a run; decision links a conclusion; ontology creates a versioned type or relation; correction replaces an assertion or merges/splits entities.',
+    ),
+    memory_handle: z.string().uuid().optional().describe('Existing project session handle for a session intent revision.'),
+    intent: z.string().min(1).max(2_000).optional().describe('Durable intent for record_type=session.'),
+    title: z.string().min(1).max(200).optional().describe('Plan title, experiment name, or decision title.'),
+    body: z.string().min(1).max(50_000).optional().describe('Plan body for record_type=plan.'),
+    change_reason: z.string().min(1).max(2_000).optional().describe('Reason for a new plan revision.'),
+    based_on_experiment_id: z.string().optional().describe('Experiment that motivated a plan revision.'),
+    experiment_id: z.string().optional().describe('Experiment to finish or associate with a decision.'),
+    hypothesis: z.string().min(1).max(5_000).optional().describe('Hypothesis when starting an experiment.'),
+    plan_revision_id: z.string().optional().describe('Plan revision associated with an experiment or decision.'),
+    status: z.enum(['running', 'success', 'failed', 'inconclusive']).optional().describe('Use success, failed, or inconclusive to finish an experiment. Omit or use running when starting it.'),
+    summary: z.string().min(1).max(10_000).optional().describe('Experiment result or decision summary.'),
+    metrics: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional().describe('Terminal experiment metrics.'),
+    artifacts: z.array(z.string().max(2_000)).max(100).optional().describe('Experiment artifact paths or identifiers.'),
+    roots: z.array(z.object({
+      label: z.string().min(1).max(32),
+      path: z.string().min(1).max(2_000),
+    })).min(1).max(8).optional().describe('Approved local roots to index. Omit to rebuild derived state from stored sources.'),
+    git_root: z.string().min(1).max(2_000).optional().describe('Optional Git root recorded with a rebuild snapshot.'),
+    forget_mode: z.enum(['preview', 'apply', 'restore']).optional().describe('Preview first. Apply requires its confirm_token. Restore reverses deletion.'),
+    confirm_token: z.string().length(16).optional().describe('Token returned by the matching forget preview.'),
+    target_id: z.string().min(1).max(200).optional().describe('Assertion or entity id for show or correction.'),
+    replacement: z.union([z.string().max(2_000), z.number(), z.boolean(), z.null()]).optional().describe('New assertion value, or new entity name for entity_split.'),
+    correction_kind: z.enum(['assertion', 'entity_merge', 'entity_split']).optional().describe('Correction operation. Defaults to assertion.'),
+    source_ids: z.array(z.string().min(1).max(200)).min(1).max(50).optional().describe('Entity ids merged into target_id by entity_merge.'),
+    aliases: z.array(z.string().min(1).max(2_000)).min(1).max(50).optional().describe('Ontology term aliases, or aliases moved during entity_split.'),
+    ontology_kind: z.enum(['entity_type', 'relation']).optional().describe('Ontology term kind for record_type=ontology.'),
+    version: z.number().int().min(1).optional().describe('Ontology revision number. Defaults to 1 or the superseded term version plus one.'),
+    supersedes_term_id: z.string().min(1).max(200).optional().describe('Prior ontology term replaced by this revision.'),
+    reason: z.string().min(1).max(2_000).optional().describe('Required reason for any correction.'),
+    evidence_ids: z.array(z.string().min(1).max(200)).max(50).optional().describe('Evidence retained on a corrected assertion.'),
+    valid_from: z.iso.datetime().optional().describe('Corrected assertion valid-time start.'),
+    valid_to: z.iso.datetime().optional().describe('Corrected assertion valid-time end.'),
+  },
+  outputSchema: ProjectMemoryOutput,
+  annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
+}, async (args: ProjectMemoryInput) => {
+  return await projectMemoryTool(args, researchService);
 });
 
 server.registerTool('health', {
@@ -629,7 +930,12 @@ server.registerTool('health', {
   outputSchema: HealthOutput,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 }, async () => {
-  return await healthTool(buildDeps());
+  const result = await healthTool(buildDeps());
+  if (result.isError || !result.structuredContent) return result;
+  return formatToolResponse({
+    ...result.structuredContent,
+    research: researchService.status(),
+  });
 });
 
 const transport = new StdioServerTransport();
@@ -638,6 +944,7 @@ console.error(`[${NAME}@${VERSION}] running on stdio`);
 
 if (
   !baseDeps.config.cloudMode
+  && !nativeBrowser
   && (baseDeps.config.searchProvider !== 'searchapi' || baseDeps.config.scholarProvider !== 'searchapi')
 ) {
   (async () => {

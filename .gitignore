@@ -1,6 +1,8 @@
 node_modules/
+.cache/
 build/
 build-scripts/
+docs/
 chrome-profiles/
 .tools/
 *.log

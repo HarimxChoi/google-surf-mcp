@@ -3,9 +3,9 @@
   "manifest_version": "0.4",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "0.8.0",
-  "description": "Google and Google Scholar search with browser and optional SearchApi providers.",
-  "long_description": "Google and Google Scholar search with page extraction. Browser mode uses a warm Chrome profile and requires no API key. SearchApi can be configured as the primary provider or as fallback for browser errors, CAPTCHA, rate limits, profile failure, and parser degradation.",
+  "version": "0.9.5",
+  "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
+  "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Research mode is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
   "author": {
     "name": "harimxchoi",
     "url": "https://github.com/HarimxChoi"
@@ -23,6 +23,9 @@
     "google-search",
     "google-scholar",
     "academic-search",
+    "codebase-search",
+    "graph-rag",
+    "rag",
     "search",
     "web-search",
     "serp",
@@ -37,14 +40,23 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@0.8.0"
+        "google-surf-mcp@0.9.5"
       ],
       "env": {
         "SEARCH_API": "${user_config.search_api_key}",
         "SURF_SEARCH_PROVIDER": "${user_config.search_provider}",
         "SURF_SCHOLAR_PROVIDER": "${user_config.scholar_provider}",
+        "SURF_BROWSER_ENGINE": "${user_config.browser_engine}",
         "CHROME_PATH": "${user_config.chrome_path}",
         "SURF_PROFILE_ROOT": "${user_config.profile_root}",
+        "SURF_RESEARCH": "${user_config.research}",
+        "SURF_RETRIEVAL_MODE": "${user_config.retrieval_mode}",
+        "SURF_RESEARCH_ROOT": "${user_config.research_root}",
+        "SURF_RESEARCH_VECTOR_MODEL": "${user_config.research_vector_model}",
+        "SURF_RESEARCH_REPO_AUTO": "${user_config.research_repo_auto}",
+        "SURF_RESEARCH_REPO_AUTO_MAX_MB": "${user_config.research_repo_auto_max_mb}",
+        "SURF_RESEARCH_REPO_AUTO_MAX_FILES": "${user_config.research_repo_auto_max_files}",
+        "GITHUB_TOKEN": "${user_config.github_token}",
         "SURF_LOCALE": "${user_config.locale}",
         "SURF_TZ": "${user_config.timezone}",
         "SURF_HEADLESS": "${user_config.headless}",
@@ -60,23 +72,23 @@
   "tools": [
     {
       "name": "search",
-      "description": "Single Google search via browser, SearchApi primary, or browser-to-SearchApi fallback. Returns title, URL, and snippet."
+      "description": "Default web, paper, and repository discovery with optional extraction, graph hybrid RAG, prior-search context, data lineage, and ontology-linked cross-project retrieval."
     },
     {
       "name": "scholar_search",
-      "description": "Google Scholar search via browser, SearchApi primary, or fallback. Returns paper metadata, citations, links, and available full text."
+      "description": "Paper metadata only: authors, venue, year, versions, citations, provider provenance, and related prior-search context."
     },
     {
       "name": "search_parallel",
-      "description": "Run 2-10 Google searches using the provider selected by SURF_SEARCH_PROVIDER. SearchApi works in cloud mode."
+      "description": "Run 2-10 independent discovery queries with one extraction budget and optional graph hybrid RAG, lineage, ontology, and schema linking."
     },
     {
       "name": "extract",
-      "description": "Fetch one public URL -> clean article text via Mozilla Readability. Best-effort; failures return errorInfo instead of throwing."
+      "description": "Read one known page, paper, PDF, or repository URL and optionally store it as provenance-linked searchable evidence."
     },
     {
-      "name": "search_extract",
-      "description": "Google search + parallel extract of top results -- SERP enriched with article text. Slower (~5-15s) and far more tokens than search alone. Disabled in cloud mode."
+      "name": "project_memory",
+      "description": "Manage sessions, immutable plans, experiments, decisions, versioned ontology, bitemporal data lineage corrections, entity merge/split, rebuilds, interactive HTML/DOT/D3/Neo4j export, and reversible deletion."
     },
     {
       "name": "health",
@@ -105,6 +117,13 @@
       "default": "browser",
       "required": false
     },
+    "browser_engine": {
+      "type": "string",
+      "title": "Browser engine",
+      "description": "auto, native, or playwright. Auto uses native system Chrome on local desktops.",
+      "default": "auto",
+      "required": false
+    },
     "chrome_path": {
       "type": "file",
       "title": "Chrome binary path",
@@ -115,6 +134,61 @@
       "type": "directory",
       "title": "Profile directory",
       "description": "Directory for the warm Chrome profile. Defaults to ~/.google-surf-mcp.",
+      "required": false
+    },
+    "research": {
+      "type": "boolean",
+      "title": "Local research memory",
+      "description": "Enable local project memory, capture, indexing, and project_memory.",
+      "default": true,
+      "required": false
+    },
+    "retrieval_mode": {
+      "type": "string",
+      "title": "Research retrieval mode",
+      "description": "live uses the web provider only. hybrid combines live and project retrieval.",
+      "default": "hybrid",
+      "required": false
+    },
+    "research_root": {
+      "type": "directory",
+      "title": "Research data directory",
+      "description": "Embedded SurrealDB data directory. Defaults to <profile>/research.",
+      "required": false
+    },
+    "research_vector_model": {
+      "type": "string",
+      "title": "Research vector model",
+      "description": "Local Hugging Face model for HNSW retrieval and shared reranking. Use off to disable.",
+      "default": "Xenova/multilingual-e5-small",
+      "required": false
+    },
+    "research_repo_auto": {
+      "type": "boolean",
+      "title": "Automatic repository indexing",
+      "description": "Sparse-index at most one eligible small GitHub repository per search call.",
+      "default": true,
+      "required": false
+    },
+    "research_repo_auto_max_mb": {
+      "type": "number",
+      "title": "Repository source size limit",
+      "description": "Maximum searchable source-text size in MB. Assets are excluded.",
+      "default": 20,
+      "required": false
+    },
+    "research_repo_auto_max_files": {
+      "type": "number",
+      "title": "Repository source file limit",
+      "description": "Maximum searchable source file count for automatic indexing.",
+      "default": 2000,
+      "required": false
+    },
+    "github_token": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "Optional token that raises GitHub API limits for repository inspection.",
+      "sensitive": true,
       "required": false
     },
     "locale": {
@@ -133,7 +207,7 @@
     "headless": {
       "type": "boolean",
       "title": "Headless",
-      "description": "Run Chrome headless. CAPTCHA recovery always runs visible regardless.",
+      "description": "Controls Playwright extraction, compatibility, and recovery paths. Native search uses minimized system Chrome.",
       "default": true,
       "required": false
     },
@@ -179,7 +253,7 @@
       "linux"
     ],
     "runtimes": {
-      "node": ">=18.0.0"
+      "node": ">=20.18.1"
     }
   }
 }

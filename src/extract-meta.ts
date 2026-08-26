@@ -8,6 +8,26 @@ const ABSTRACT_SOURCES: ReadonlyArray<{ id: string; attr: 'name' | 'property'; v
 const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
 const META_TAG_RE = /<meta\s+([^>]+?)\s*\/?>/gi;
 const CONTENT_ATTR_RE = /\bcontent\s*=\s*["']([^"']*)["']/i;
+const CANONICAL_RE = /<link\s+([^>]*\brel\s*=\s*["'][^"']*\bcanonical\b[^"']*["'][^>]*)>/i;
+const HREF_ATTR_RE = /\bhref\s*=\s*["']([^"']*)["']/i;
+
+export interface DocumentMetadata {
+  title?: string;
+  authors?: string;
+  publication?: string;
+  published_at?: string;
+  year?: number;
+  doi?: string;
+  description?: string;
+  keywords?: string[];
+  canonical_url?: string;
+  language?: string;
+  subject?: string;
+  creator?: string;
+  producer?: string;
+  created_at?: string;
+  modified_at?: string;
+}
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -24,6 +44,46 @@ function findMetaContent(html: string, attr: string, value: string): string | nu
     if (cm) return cm[1];
   }
   return null;
+}
+
+function findMetaContents(html: string, attr: string, value: string): string[] {
+  const target = new RegExp(`\\b${escapeRegex(attr)}\\s*=\\s*["']${escapeRegex(value)}["']`, 'i');
+  const values: string[] = [];
+  META_TAG_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = META_TAG_RE.exec(html)) !== null) {
+    if (!target.test(match[1])) continue;
+    const content = match[1].match(CONTENT_ATTR_RE)?.[1];
+    if (content?.trim()) values.push(decodeEntities(content.trim()));
+  }
+  return values;
+}
+
+function firstMeta(html: string, candidates: Array<[string, string]>): string | undefined {
+  for (const [attr, value] of candidates) {
+    const content = findMetaContent(html, attr, value);
+    if (content?.trim()) return decodeEntities(content.trim());
+  }
+  return undefined;
+}
+
+function normalizeDoi(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const doi = value.trim()
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
+    .replace(/^doi:\s*/i, '');
+  return /^10\.\d{4,9}\/\S+$/i.test(doi) ? doi : undefined;
+}
+
+function metadataYear(value: string | undefined): number | undefined {
+  const year = value?.match(/(?:^|\D)((?:19|20)\d{2})(?:\D|$)/)?.[1];
+  return year ? Number(year) : undefined;
+}
+
+function canonicalUrl(html: string, baseUrl: string): string | undefined {
+  const href = html.match(CANONICAL_RE)?.[1].match(HREF_ATTR_RE)?.[1];
+  if (!href) return undefined;
+  try { return new URL(decodeEntities(href), baseUrl).href; } catch { return undefined; }
 }
 
 export function findCitationPdfUrl(html: string, baseUrl: string): string | null {
@@ -52,6 +112,62 @@ export function findTitle(html: string): string | undefined {
   if (og) return decodeEntities(og);
   const t = html.match(TITLE_RE);
   return t ? decodeEntities(t[1].trim()) : undefined;
+}
+
+export function findDocumentMetadata(html: string, baseUrl: string): DocumentMetadata {
+  const citationAuthors = findMetaContents(html, 'name', 'citation_author');
+  const fallbackAuthor = firstMeta(html, [
+    ['name', 'dc.creator'],
+    ['name', 'author'],
+  ]);
+  const authors = [...new Set(citationAuthors.length ? citationAuthors : fallbackAuthor ? [fallbackAuthor] : [])];
+  const publication = firstMeta(html, [
+    ['name', 'citation_journal_title'],
+    ['name', 'citation_conference_title'],
+    ['property', 'og:site_name'],
+  ]);
+  const publishedAt = firstMeta(html, [
+    ['name', 'citation_publication_date'],
+    ['name', 'citation_date'],
+    ['property', 'article:published_time'],
+    ['name', 'dc.date'],
+  ]);
+  const rawDoi = firstMeta(html, [
+    ['name', 'citation_doi'],
+    ['name', 'dc.identifier'],
+  ]);
+  const keywordValues = [
+    ...findMetaContents(html, 'name', 'citation_keywords'),
+    ...findMetaContents(html, 'name', 'keywords'),
+    ...findMetaContents(html, 'property', 'article:tag'),
+  ];
+  const keywords = [...new Set(keywordValues.flatMap((value) => value
+    .split(/[,;]/)
+    .map((part) => part.trim())
+    .filter(Boolean)))];
+  const description = findAbstractFromMeta(html, 1)?.content.trim();
+  const modifiedAt = firstMeta(html, [['property', 'article:modified_time']]);
+  const language = firstMeta(html, [
+    ['name', 'citation_language'],
+    ['property', 'og:locale'],
+  ]);
+  const title = findTitle(html);
+  const year = metadataYear(publishedAt);
+  const doi = normalizeDoi(rawDoi);
+  const canonical = canonicalUrl(html, baseUrl);
+  return {
+    ...(title ? { title } : {}),
+    ...(authors.length ? { authors: authors.join(', ') } : {}),
+    ...(publication ? { publication } : {}),
+    ...(publishedAt ? { published_at: publishedAt } : {}),
+    ...(year !== undefined ? { year } : {}),
+    ...(doi ? { doi } : {}),
+    ...(description ? { description: decodeEntities(description) } : {}),
+    ...(keywords.length ? { keywords } : {}),
+    ...(canonical ? { canonical_url: canonical } : {}),
+    ...(language ? { language } : {}),
+    ...(modifiedAt ? { modified_at: modifiedAt } : {}),
+  };
 }
 
 export function domainPdfTransform(url: string): string | null {

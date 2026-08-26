@@ -2,13 +2,15 @@ import { createRequire } from 'node:module';
 import { lookup } from 'node:dns/promises';
 import type { BrowserContext, Page } from 'playwright';
 import TurndownService from 'turndown';
+import { Agent } from 'undici';
 import { fenceUntrustedContent } from './response.js';
 import {
   isPdfMagic, isPdfContentType, extractPdfTiered, type PdfMode,
 } from './extract-pdf.js';
 import {
-  findCitationPdfUrl, findAbstractFromMeta, findTitle,
-  domainPdfTransform, findPmcUrlFromPubmed,
+  findCitationPdfUrl, findAbstractFromMeta,
+  domainPdfTransform, findDocumentMetadata, findPmcUrlFromPubmed,
+  type DocumentMetadata,
 } from './extract-meta.js';
 
 const require = createRequire(import.meta.url);
@@ -25,9 +27,8 @@ turndown.remove(['script', 'style', 'iframe', 'noscript']);
 export type ExtractMode = 'full' | 'abstract' | 'metadata';
 export type ExtractionQuality = 'full_text' | 'abstract' | 'meta_abstract' | 'metadata_only';
 
-export interface ExtractResult {
+export interface ExtractResult extends DocumentMetadata {
   url: string;
-  title?: string;
   content?: string;
   excerpt?: string;
   length?: number;
@@ -82,13 +83,30 @@ export function checkUrl(url: string): string | null {
   return null;
 }
 
-const dnsCache = new Map<string, { addr: string; expiresAt: number }>();
-
 function isPrivateAddress(addr: string): boolean {
-  const fakeUrl = `http://${addr}`;
+  const normalized = addr.toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized.startsWith('::ffff:')) return isPrivateAddress(normalized.slice(7));
+  if (normalized === '::' || normalized === '::1') return true;
+  if (/^(?:fc|fd|fe[89ab])/.test(normalized)) return true;
+  const fakeUrl = `http://${normalized}`;
   if (PRIVATE_PATTERNS.some((r) => r.test(fakeUrl))) return true;
-  if (PRIVATE_HOSTS.has(addr.toLowerCase())) return true;
+  if (PRIVATE_HOSTS.has(normalized)) return true;
   return false;
+}
+
+interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+async function resolvePublicAddress(url: string): Promise<ResolvedAddress> {
+  const host = new URL(url).hostname.toLowerCase();
+  const addresses = await lookup(host, { all: true, verbatim: true });
+  if (!addresses.length) throw new Error('dns resolution returned no addresses');
+  if (addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error('resolved to private address');
+  }
+  return addresses[0] as ResolvedAddress;
 }
 
 export async function checkUrlAsync(url: string): Promise<string | null> {
@@ -97,21 +115,11 @@ export async function checkUrlAsync(url: string): Promise<string | null> {
 
   if (process.env.SURF_ALLOW_PRIVATE === 'true') return null;
 
-  let host: string;
-  try { host = new URL(url).hostname.toLowerCase(); } catch { return 'invalid url'; }
-
-  const cached = dnsCache.get(host);
-  if (cached && cached.expiresAt > Date.now()) {
-    return isPrivateAddress(cached.addr) ? 'resolved to private address' : null;
-  }
-
   try {
-    const { address } = await lookup(host);
-    dnsCache.set(host, { addr: address, expiresAt: Date.now() + 5 * 60_000 });
-    if (isPrivateAddress(address)) return 'resolved to private address';
+    await resolvePublicAddress(url);
     return null;
   } catch {
-    return null;
+    return 'dns resolution failed or returned a private address';
   }
 }
 
@@ -128,6 +136,11 @@ const MAX_FETCH_BYTES = 25 * 1024 * 1024;
 const UA = 'Mozilla/5.0 (compatible; google-surf-mcp)';
 
 interface FetchResp { status: number; ct: string; buf: Buffer; finalUrl: string }
+
+interface DiscoveryResult {
+  result: ExtractResult | null;
+  metadata?: DocumentMetadata;
+}
 
 async function readBounded(r: Response): Promise<Buffer> {
   if (!r.body) return Buffer.from(await r.arrayBuffer());
@@ -163,19 +176,34 @@ async function plainFetch(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<Fe
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       const ssrfErr = await checkUrlAsync(currentUrl);
       if (ssrfErr) throw new SsrfBlockedError(ssrfErr, currentUrl);
+      const resolved = process.env.SURF_ALLOW_PRIVATE === 'true'
+        ? undefined
+        : await resolvePublicAddress(currentUrl);
+      const dispatcher = resolved ? new Agent({
+        connect: {
+          lookup: (_hostname, _options, callback) => {
+            if (_options.all) callback(null, [resolved]);
+            else callback(null, resolved.address, resolved.family);
+          },
+        },
+      }) : undefined;
       let r: Response;
       try {
         r = await fetch(currentUrl, {
           redirect: 'manual',
           headers: { 'user-agent': UA },
           signal: ctrl.signal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit & { dispatcher?: Agent });
       } catch {
+        await dispatcher?.close().catch(() => {});
         return null;
       }
       if (r.status >= 300 && r.status < 400) {
         const loc = r.headers.get('location');
         if (loc) {
+          await r.body?.cancel().catch(() => {});
+          await dispatcher?.close().catch(() => {});
           try { currentUrl = new URL(loc, currentUrl).href; }
           catch { return null; }
           continue;
@@ -184,6 +212,7 @@ async function plainFetch(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<Fe
       let buf: Buffer;
       try { buf = await readBounded(r); }
       catch { return null; }
+      finally { await dispatcher?.close().catch(() => {}); }
       return {
         status: r.status,
         ct: r.headers.get('content-type') || '',
@@ -208,37 +237,22 @@ async function discoverViaFetch(
   url: string,
   mode: ExtractMode,
   maxChars: number,
-): Promise<ExtractResult | null> {
+): Promise<DiscoveryResult> {
   const r = await plainFetch(url);
-  if (!r) return null;
-  if (r.status >= 400) return null;
+  if (!r || r.status >= 400) return { result: null };
 
   if (isPdfContentType(r.ct) || isPdfMagic(r.buf)) {
     try {
       const out = await extractPdfTiered(new Uint8Array(r.buf), mode as PdfMode, maxChars);
-      return { url: r.finalUrl, ...out };
+      return { result: { url: r.finalUrl, ...out } };
     } catch (e) {
-      return { url: r.finalUrl, error: `pdf parse failed: ${(e as Error).message.slice(0, 120)}` };
+      return { result: { url: r.finalUrl, error: `pdf parse failed: ${(e as Error).message.slice(0, 120)}` } };
     }
   }
 
   const html = r.buf.toString('utf-8');
-  const title = findTitle(html);
-
-  if (mode === 'abstract') {
-    const meta = findAbstractFromMeta(html);
-    if (meta) {
-      const content = meta.content.slice(0, maxChars);
-      return {
-        url: r.finalUrl,
-        title,
-        content,
-        excerpt: content.slice(0, 200),
-        length: content.length,
-        extraction_quality: 'meta_abstract',
-      };
-    }
-  }
+  const metadata = findDocumentMetadata(html, r.finalUrl);
+  const metaAbstract = mode === 'abstract' ? findAbstractFromMeta(html) : null;
 
   const pdfCandidates: Array<string | null> = [
     findCitationPdfUrl(html, r.finalUrl),
@@ -250,7 +264,7 @@ async function discoverViaFetch(
     if (!pdf) continue;
     try {
       const out = await extractPdfTiered(pdf.buf, mode as PdfMode, maxChars);
-      return { url: pdf.finalUrl, title, ...out };
+      return { result: { url: pdf.finalUrl, ...out, ...metadata } };
     } catch {
       continue;
     }
@@ -267,26 +281,49 @@ async function discoverViaFetch(
         if (pdf) {
           try {
             const out = await extractPdfTiered(pdf.buf, mode as PdfMode, maxChars);
-            return { url: pdf.finalUrl, title, ...out };
+            const pmcMetadata = findDocumentMetadata(pmcHtml, pmcR.finalUrl);
+            return { result: { url: pdf.finalUrl, ...out, ...metadata, ...pmcMetadata } };
           } catch {}
         }
       }
     }
   }
 
-  return null;
+  if (metaAbstract) {
+    const content = metaAbstract.content.slice(0, maxChars);
+    return { result: {
+      url: r.finalUrl,
+      ...metadata,
+      content,
+      excerpt: content.slice(0, 200),
+      length: content.length,
+      extraction_quality: 'meta_abstract',
+    } };
+  }
+
+  if (mode === 'metadata') {
+    return { result: {
+      url: r.finalUrl,
+      ...metadata,
+      excerpt: metadata.description?.slice(0, 200),
+      is_pdf: false,
+      extraction_quality: 'metadata_only',
+    } };
+  }
+
+  return { result: null, metadata };
 }
 
 export async function extract(
   ctx: BrowserContext,
   url: string,
-  optsOrMaxChars: ExtractOptions | number = 8_000,
+  optsOrMaxChars: ExtractOptions | number = 50_000,
   legacyNavTimeoutMs?: number,
 ): Promise<ExtractResult> {
   const opts: ExtractOptions = typeof optsOrMaxChars === 'number'
     ? { maxChars: optsOrMaxChars, navTimeoutMs: legacyNavTimeoutMs }
     : optsOrMaxChars;
-  const maxChars = opts.maxChars ?? 8_000;
+  const maxChars = opts.maxChars ?? 50_000;
   const navTimeoutMs = opts.navTimeoutMs ?? 10_000;
   const fence = opts.fence ?? false;
   const mode: ExtractMode = opts.mode ?? 'full';
@@ -294,20 +331,21 @@ export async function extract(
   const checkErr = await checkUrlAsync(url);
   if (checkErr) return { url, error: checkErr };
 
-  let discovered: ExtractResult | null;
+  let discovery: DiscoveryResult;
   try {
-    discovered = await discoverViaFetch(url, mode, maxChars);
+    discovery = await discoverViaFetch(url, mode, maxChars);
   } catch (e) {
     if (e instanceof SsrfBlockedError) return { url, error: e.message };
     throw e;
   }
+  const discovered = discovery.result;
   if (discovered) {
     if (fence && discovered.content) {
       discovered.content = fenceUntrustedContent(discovered.content);
     }
     return discovered;
   }
-  if (mode === 'metadata') return { url };
+  if (mode === 'metadata') return { url, extraction_quality: 'metadata_only' };
 
   let page: Page | null = null;
   try {
@@ -347,7 +385,10 @@ export async function extract(
       const md = turndown.turndown(article.content).slice(0, maxChars);
       return {
         url,
-        title: article.title || undefined,
+        ...discovery.metadata,
+        title: discovery.metadata?.title || article.title || undefined,
+        authors: discovery.metadata?.authors || article.byline || undefined,
+        publication: discovery.metadata?.publication || article.siteName || undefined,
         content: fence ? fenceUntrustedContent(md) : md,
         excerpt: (article.excerpt || article.textContent || '').slice(0, 200).trim() || undefined,
         length: md.length,
@@ -370,7 +411,8 @@ export async function extract(
     const text = fallback.text.slice(0, maxChars);
     return {
       url,
-      title: fallback.title || undefined,
+      ...discovery.metadata,
+      title: discovery.metadata?.title || fallback.title || undefined,
       content: fence ? fenceUntrustedContent(text) : text,
       excerpt: text.slice(0, 200),
       length: text.length,

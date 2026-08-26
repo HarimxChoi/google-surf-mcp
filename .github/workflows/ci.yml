@@ -20,4 +20,9 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npx playwright install --with-deps chromium
+      - run: npm run check:prereg
+      - run: npm run build
+      - run: npx tsc -p tsconfig.scripts.json --noEmit
+      - run: npm run research:reopen-probe
+      - run: npm run smoke:mcp
       - run: npm test

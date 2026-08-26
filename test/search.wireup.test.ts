@@ -59,19 +59,19 @@ describe('wire-up: pickAndScoreResults', () => {
     expect(outcome.dropped).toBe(0);
   });
 
-  // Google serves ko by IP even when we ask for en-US. The organic result
-  // mentions 광고 as ordinary vocabulary; only the ad carries it as a label.
+  // Google serves Korean by IP even when we ask for en-US. The organic result
+  // uses the ad term as ordinary vocabulary; only the ad carries it as a label.
   const koSerp = `
     <!DOCTYPE html>
     <html lang="ko"><body>
       <div id="search">
         <div class="MjjYud">
-          <a href="https://ad.example.com/x"><h3>광고 · ad.example.com</h3></a>
-          <div class="VwiC3b">광고주가 제공한 설명이며 임계값을 넘길 만큼 깁니다.</div>
+          <a href="https://ad.example.com/x"><h3>\uAD11\uACE0 · ad.example.com</h3></a>
+          <div class="VwiC3b">This sponsored description is long enough to pass the threshold.</div>
         </div>
         <div class="MjjYud">
-          <a href="https://organic.example.com/y"><h3>광고 없는 무료 VPN 추천</h3></a>
-          <div class="VwiC3b">유기적 결과 스니펫이며 설명 임계값을 넘길 만큼 깁니다.</div>
+          <a href="https://organic.example.com/y"><h3>\uAD11\uACE0 \uC5C6\uB294 \uBB34\uB8CC VPN \uCD94\uCC9C</h3></a>
+          <div class="VwiC3b">This organic result description is long enough to pass the threshold.</div>
         </div>
       </div>
     </body></html>`;
@@ -83,10 +83,10 @@ describe('wire-up: pickAndScoreResults', () => {
     expect(outcome.dropped_reasons).toContain('sponsored');
   });
 
-  it('keeps an organic result that merely mentions 광고', async () => {
+  it('keeps an organic result that merely mentions the Korean ad term', async () => {
     await page.setContent(koSerp, { waitUntil: 'domcontentloaded' });
     const outcome = await pickAndScoreResults(page, 10, { locale: 'ko-KR' });
-    expect(outcome.results.map((r) => r.title)).toContain('광고 없는 무료 VPN 추천');
+    expect(outcome.results.map((r) => r.title)).toContain('\uAD11\uACE0 \uC5C6\uB294 \uBB34\uB8CC VPN \uCD94\uCC9C');
   });
 
   // The leader finds one result, the peer finds five: broken but never empty.

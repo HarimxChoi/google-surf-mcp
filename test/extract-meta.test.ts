@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  findCitationPdfUrl, findAbstractFromMeta, findTitle,
+  findCitationPdfUrl, findAbstractFromMeta, findDocumentMetadata, findTitle,
   domainPdfTransform, findPmcUrlFromPubmed,
 } from '../src/extract-meta.js';
 
@@ -81,6 +81,37 @@ describe('findTitle', () => {
 
   it('returns undefined when nothing matches', () => {
     expect(findTitle('<html></html>')).toBeUndefined();
+  });
+});
+
+describe('findDocumentMetadata', () => {
+  it('collects citation and page metadata', () => {
+    const html = `
+      <title>Fallback title</title>
+      <link rel="canonical" href="/papers/graph-rag">
+      <meta name="citation_title" content="Graph &amp; RAG">
+      <meta name="citation_author" content="Ada Lovelace">
+      <meta name="citation_author" content="Grace Hopper">
+      <meta name="citation_journal_title" content="Systems Journal">
+      <meta name="citation_publication_date" content="2026/08/26">
+      <meta name="citation_doi" content="https://doi.org/10.1234/example.7">
+      <meta name="citation_keywords" content="graphs; retrieval">
+      <meta name="description" content="A compact metadata description.">
+      <meta name="citation_language" content="en">
+    `;
+
+    expect(findDocumentMetadata(html, 'https://example.com/landing')).toEqual({
+      title: 'Graph & RAG',
+      authors: 'Ada Lovelace, Grace Hopper',
+      publication: 'Systems Journal',
+      published_at: '2026/08/26',
+      year: 2026,
+      doi: '10.1234/example.7',
+      description: 'A compact metadata description.',
+      keywords: ['graphs', 'retrieval'],
+      canonical_url: 'https://example.com/papers/graph-rag',
+      language: 'en',
+    });
   });
 });
 

@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.HarimxChoi/google-surf-mcp",
-  "description": "Google and Google Scholar search with browser and optional SearchApi providers.",
+  "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "repository": {
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "0.8.0",
+  "version": "0.9.5",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "0.8.0",
+      "version": "0.9.5",
       "transport": {
         "type": "stdio"
       },
@@ -36,6 +36,12 @@
           "format": "string"
         },
         {
+          "name": "SURF_BROWSER_ENGINE",
+          "description": "Browser engine: auto, native, or playwright. Auto uses native system Chrome on local desktops.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
           "name": "CHROME_PATH",
           "description": "Absolute path to the Chrome binary. Auto-detected on Windows/macOS/Linux when omitted.",
           "isRequired": false,
@@ -45,6 +51,55 @@
           "name": "SURF_PROFILE_ROOT",
           "description": "Directory for the warm Chrome profile. Defaults to ~/.google-surf-mcp.",
           "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH",
+          "description": "Enable local project memory and hybrid retrieval. Defaults to true.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RETRIEVAL_MODE",
+          "description": "Shared route for search and search_parallel: live or hybrid. Defaults to hybrid.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_ROOT",
+          "description": "Embedded SurrealDB data directory. Defaults to <profile>/research.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_VECTOR_MODEL",
+          "description": "Local model for HNSW retrieval and shared reranking. Defaults to Xenova/multilingual-e5-small; use off to disable.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_REPO_AUTO",
+          "description": "Sparse-index at most one eligible small GitHub repository per search call. Defaults to true.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_REPO_AUTO_MAX_MB",
+          "description": "Maximum searchable repository source-text size in MB. Assets are excluded. Defaults to 20.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_REPO_AUTO_MAX_FILES",
+          "description": "Maximum repository source file count for automatic indexing. Defaults to 2000.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "GITHUB_TOKEN",
+          "description": "Optional token that raises GitHub API limits for repository inspection.",
+          "isRequired": false,
+          "isSecret": true,
           "format": "string"
         },
         {
@@ -61,7 +116,7 @@
         },
         {
           "name": "SURF_HEADLESS",
-          "description": "Set to 'false' to run Chrome visibly (demos/debugging). Defaults to true. CAPTCHA recovery always runs visible regardless.",
+          "description": "Controls Playwright extraction, compatibility, and recovery paths. Native search uses minimized system Chrome.",
           "isRequired": false,
           "format": "string"
         },

@@ -11,7 +11,15 @@ describe('loadConfig', () => {
     expect(c.humanlikeMode).toBe('background');
     expect(c.searchProvider).toBe('browser');
     expect(c.scholarProvider).toBe('browser');
+    expect(c.browserEngine).toBe('auto');
     expect(c.searchApiKey).toBeUndefined();
+    expect(c.researchEnabled).toBe(true);
+    expect(c.researchRetrievalMode).toBe('hybrid');
+    expect(c.researchRoot).toContain('.google-surf-mcp');
+    expect(c.researchVectorModel).toBe('Xenova/multilingual-e5-small');
+    expect(c.researchRepoAuto).toBe(true);
+    expect(c.researchRepoAutoMaxMb).toBe(20);
+    expect(c.researchRepoAutoMaxFiles).toBe(2_000);
     expect(c.timezone).toBeTypeOf('string');
     expect(c.timezone.length).toBeGreaterThan(0);
   });
@@ -88,8 +96,8 @@ describe('loadConfig', () => {
     expect(loadConfig({ SURF_USE_STEALTH: 'true' }).useStealth).toBe(true);
   });
 
-  it('extractMaxChars: default 8000, env override, clamped to [200, 50000]', () => {
-    expect(loadConfig({}).extractMaxChars).toBe(8_000);
+  it('extractMaxChars: default 50000, env override, clamped to [200, 50000]', () => {
+    expect(loadConfig({}).extractMaxChars).toBe(50_000);
     expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '20000' }).extractMaxChars).toBe(20_000);
     expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '999999' }).extractMaxChars).toBe(50_000);
     expect(loadConfig({ SURF_EXTRACT_MAX_CHARS: '50' }).extractMaxChars).toBe(200);
@@ -98,6 +106,30 @@ describe('loadConfig', () => {
   it('extractOcr: default off, env opt-in', () => {
     expect(loadConfig({}).extractOcr).toBe(false);
     expect(loadConfig({ SURF_EXTRACT_OCR: 'true' }).extractOcr).toBe(true);
+  });
+
+  it('enables local research by default and supports an explicit opt-out', () => {
+    const configured = loadConfig({
+      SURF_PROFILE_ROOT: 'C:\\profiles\\surf',
+      SURF_RESEARCH_ROOT: 'C:\\research\\surf',
+    });
+    expect(configured.researchEnabled).toBe(true);
+    expect(configured.researchRoot).toBe('C:\\research\\surf');
+    expect(loadConfig({ SURF_RESEARCH_VECTOR_MODEL: ' model/id ' }).researchVectorModel)
+      .toBe('model/id');
+    expect(loadConfig({ SURF_RESEARCH_VECTOR_MODEL: 'off' }).researchVectorModel)
+      .toBeUndefined();
+    const repositoryPolicy = loadConfig({
+      SURF_RESEARCH_REPO_AUTO: 'false',
+      SURF_RESEARCH_REPO_AUTO_MAX_MB: '12',
+      SURF_RESEARCH_REPO_AUTO_MAX_FILES: '750',
+    });
+    expect(repositoryPolicy.researchRepoAuto).toBe(false);
+    expect(repositoryPolicy.researchRepoAutoMaxMb).toBe(12);
+    expect(repositoryPolicy.researchRepoAutoMaxFiles).toBe(750);
+    expect(loadConfig({ SURF_RESEARCH: 'false' }).researchEnabled).toBe(false);
+    expect(loadConfig({ SURF_RETRIEVAL_MODE: 'live' }).researchRetrievalMode).toBe('live');
+    expect(loadConfig({ SURF_RETRIEVAL_MODE: 'local' }).researchRetrievalMode).toBe('hybrid');
   });
 
   it('parses SearchApi provider modes and key aliases', () => {
@@ -111,5 +143,11 @@ describe('loadConfig', () => {
     expect(configured.searchApiKey).toBe('secret');
     expect(loadConfig({ SURF_SEARCH_PROVIDER: 'unknown' }).searchProvider).toBe('browser');
     expect(loadConfig({ SEARCHAPI_API_KEY: 'alias' }).searchApiKey).toBe('alias');
+  });
+
+  it('parses the browser engine with auto as the safe default', () => {
+    expect(loadConfig({ SURF_BROWSER_ENGINE: 'native' }).browserEngine).toBe('native');
+    expect(loadConfig({ SURF_BROWSER_ENGINE: 'playwright' }).browserEngine).toBe('playwright');
+    expect(loadConfig({ SURF_BROWSER_ENGINE: 'unknown' }).browserEngine).toBe('auto');
   });
 });

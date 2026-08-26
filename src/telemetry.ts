@@ -53,7 +53,6 @@ export class Telemetry {
     }
   }
 
-  // Append a single event. Never throws — telemetry is best-effort.
   async record(type: TelemetryEventType, data: Record<string, unknown>): Promise<void> {
     if (!this.enabled) return;
 

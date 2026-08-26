@@ -19,13 +19,44 @@ function ensureStealth() {
 const PROFILE_ROOT = process.env.SURF_PROFILE_ROOT || join(homedir(), '.google-surf-mcp');
 export const PROFILE_MAIN = resolve(PROFILE_ROOT, 'main');
 export const PROFILE_SEED = resolve(PROFILE_ROOT, 'seed');
+export const PROFILE_NATIVE = resolve(PROFILE_ROOT, 'native');
 export const PROFILE_WORKER = (i: number) => resolve(PROFILE_ROOT, `w${process.pid}_${i}`);
 
-export function detectChrome(): string {
+function configuredChrome(): string | undefined {
   if (process.env.CHROME_PATH) {
     if (existsSync(process.env.CHROME_PATH)) return process.env.CHROME_PATH;
     throw new Error(`CHROME_PATH set but not found: ${process.env.CHROME_PATH}`);
   }
+  return undefined;
+}
+
+const SYSTEM_CHROME_CANDIDATES: Record<string, string[]> = {
+  win32: [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ],
+  darwin: [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ],
+  linux: [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+  ],
+};
+
+export function detectSystemChrome(): string {
+  const configured = configuredChrome();
+  if (configured) return configured;
+  for (const p of SYSTEM_CHROME_CANDIDATES[platform()] || []) if (existsSync(p)) return p;
+  throw new Error('System Chrome not found. Install Chrome or set CHROME_PATH.');
+}
+
+export function detectChrome(): string {
+  const configured = configuredChrome();
+  if (configured) return configured;
   // Bundled chromium first: system Chrome forwards args via Singleton IPC + exits 21 on Windows.
   try {
     const bundled = chromiumBare.executablePath();
@@ -34,23 +65,7 @@ export function detectChrome(): string {
   } catch (e) {
     console.error('[google-surf] playwright browsers not installed, falling back to system Chrome:', (e as Error).message);
   }
-  const candidates: Record<string, string[]> = {
-    win32: [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    ],
-    darwin: [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    ],
-    linux: [
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/snap/bin/chromium',
-    ],
-  };
-  for (const p of candidates[platform()] || []) if (existsSync(p)) return p;
+  for (const p of SYSTEM_CHROME_CANDIDATES[platform()] || []) if (existsSync(p)) return p;
   throw new Error('Chrome not found. Run `npx playwright install chromium`, install Chrome, or set CHROME_PATH env.');
 }
 
@@ -67,7 +82,7 @@ export interface LaunchOpts {
   insecureTls?: boolean;
   // Required for chromium under non-root cgroups (most cloud sandboxes).
   noSandbox?: boolean;
-  // Set false for CAPTCHA recovery — reCAPTCHA image grids need images.
+  // CAPTCHA recovery needs images for reCAPTCHA grids.
   blockResources?: boolean;
 }
 
@@ -92,13 +107,8 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
   const driver = useStealth ? chromiumExtra : chromiumBare;
 
   const args = [
-    '--disable-blink-features=AutomationControlled',
     '--no-default-browser-check',
     '--no-first-run',
-    '--fingerprinting-canvas-image-data-noise',
-    '--webrtc-ip-handling-policy=disable_non_proxied_udp',
-    '--force-webrtc-ip-handling-policy',
-    ...(noSandbox ? ['--no-sandbox'] : []),
     ...(insecureTls ? ['--ignore-certificate-errors'] : []),
     ...(cloudMode ? ['--disable-dev-shm-usage'] : []), // cloud /dev/shm too small for Chromium
     // port=0: kernel-assigned, written to <profileDir>/DevToolsActivePort.
@@ -111,6 +121,7 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     viewport: { width: 1366, height: 768 },
     locale: process.env.SURF_LOCALE || 'en-US',
     timezoneId: process.env.SURF_TZ || SYSTEM_TZ,
+    chromiumSandbox: !noSandbox,
     ignoreDefaultArgs: ['--enable-automation'],
     ignoreHTTPSErrors: insecureTls,
     args,
@@ -224,7 +235,7 @@ export function ensureSeed(): Promise<void> {
   if (seedPromise) return seedPromise;
   seedPromise = (async () => {
     if (!existsSync(PROFILE_MAIN)) {
-      throw new Error('seed: main profile missing — run bootstrap first');
+      throw new Error('seed: main profile missing; run bootstrap first');
     }
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {

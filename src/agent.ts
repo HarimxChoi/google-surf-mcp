@@ -25,6 +25,7 @@ import { VERSION } from './version.js';
 import type { ExtractMode, ExtractResult } from './extract.js';
 import type { PoolSearchResult } from './pool.js';
 import type { SearchOptions } from './search.js';
+import type { NativeBrowserHandle } from './nativeBrowser.js';
 
 export interface PoolHandle {
   runMany: (queries: string[], limit: number, opts?: SearchOptions) => Promise<PoolSearchResult[]>;
@@ -51,10 +52,19 @@ export interface Deps {
   recoverHuman: (seedQuery?: string) => Promise<void>;
   getPoolHealth: () => PoolHealthSnapshot;
   searchApi?: SearchApiHandle;
+  nativeBrowser?: NativeBrowserHandle;
 }
 
 export interface SearchRunOptions {
   browserUnavailable?: string;
+}
+
+export type SearchExtractionMode = 'none' | 'abstract' | 'full';
+
+export interface SearchExtractionInput {
+  extract_mode?: SearchExtractionMode;
+  extract_limit?: number;
+  max_chars?: number;
 }
 
 export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel' | 'healing'> {
@@ -92,6 +102,10 @@ async function executeSeqWithCascade<T>(
   op: (ctx: BrowserContext) => Promise<T>,
   seedQuery?: string,
 ): Promise<T> {
+  if (deps.config.searchProvider === 'fallback') {
+    const ctx = await deps.acquireSeqCtx(deps.cascade.mode);
+    return await op(ctx);
+  }
   if (deps.config.cascadeDisabled) {
     const ctx = await deps.acquireSeqCtx(deps.config.useStealth ? 'on' : 'off');
     return await op(ctx);
@@ -122,6 +136,10 @@ async function executePoolWithCascade<T>(
   op: (pool: PoolHandle) => Promise<T>,
   seedQuery?: string,
 ): Promise<T> {
+  if (deps.config.searchProvider === 'fallback') {
+    const pool = await deps.acquirePool(deps.cascade.mode);
+    return await op(pool);
+  }
   if (deps.config.cascadeDisabled) {
     const initialMode = deps.config.useStealth ? 'on' : 'off';
     const pool = await deps.acquirePool(initialMode);
@@ -197,20 +215,22 @@ export async function searchTool(
 
   try {
     await deps.limiter.acquire();
-    const params = generateBehaviorParams();
-    const outcome = await executeSeqWithCascade(deps, async (ctx) => {
-      const page = (await ctx.pages())[0] ?? (await ctx.newPage());
-      const humanlike = deps.config.humanlikeMode !== 'off'
-        ? new HumanlikeBehavior(params, deps.config.humanlikeMode)
-        : undefined;
-      const r = await legacySearch(page, query, limit, {
+    const outcome = deps.nativeBrowser
+      ? await deps.nativeBrowser.search(query, limit, {
         locale: deps.config.locale,
         healing: deps.healing,
-        humanlike,
-      });
-      await humanlike?.simulateBrowsing(page, []).catch(() => {});
-      return r;
-    }, query);
+      })
+      : await executeSeqWithCascade(deps, async (ctx) => {
+        const page = (await ctx.pages())[0] ?? (await ctx.newPage());
+        const humanlike = makeHumanlike(deps);
+        const result = await legacySearch(page, query, limit, {
+          locale: deps.config.locale,
+          healing: deps.healing,
+          humanlike,
+        });
+        await humanlike?.simulateBrowsing(page, []).catch(() => {});
+        return result;
+      }, query);
 
     if (outcome.degraded_reasons?.length) {
       console.error(`[google-surf-mcp] parser degraded: ${outcome.degraded_reasons.join(', ')}`);
@@ -226,9 +246,10 @@ export async function searchTool(
     }
 
     const meta = {
-      strategy: 'legacy-v0.4',
+      strategy: deps.nativeBrowser ? 'native-chrome-v1' : 'legacy-v0.4',
       provider: 'browser' as const,
-      stealth_mode: deps.cascade.mode,
+      browser_engine: deps.nativeBrowser ? 'native' as const : 'playwright' as const,
+      ...(!deps.nativeBrowser ? { stealth_mode: deps.cascade.mode } : {}),
       dropped: outcome.dropped,
       dropped_reasons: outcome.dropped_reasons,
       ...(outcome.degraded_reasons?.length ? { degraded_reasons: outcome.degraded_reasons } : {}),
@@ -336,7 +357,10 @@ function providerCacheKey(
   limit: number,
   mode: SearchProviderMode,
 ): string {
-  const scopedQuery = mode === 'browser' ? query : `${query}\nprovider:${mode}`;
+  const engine = deps.nativeBrowser ? 'native' : 'playwright';
+  const scopedQuery = mode === 'browser' && engine === 'playwright'
+    ? query
+    : `${query}\nprovider:${mode}\nbrowser_engine:${engine}`;
   return deps.cache.searchKey(scopedQuery, deps.config.locale, limit);
 }
 
@@ -396,11 +420,13 @@ export async function scholarSearchTool(
   }
 
   const cooldownKey = deps.cache.searchKey('__scholar_rate_limit__', deps.config.locale, 0);
-  const cooldown = await deps.cache.get<{ until: number }>('scholar', cooldownKey);
+  const cooldown = await deps.cache.get<{ until: number; reason?: string }>('scholar', cooldownKey);
   if (cooldown && cooldown.until > Date.now()) {
     if (mode === 'fallback') {
       try {
-        return await runSearchApiScholar(query, limit, cacheKey, deps, t0, 'RATE_LIMITED');
+        return await runSearchApiScholar(
+          query, limit, cacheKey, deps, t0, cooldown.reason ?? 'RATE_LIMITED',
+        );
       } catch (e) {
         recordToolError(deps, 'scholar_search', e);
         return searchApiErrorResponse(e) ?? handleError(e, deps);
@@ -411,22 +437,29 @@ export async function scholarSearchTool(
 
   try {
     await deps.limiter.acquire();
-    const params = generateBehaviorParams();
-    const mode = deps.config.cascadeDisabled
+    const stealthMode = deps.config.cascadeDisabled
       ? (deps.config.useStealth ? 'on' : 'off')
       : deps.cascade.mode;
-    const ctx = await deps.acquireSeqCtx(mode);
-    const page = (await ctx.pages())[0] ?? (await ctx.newPage());
-    const humanlike = deps.config.humanlikeMode !== 'off'
-      ? new HumanlikeBehavior(params, deps.config.humanlikeMode)
-      : undefined;
-    const results = await scholarSearch(page, query, limit, {
-      humanlike,
-      locale: deps.config.locale,
-    });
-    await humanlike?.simulateBrowsing(page, []).catch(() => {});
+    const results = deps.nativeBrowser
+      ? await deps.nativeBrowser.scholar(query, limit, deps.config.locale)
+      : await (async () => {
+        const ctx = await deps.acquireSeqCtx(stealthMode);
+        const page = (await ctx.pages())[0] ?? (await ctx.newPage());
+        const humanlike = makeHumanlike(deps);
+        const rows = await scholarSearch(page, query, limit, {
+          humanlike,
+          locale: deps.config.locale,
+        });
+        await humanlike?.simulateBrowsing(page, []).catch(() => {});
+        return rows;
+      })();
 
-    const meta = { strategy: 'scholar-v1', provider: 'browser' as const, stealth_mode: mode };
+    const meta = {
+      strategy: deps.nativeBrowser ? 'native-scholar-v1' : 'scholar-v1',
+      provider: 'browser' as const,
+      browser_engine: deps.nativeBrowser ? 'native' as const : 'playwright' as const,
+      ...(!deps.nativeBrowser ? { stealth_mode: stealthMode } : {}),
+    };
     await deps.cache.set('scholar', cacheKey, { results, meta }, deps.config.cacheTtlSearchMs);
     deps.tel.record('search.outcome', {
       tool: 'scholar_search',
@@ -442,12 +475,16 @@ export async function scholarSearchTool(
       { ...meta, cache: 'miss' },
     );
   } catch (e) {
-    if (e instanceof ScholarRateLimitError) {
+    if (e instanceof ScholarRateLimitError || e instanceof CaptchaError) {
+      const retryAfterMs = e instanceof ScholarRateLimitError ? e.retryAfterMs : 15 * 60_000;
       await deps.cache.set(
         'scholar',
         cooldownKey,
-        { until: Date.now() + e.retryAfterMs },
-        e.retryAfterMs,
+        {
+          until: Date.now() + retryAfterMs,
+          reason: e instanceof CaptchaError ? 'CAPTCHA_RECOVER_FAIL' : 'RATE_LIMITED',
+        },
+        retryAfterMs,
       ).catch(() => {});
     }
     recordToolError(deps, 'scholar_search', e);
@@ -531,13 +568,15 @@ export async function searchParallelTool(
 
   try {
     for (let i = 0; i < queries.length; i++) await deps.limiter.acquire();
-    const results = await executePoolWithCascade(deps, async (pool) => {
-      return await pool.runMany(queries, limit, {
-        locale: deps.config.locale,
-        healing: deps.healing,
-        humanlike: makeHumanlike(deps),
-      });
-    }, queries[0]);
+    const results = deps.nativeBrowser
+      ? await runNativeParallel(queries, limit, deps)
+      : await executePoolWithCascade(deps, async (pool) => {
+        return await pool.runMany(queries, limit, {
+          locale: deps.config.locale,
+          healing: deps.healing,
+          humanlike: makeHumanlike(deps),
+        });
+      }, queries[0]);
 
     if (mode === 'fallback') {
       const fallbackRows = results.filter((row) => row.error || row.degraded_reasons?.length);
@@ -576,6 +615,33 @@ export async function searchParallelTool(
   }
 }
 
+async function runNativeParallel(
+  queries: string[],
+  limit: number,
+  deps: Deps,
+): Promise<PoolSearchResult[]> {
+  const results: PoolSearchResult[] = [];
+  for (const query of queries) {
+    try {
+      const outcome = await deps.nativeBrowser!.search(query, limit, {
+        locale: deps.config.locale,
+        healing: deps.healing,
+      });
+      results.push({
+        query,
+        results: outcome.results,
+        dropped: outcome.dropped,
+        dropped_reasons: outcome.dropped_reasons,
+        degraded_reasons: outcome.degraded_reasons,
+      });
+    } catch (error) {
+      if (error instanceof CaptchaError) throw error;
+      results.push({ query, results: [], error: (error as Error).message });
+    }
+  }
+  return results;
+}
+
 async function runSearchApiParallel(
   queries: string[],
   limit: number,
@@ -610,7 +676,12 @@ function parallelResponse(
   return formatToolResponse(
     { results, elapsed_ms: elapsed },
     undefined,
-    { provider, stealth_mode: deps.cascade.mode, cache: 'miss' },
+    {
+      provider,
+      browser_engine: deps.nativeBrowser ? 'native' : 'playwright',
+      ...(!deps.nativeBrowser ? { stealth_mode: deps.cascade.mode } : {}),
+      cache: 'miss',
+    },
   );
 }
 
@@ -620,8 +691,9 @@ export async function extractTool(
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const url = input.url.trim();
-  const maxChars = Math.min(Math.max(input.max_chars ?? deps.config.extractMaxChars, 200), 50_000);
   const mode: ExtractMode = input.mode ?? 'full';
+  const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
+  const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
 
   if (!url) {
     return formatToolResponse(null, {
@@ -658,76 +730,174 @@ export async function extractTool(
   }
 }
 
-export async function searchExtractTool(
-  input: { query: string; limit?: number; max_chars?: number; mode?: 'full' | 'abstract' },
+type ExtractableRow = Record<string, unknown> & { url?: string };
+
+interface ExtractionSummary {
+  mode: 'abstract' | 'full';
+  requested: number;
+  succeeded: number;
+  failed: number;
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+function extractionError(result: CallToolResult): string | undefined {
+  const error = result.structuredContent?.error;
+  if (typeof error === 'string') return error;
+  const message = asObject(error).message;
+  return typeof message === 'string' ? message : result.isError ? 'extraction failed' : undefined;
+}
+
+function extractionPatch(result: CallToolResult): Record<string, unknown> {
+  const error = extractionError(result);
+  if (error) return { extract_error: error };
+  const data = asObject(result.structuredContent);
+  return Object.fromEntries([
+    'content', 'excerpt', 'length', 'is_pdf', 'page_count', 'extraction_quality',
+    'authors', 'publication', 'published_at', 'year', 'doi', 'description',
+    'keywords', 'canonical_url', 'language', 'subject', 'creator', 'producer',
+    'created_at', 'modified_at',
+  ].flatMap((key) => data[key] === undefined ? [] : [[key, data[key]]]));
+}
+
+function extractionUrlKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function uniqueUrls(rows: ExtractableRow[], limit: number): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.url !== 'string') continue;
+    const key = extractionUrlKey(row.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    urls.push(row.url);
+    if (urls.length >= limit) break;
+  }
+  return urls;
+}
+
+async function extractUrls(
+  urls: string[],
+  mode: 'abstract' | 'full',
+  maxChars: number,
+  deps: Deps,
+): Promise<{ patches: Map<string, Record<string, unknown>>; summary: ExtractionSummary }> {
+  const patches = new Map<string, Record<string, unknown>>();
+  try {
+    const pool = await deps.acquirePool(deps.cascade.mode);
+    await Promise.all(urls.map(async (url) => {
+      try {
+        const result = await pool.extractOne(url, maxChars, mode);
+        patches.set(extractionUrlKey(url), result.error && !result.content
+          ? { extract_error: result.error }
+          : extractionPatch(formatToolResponse({ ...result })));
+      } catch (error) {
+        patches.set(extractionUrlKey(url), {
+          extract_error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    for (const url of urls) patches.set(extractionUrlKey(url), { extract_error: message });
+  }
+  const failed = [...patches.values()].filter((patch) => 'extract_error' in patch).length;
+  return {
+    patches,
+    summary: { mode, requested: urls.length, succeeded: urls.length - failed, failed },
+  };
+}
+
+function withExtraction(
+  result: CallToolResult,
+  results: unknown,
+  summary: ExtractionSummary,
+  elapsedMs: number,
+): CallToolResult {
+  const data = asObject(result.structuredContent);
+  const meta = asObject(data.meta);
+  return formatToolResponse({
+    ...data,
+    results,
+    elapsed_ms: elapsedMs,
+    meta: { ...meta, extraction: summary },
+  });
+}
+
+function extractionSettings(input: SearchExtractionInput, deps: Deps) {
+  const mode = input.extract_mode ?? 'none';
+  const limit = Math.min(Math.max(input.extract_limit ?? 5, 1), 10);
+  const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
+  const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
+  return { mode, limit, maxChars };
+}
+
+export async function applySearchExtraction(
+  result: CallToolResult,
+  input: SearchExtractionInput,
   deps: Deps,
 ): Promise<CallToolResult> {
-  const t0 = Date.now();
-  const query = input.query.trim();
-  const limit = Math.min(Math.max(input.limit ?? 5, 1), 10);
-  const mode: ExtractMode = input.mode ?? 'abstract';
-  const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
-  const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 20_000);
+  const settings = extractionSettings(input, deps);
+  if (settings.mode === 'none' || result.isError || !result.structuredContent) return result;
+  const started = Date.now();
+  const rows = Array.isArray(result.structuredContent.results)
+    ? result.structuredContent.results.map((row) => asObject(row))
+    : [];
+  const urls = uniqueUrls(rows, settings.limit);
+  const extracted = await extractUrls(urls, settings.mode, settings.maxChars, deps);
+  const results = rows.map((row) => typeof row.url === 'string'
+    && extracted.patches.has(extractionUrlKey(row.url))
+    ? { ...row, ...extracted.patches.get(extractionUrlKey(row.url)) }
+    : row);
+  const elapsed = Number(result.structuredContent.elapsed_ms ?? 0) + Date.now() - started;
+  return withExtraction(result, results, extracted.summary, elapsed);
+}
 
-  if (!query) {
-    return formatToolResponse(null, {
-      code: 'INTERNAL', message: 'query required', retryable: false,
-    });
-  }
-
-  if (deps.config.cloudMode) {
-    return formatToolResponse(null, {
-      code: 'INTERNAL',
-      message: 'search_extract disabled in cloud mode (worker pool incompatible). Use search + extract separately.',
-      retryable: false,
-    });
-  }
-
-  try {
-    await deps.limiter.acquire();
-    const data = await executePoolWithCascade(deps, async (pool) => {
-      const sr = await pool.searchOne(query, limit, {
-        locale: deps.config.locale,
-        healing: deps.healing,
-        humanlike: makeHumanlike(deps),
-      });
-      if (!sr.results.length) return { results: [], searchError: sr.error, droppedCount: sr.dropped ?? 0 };
-      const enriched = await Promise.all(sr.results.map(async (r) => {
-        const ex = await pool.extractOne(r.url, maxChars, mode);
-        return {
-          title: r.title, url: r.url, description: r.description,
-          content: ex.content, excerpt: ex.excerpt, length: ex.length,
-          is_pdf: ex.is_pdf, page_count: ex.page_count, extraction_quality: ex.extraction_quality,
-          error: typeof ex.error === 'string' ? ex.error : undefined,
-        };
-      }));
-      return { results: enriched, searchError: undefined as string | undefined, droppedCount: sr.dropped ?? 0 };
-    });
-
-    deps.tel.record('search.outcome', {
-      tool: 'search_extract',
-      resultsLen: data.results.length,
-      droppedCount: data.droppedCount,
-      elapsedMs: Date.now() - t0,
-      stealthMode: deps.cascade.mode,
-    }).catch(() => {});
-
-    if (data.searchError && data.results.length === 0) {
-      return formatToolResponse(null, {
-        code: 'EXTRACT_FAILED',
-        message: data.searchError,
-        retryable: true,
-      });
+export async function applyParallelSearchExtraction(
+  result: CallToolResult,
+  input: SearchExtractionInput,
+  deps: Deps,
+): Promise<CallToolResult> {
+  const settings = extractionSettings(input, deps);
+  if (settings.mode === 'none' || result.isError || !result.structuredContent) return result;
+  const started = Date.now();
+  const groups = Array.isArray(result.structuredContent.results)
+    ? result.structuredContent.results.map((group) => {
+      const data = asObject(group);
+      return {
+        ...data,
+        results: Array.isArray(data.results) ? data.results.map((row) => asObject(row)) : [],
+      };
+    })
+    : [];
+  const candidates: ExtractableRow[] = [];
+  const maxRank = Math.max(0, ...groups.map((group) => group.results.length));
+  for (let rank = 0; rank < maxRank; rank++) {
+    for (const group of groups) {
+      if (group.results[rank]) candidates.push(group.results[rank]);
     }
-    return formatToolResponse(
-      { query, results: data.results, elapsed_ms: Date.now() - t0 },
-      undefined,
-      { stealth_mode: deps.cascade.mode },
-    );
-  } catch (e) {
-    recordToolError(deps, 'search_extract', e);
-    return rateLimitResponse(e) ?? handleError(e, deps);
   }
+  const urls = uniqueUrls(candidates, settings.limit);
+  const extracted = await extractUrls(urls, settings.mode, settings.maxChars, deps);
+  const results = groups.map((group) => ({
+    ...group,
+    results: group.results.map((row) => typeof row.url === 'string'
+      && extracted.patches.has(extractionUrlKey(row.url))
+      ? { ...row, ...extracted.patches.get(extractionUrlKey(row.url)) }
+      : row),
+  }));
+  const elapsed = Number(result.structuredContent.elapsed_ms ?? 0) + Date.now() - started;
+  return withExtraction(result, results, extracted.summary, elapsed);
 }
 
 export async function healthTool(deps: Deps): Promise<CallToolResult> {
@@ -768,7 +938,11 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
       humanlikeMode: deps.config.humanlikeMode,
       searchProvider: deps.config.searchProvider,
       scholarProvider: deps.config.scholarProvider,
+      browserEngine: deps.config.browserEngine,
+      effectiveBrowserEngine: deps.nativeBrowser ? 'native' : 'playwright',
       searchApiConfigured: Boolean(deps.config.searchApiKey),
+      researchEnabled: deps.config.researchEnabled,
+      researchRetrievalMode: deps.config.researchRetrievalMode,
       useStealth: deps.config.useStealth,
       insecureTls: deps.config.insecureTls,
       noSandbox: deps.config.noSandbox,

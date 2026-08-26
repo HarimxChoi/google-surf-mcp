@@ -161,6 +161,34 @@ async function readBlockState(page: Page, status?: number) {
   return classifyScholarBlock(status, bodyText, hasCaptcha);
 }
 
+export async function readScholarResultsPage(
+  page: Page,
+  limit: number,
+  status?: number,
+): Promise<ScholarResult[]> {
+  const immediateBlock = await readBlockState(page, status);
+  if (immediateBlock === 'captcha') {
+    throw new CaptchaError('scholar-after-search', SCHOLAR_CAPTCHA_ACTION);
+  }
+  if (immediateBlock === 'rate_limited') throw new ScholarRateLimitError();
+
+  await page.waitForSelector('.gs_r.gs_or, #gs_captcha_f, #gs_res_ccl', {
+    timeout: 10_000,
+  }).catch(() => {});
+
+  const block = await readBlockState(page);
+  if (block === 'captcha') {
+    throw new CaptchaError('scholar-after-search', SCHOLAR_CAPTCHA_ACTION);
+  }
+  if (block === 'rate_limited') throw new ScholarRateLimitError();
+
+  const results = await page.evaluate(parseScholarResultsInBrowser, { limit });
+  const resultBlocks = await page.locator('.gs_r.gs_or').count();
+  const hasResultContainer = await page.locator('#gs_res_ccl').count().then((count) => count > 0);
+  assertScholarParseCoverage(resultBlocks, results.length, limit, hasResultContainer);
+  return results;
+}
+
 export async function scholarSearch(
   page: Page,
   query: string,
@@ -207,26 +235,5 @@ export async function scholarSearch(
   }).catch(() => null);
   await page.keyboard.press('Enter');
   const response = await navigation;
-
-  const immediateBlock = await readBlockState(page, response?.status());
-  if (immediateBlock === 'captcha') {
-    throw new CaptchaError('scholar-after-search', SCHOLAR_CAPTCHA_ACTION);
-  }
-  if (immediateBlock === 'rate_limited') throw new ScholarRateLimitError();
-
-  await page.waitForSelector('.gs_r.gs_or, #gs_captcha_f, #gs_res_ccl', {
-    timeout: 10_000,
-  }).catch(() => {});
-
-  const block = await readBlockState(page);
-  if (block === 'captcha') {
-    throw new CaptchaError('scholar-after-search', SCHOLAR_CAPTCHA_ACTION);
-  }
-  if (block === 'rate_limited') throw new ScholarRateLimitError();
-
-  const results = await page.evaluate(parseScholarResultsInBrowser, { limit });
-  const resultBlocks = await page.locator('.gs_r.gs_or').count();
-  const hasResultContainer = await page.locator('#gs_res_ccl').count().then((count) => count > 0);
-  assertScholarParseCoverage(resultBlocks, results.length, limit, hasResultContainer);
-  return results;
+  return await readScholarResultsPage(page, limit, response?.status());
 }

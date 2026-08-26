@@ -131,6 +131,7 @@ export interface CallToolMeta {
   resource_uri?: string;
   fetched_at?: string;
   stealth_mode?: 'on' | 'off';
+  browser_engine?: 'native' | 'playwright';
   provider?: 'browser' | 'searchapi' | 'mixed';
   fallback_from?: 'browser';
   fallback_reason?: string;

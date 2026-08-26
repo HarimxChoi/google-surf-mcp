@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.9.5]
+
+### Added
+- Native system Chrome search for Google and Scholar with a dedicated logged-out profile and late read-only CDP parsing.
+- Embedded SurrealDB project memory with an Inbox, immutable plan revisions, and explicit experiment history.
+- Graph hybrid RAG with independent live web, exact, BM25, HNSW vector, and graph lanes, deterministic RRF, and one shared reranker.
+- A fresh-web result floor and one bounded expanded search round when live evidence is sparse or duplicates local evidence.
+- GitHub README capture and sparse automatic source indexing for at most one eligible small repository per search call.
+- Tree-sitter code linking and a Graphology sidecar for PageRank, query-time PPR, connected components, and Louvain communities.
+- Automatic result capture with provenance. Extracted bodies become searchable evidence while unread results remain metadata.
+- Compact prior-search context for repeated project research, capped at three related or recent queries with one surface signal each.
+- Config-routed project retrieval for `search` and `search_parallel` through `SURF_RETRIEVAL_MODE=live|hybrid`.
+- One `project_memory` tool for project setup, session intent, plans, experiments, decisions, and deterministic root rebuilds.
+- Explicit `memory_handle` continuity with immutable session intent revisions.
+- Read-only retrieval with ontology-aligned schema and identity links across selected projects without changing the active storage project.
+- Project deletion preview, confirmation, reversible tombstone, and restore through `project_memory`.
+- Versioned ontology, evidence-linked data lineage, bitemporal assertions, evidence-preserving correction, and reversible assertion deletion records.
+- Idempotent `knowledge_job` state transitions connected to deterministic project rebuilds.
+- One-line project, session, storage, and state receipts.
+- Content-addressed source bodies, one active project projection, and immutable file deltas.
+- A standalone interactive HTML explorer with project scope selection, PKM, separate data and research lineage tracks, a typed ontology view, deterministic large-graph projection, local focus, filters, provenance inspection, and visible PNG or JSON download.
+- Graphviz DOT, D3 node-link JSON, and Neo4j CSV/Cypher export for one project, selected projects, or all named projects.
+
+### Changed
+- `extract` metadata now includes bibliographic HTML and PDF properties, and abstract/full PDF reads retain the same metadata in research storage.
+- Local browser search defaults to the native engine. `SURF_BROWSER_ENGINE=playwright` retains the compatibility path, while cloud and remote-debug modes select it automatically.
+- `search_parallel` serializes native Chrome launches to preserve one profile's browser reputation; SearchApi and Playwright keep their existing parallel behavior.
+- Research memory is included in one package and remains off by default.
+- `search`, `search_parallel`, and `extract` now handle web pages, papers, and code repositories through the same entry points. `search_extract` is removed.
+- GitHub `none` or `metadata` reads the README. `abstract` and `full` use the same repository eligibility gate and differ only in indexed source depth.
+- Abstract extraction defaults to 1500 characters and full extraction to 50000.
+- SearchApi fallback now tries the current browser tier once and skips human CAPTCHA recovery.
+- `SURF_RESEARCH=true` activates storage and project tools. `SURF_RETRIEVAL_MODE` selects live or hybrid retrieval for both search tools.
+- Successful extracts become project exact, BM25, and vector evidence. Scholar snippets remain metadata only.
+- Multilingual E5 vector retrieval and reranking are enabled by default in research mode and can be disabled with `SURF_RESEARCH_VECTOR_MODEL=off`.
+- Image retrieval and visual reranking are excluded. OCR remains text recovery for scanned PDFs.
+- The hosted SERP repair workflow is manual-only because blocked probes cannot verify selector drift.
+
+### Fixed
+- Chrome launches use the Chromium sandbox by default and omit custom automation and fingerprinting flags.
+- Plain HTTP extraction pins the validated address through connection setup to reduce DNS rebinding risk.
+- Dense model revisions and native inference dependencies are pinned, and high-confidence secrets are excluded from captured content.
+
 ## [0.8.0]
 
 ### Added
@@ -18,11 +61,11 @@
 - PDF extraction uses `@llamaindex/liteparse` (PDFium spatial parsing) instead of `unpdf`: ~2x faster, correct multi-column reading order, optional OCR.
 
 ### Added
-- `SURF_EXTRACT_OCR` (default `false`) — Tesseract OCR for scanned/image PDFs.
-- `SURF_EXTRACT_MAX_CHARS` (default `8000`) — configurable extract truncation (#9).
+- `SURF_EXTRACT_OCR` (default `false`): Tesseract OCR for scanned/image PDFs.
+- `SURF_EXTRACT_MAX_CHARS` (default `8000`): configurable extract truncation (#9).
 
 ### Fixed
-- EU consent overlay dismissed before the search box, with `focus` instead of `click` — fixes 100% search failure on fresh EU profiles (#10).
+- EU consent overlay dismissed before the search box, with `focus` instead of `click`. This fixes search failure on fresh EU profiles (#10).
 - Block detection broadened beyond `/sorry/` (consent URL + in-page reCAPTCHA via DOM).
 
 ## [0.6.5]
@@ -42,7 +85,7 @@
 ## [0.6.3]
 
 ### Fixed
-- Fixed a `ProcessSingleton`/`SingletonLock` race on rapid Chrome relaunch — `launch()` now waits for the stale profile lock to clear before retrying once (#8).
+- Fixed a `ProcessSingleton`/`SingletonLock` race on rapid Chrome relaunch. `launch()` now waits for the stale profile lock to clear before retrying once (#8).
 
 ## [0.6.2]
 
@@ -76,7 +119,7 @@ Per-strategy outcome tracking with persisted reordering. The healing layer learn
 #### New env vars
 - `SURF_SELF_HEALING` (default `true`): master switch for runtime selector reordering (deterministic, no LLM, no network).
 - `SURF_SELF_HEALING_FILE` (default `<profileRoot>/.heal/strategy-order.json`): override the persistence path.
-- `SURF_LLM_HEAL` (default `false`): opt-in gate for the workflow-only `repairWithLLM` helper. Off by default — no third-party LLM request ever fires from this package without an explicit opt-in AND a user-supplied `ANTHROPIC_API_KEY`. The package never ships a maintainer key.
+- `SURF_LLM_HEAL` (default `false`): opt-in gate for the workflow-only `repairWithLLM` helper. No third-party LLM request fires without explicit opt-in and a user-supplied `ANTHROPIC_API_KEY`. The package never ships a maintainer key.
 
 #### `pool` field in `healthTool` response
 `getPoolHealth()` is now wired into the health response. Returns `{ warmFailures, fallback }` so operators can spot a pool that has flipped to single-context mode without digging through stderr.
@@ -95,10 +138,10 @@ Reports `{ enabled, order, stats }` so the current strategy preference order is 
 
 ### Tests
 - 296 passing (was 261). New:
-  - `StrategyHealing` unit tests (21) — disabled mode, load merge with concurrent recordOutcome race, ordering thresholds, win/loss/zero accounting, tie-breaks, persisted reorder, disk safety, dirty-flag preserved on flush failure.
-  - `search.healing` integration tests (4) — `pickAndScoreResults` against real SERP fixtures: win/loss/zero on populated SERP, all-zero on empty SERP, 4-call → persisted → fresh-instance reorder, no-healing control.
-  - `agent.health` tests (5) — `healthTool` surfaces `getPoolHealth()` snapshot (incl. fallback=true case) and `selfHealing` { enabled, order, stats } correctly, order updates after margin-crossing wins.
-  - `heal.llm.gate` tests (4) — opt-in matrix: unset/false → mock, opted-in + no key → mock, no candidates → fallback selector.
+  - `StrategyHealing` unit tests (21): disabled mode, load merge with concurrent recordOutcome race, ordering thresholds, win/loss/zero accounting, tie-breaks, persisted reorder, disk safety, dirty-flag preserved on flush failure.
+  - `search.healing` integration tests (4): `pickAndScoreResults` against real SERP fixtures: win/loss/zero on populated SERP, all-zero on empty SERP, 4-call → persisted → fresh-instance reorder, no-healing control.
+  - `agent.health` tests (5): `healthTool` surfaces `getPoolHealth()` snapshot (incl. fallback=true case) and `selfHealing` { enabled, order, stats } correctly, order updates after margin-crossing wins.
+  - `heal.llm.gate` tests (4): opt-in matrix: unset/false → mock, opted-in + no key → mock, no candidates → fallback selector.
   - CaptchaError userAction surface (1).
 
 ## [0.5.5]
@@ -140,7 +183,7 @@ Opt-in jsonl event logging designed as the input feed for the self-healing pipel
 - 284 passing (was 261). New: `Telemetry` (23) covering opt-in no-op, UTC rotation, circular-data resilience, byte-guard truncation, sinceDays rolling windows, corrupted-line skip, percentile / movingAverage / ewma on numeric fields (null on empty, ignore non-numeric), and `size()` accounting.
 
 ### Notes
-- The self-healing trigger logic — consuming telemetry data to decide when to invoke `heal/synthesis` + `heal/llm` — is intentionally left out of this PR.
+- The self-healing trigger logic that consumes telemetry and invokes `heal/synthesis` plus `heal/llm` is intentionally left out of this PR.
 
 ## [0.5.2]
 
@@ -158,7 +201,7 @@ Opt-in jsonl event logging designed as the input feed for the self-healing pipel
 
 ### Added
 
-#### CAPTCHA recovery — 4 env-based modes
+#### CAPTCHA recovery: 4 env-based modes
 Single mode picked automatically from environment:
 - `notify_spawn` (default): OS notification fires (osascript / powershell / notify-send), then headed Chrome opens. Works on macOS, Windows, Linux without `node-notifier`.
 - `always_headed` (`SURF_HEADLESS=false`): headed Chrome opens, no notification (user is already watching).
@@ -179,7 +222,7 @@ Minimal exponential backoff: `delay = initialMs * factor^attempt`. No jitter (fu
 ### Changed
 
 #### English ad-marker regex
-Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-—]|\s*$)`. `Sponsored` and `advertisement` match anywhere; standalone `Ad`/`Ads` matches only at start/end-of-field or before a typographic separator. Avoids false-positive sponsored classification for organic titles like "Google Ads API docs" or "Ads Manager", while still catching SERP labels like `Ad · brand.com` or just `Ad`.
+Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)ads?(?:\s*[·•‧▾\-\u2014]|\s*$)`. `Sponsored` and `advertisement` match anywhere; standalone `Ad`/`Ads` matches only at start/end-of-field or before a typographic separator. Avoids false-positive sponsored classification for organic titles like "Google Ads API docs" or "Ads Manager", while still catching SERP labels like `Ad · brand.com` or just `Ad`.
 
 #### `SURF_REMOTE_DEBUG` exposed in manifest
 `manifest.json` `user_config` adds a `remote_debug` boolean and maps it to `SURF_REMOTE_DEBUG`, so manifest-based installs can enable the headless-server DevTools recovery flow.
@@ -204,7 +247,7 @@ Tightened from `\b(sponsored|ads?)\b` to `\b(sponsored|advertisement)\b|(?:^|\s)
 
 #### Tiered PDF extraction (`unpdf`)
 - **src/extract-pdf.ts**: `extractPdfTiered(buf, mode, maxChars)` returns `full_text`, `abstract` (PDF page 1 text content), or `metadata_only` (page count). Detects PDFs via `%PDF` magic bytes (`isPdfMagic`) or `Content-Type: application/pdf` (`isPdfContentType`).
-- **src/extract-meta.ts**: HTML meta-tag helpers — `findCitationPdfUrl`, `findAbstractFromMeta` (citation_abstract → dc.description → description → og:description), `findTitle`, `domainPdfTransform` (openreview, biorxiv/medrxiv, nature), `findPmcUrlFromPubmed`.
+- **src/extract-meta.ts**: HTML meta-tag helpers: `findCitationPdfUrl`, `findAbstractFromMeta` (citation_abstract → dc.description → description → og:description), `findTitle`, `domainPdfTransform` (openreview, biorxiv/medrxiv, nature), `findPmcUrlFromPubmed`.
 - **src/extract.ts**: new `discoverViaFetch` runs before Playwright. PDF magic / Content-Type → tiered PDF extract; `mode='abstract'` HTML → meta description; otherwise tries `findCitationPdfUrl` + `domainPdfTransform` candidates; PubMed → PMC chain. Skips Playwright for academic PDFs entirely.
 - Coverage: arxiv, biorxiv, Nature, OpenReview, NeurIPS, JMLR, PMLR, Springer, PubMed (via PMC).
 
@@ -254,10 +297,10 @@ The `STRATEGIES` array, geometric verification, and score-based classification f
 - These power the self-healing pipeline; wiring them into the live search path is planned for 0.5.
 
 #### Self-healing pipeline
-- **src/heal/validator.ts** — Triple Gate validator: Gate A (geometric: ≥5 results, organic ratio ≥60%, mean confidence ≥0.5), Gate B (XPath stability: stable attributes preferred over class-only), Gate C (LLM confirmation). All three required before a PR is generated. A 3-query empirical test runs on anchor queries — 3/3 → apply, 2/3 → caution flag, <2 → escalate.
-- **src/heal/synthesis.ts** — deterministic selector synthesis from stable attributes (`[data-ved]` → `div[jscontroller]` → `div[data-hveid]` → longest class token).
-- **src/heal/llm.ts** — LLM verifier (Anthropic SDK optional peer dep; mock fallback when no API key).
-- **scripts/repair/** + **.github/workflows/repair-pipeline.yml** — daily cron: detection → synthesis → Triple Gate → 3-query empirical check → PR draft. Auto-merge never; human review required.
+- **src/heal/validator.ts**: Triple Gate validator: Gate A (geometric: ≥5 results, organic ratio ≥60%, mean confidence ≥0.5), Gate B (XPath stability: stable attributes preferred over class-only), Gate C (LLM confirmation). All three required before a PR is generated. A 3-query empirical test runs on anchor queries: 3/3 → apply, 2/3 → caution flag, <2 → escalate.
+- **src/heal/synthesis.ts**: deterministic selector synthesis from stable attributes (`[data-ved]` → `div[jscontroller]` → `div[data-hveid]` → longest class token).
+- **src/heal/llm.ts**: LLM verifier (Anthropic SDK optional peer dep; mock fallback when no API key).
+- **scripts/repair/** + **.github/workflows/repair-pipeline.yml**: daily cron: detection → synthesis → Triple Gate → 3-query empirical check → PR draft. Auto-merge never; human review required.
 
 #### Foundation
 - **src/config.ts**: centralized env validation; `parseTz` validates IANA tz with fallback (no launch-time throw on invalid `SURF_TZ`).
@@ -266,12 +309,12 @@ The `STRATEGIES` array, geometric verification, and score-based classification f
 - **src/navigate.ts**: `navigateHome` consolidates duplicate goto sites with exact-match URL check.
 
 #### Data layer
-- **src/cache.ts**: JSON+fs unified cache — namespace + per-entry TTL + atomic write + LRU eviction by mtime (`SURF_CACHE_MAX_ENTRIES`, default 1000). `search` results cached 24h by default (`SURF_CACHE_TTL_SEARCH_MS`); cache key is `query|locale|limit`.
+- **src/cache.ts**: JSON+fs unified cache with namespace, per-entry TTL, atomic write, and LRU eviction by mtime (`SURF_CACHE_MAX_ENTRIES`, default 1000). `search` results cached 24h by default (`SURF_CACHE_TTL_SEARCH_MS`); cache key is `query|locale|limit`.
 
 #### Stealth cascade (src/cascade.ts)
 The stealth plugin's evasion patterns are themselves a fingerprint. v0.4.5 makes bare playwright the default and the stealth plugin the fallback:
 
-  Tier 1: stealth off  (bare playwright — borrows the real profile's reputation)
+  Tier 1: stealth off  (bare playwright using the real profile's reputation)
     ↓ 1 CAPTCHA
   Tier 2: stealth on   (playwright-extra + stealth plugin)
     ↓ 2 CAPTCHA
@@ -324,7 +367,7 @@ New 5th tool: reports cascade state (mode, per-mode CAPTCHA counts, transitions)
 - **CAPTCHA on pool path didn't release `PROFILE_MAIN` (B2)**: `search_parallel` and `search_extract` only called `resetPool` before recovery, while the sequential ctx might still hold `PROFILE_MAIN`. Headed Chrome launch in `recoverFromCaptcha` then collided on `SingletonLock`. Pool paths now also call `closeSequential`.
 - **`recoverFromCaptcha` had no mutex (B3)**: two concurrent in-flight requests both hitting CAPTCHA spawned two headed Chrome processes against `PROFILE_MAIN`, colliding on `SingletonLock`. Added module-level Promise singleton so concurrent callers share a single recovery. Also swallows `ctx.close()` errors (user closing the recovery window manually).
 - **Pool deadlock when all workers die + rebuilds fail (B4)**: previously, a fully-dead pool with unrebuildable workers would push acquires to the waiter queue forever (no resolve, no reject). Added `MAX_REBUILD_FAILURES=5` counter (resets on successful rebuild) that throws fast, and a 60s waiter timeout that rejects pending acquires instead of hanging indefinitely.
-- **`onHome` URL detection false-positives (B5)**: `url.startsWith('https://www.google.com/')` matched `imghp`, `finance/...`, `preferences`, etc., which lack the search textarea — the subsequent `sb.click({timeout:6000})` then waited 6s before throwing. Now exact-matches `https://www.google.com/` (with or without trailing slash).
+- **`onHome` URL detection false-positives (B5)**: `url.startsWith('https://www.google.com/')` matched `imghp`, `finance/...`, `preferences`, etc., which lack the search textarea. The subsequent `sb.click({timeout:6000})` then waited 6s before throwing. Now exact-matches `https://www.google.com/` (with or without trailing slash).
 
 ### Added
 - Tests: `withTimeout` cleanup-on-timeout (5 cases), `recoverFromCaptcha` mutex (3 cases), pool deadlock prevention (3 cases). Total: 32 tests pass.

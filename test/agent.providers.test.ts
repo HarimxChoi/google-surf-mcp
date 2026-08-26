@@ -11,6 +11,7 @@ import { loadConfig } from '../src/config.js';
 import { RateLimiter } from '../src/limiter.js';
 import { CaptchaError } from '../src/search.js';
 import type { SearchApiHandle } from '../src/searchApi.js';
+import type { NativeBrowserHandle } from '../src/nativeBrowser.js';
 import { StrategyHealing } from '../src/strategyHealing.js';
 import { Telemetry } from '../src/telemetry.js';
 
@@ -49,6 +50,28 @@ function fakeSearchApi(): SearchApiHandle {
   };
 }
 
+function fakeNativeBrowser(): NativeBrowserHandle {
+  return {
+    search: vi.fn(async (query) => ({
+      results: [{
+        title: `Native ${query}`,
+        url: `https://native.test/${encodeURIComponent(query)}`,
+        description: 'Native Chrome result',
+      }],
+      dropped: 0,
+      dropped_reasons: [],
+    })),
+    scholar: vi.fn(async () => [{
+      rank: 1,
+      title: 'Native paper',
+      snippet: 'Scholar result',
+      cited_by_count: 20,
+      metadata: 'Author - Venue, 2026',
+    }]),
+    close: vi.fn(async () => {}),
+  };
+}
+
 describe('provider routing', () => {
   let root: string;
 
@@ -80,6 +103,37 @@ describe('provider routing', () => {
     expect(deps.acquireSeqCtx).not.toHaveBeenCalled();
   });
 
+  it('routes search, parallel, and Scholar through native Chrome without legacy contexts', async () => {
+    const deps = makeDeps(root);
+    deps.nativeBrowser = fakeNativeBrowser();
+
+    const search = await searchTool({ query: 'native search' }, deps);
+    const parallel = await searchParallelTool({ queries: ['one', 'two'] }, deps);
+    const scholar = await scholarSearchTool({ query: 'native scholar' }, deps);
+
+    expect((search.structuredContent as Record<string, any>).meta.browser_engine).toBe('native');
+    expect((parallel.structuredContent as Record<string, any>).meta.browser_engine).toBe('native');
+    expect((scholar.structuredContent as Record<string, any>).meta.browser_engine).toBe('native');
+    expect(deps.nativeBrowser.search).toHaveBeenCalledTimes(3);
+    expect(deps.nativeBrowser.scholar).toHaveBeenCalledTimes(1);
+    expect(deps.acquireSeqCtx).not.toHaveBeenCalled();
+    expect(deps.acquirePool).not.toHaveBeenCalled();
+  });
+
+  it('falls back from native Chrome CAPTCHA without acquiring Playwright', async () => {
+    const deps = makeDeps(root, { SURF_SEARCH_PROVIDER: 'fallback' });
+    deps.searchApi = fakeSearchApi();
+    deps.nativeBrowser = fakeNativeBrowser();
+    deps.nativeBrowser.search = vi.fn(async () => { throw new CaptchaError('native'); });
+
+    const out = await searchTool({ query: 'native captcha' }, deps);
+    const data = out.structuredContent as Record<string, any>;
+
+    expect(data.meta.provider).toBe('searchapi');
+    expect(data.meta.fallback_reason).toBe('CAPTCHA_RECOVER_FAIL');
+    expect(deps.acquireSeqCtx).not.toHaveBeenCalled();
+  });
+
   it('falls back directly when the browser profile is unavailable', async () => {
     const deps = makeDeps(root, { SURF_SEARCH_PROVIDER: 'fallback' });
     deps.searchApi = fakeSearchApi();
@@ -102,7 +156,6 @@ describe('provider routing', () => {
       SURF_SCHOLAR_PROVIDER: 'fallback',
     });
     deps.searchApi = fakeSearchApi();
-    deps.config.cascadeDisabled = true;
     deps.acquireSeqCtx = vi.fn(async () => { throw new CaptchaError('captcha'); });
 
     const search = await searchTool({ query: 'captcha search' }, deps);
@@ -114,6 +167,7 @@ describe('provider routing', () => {
       .toBe('CAPTCHA_RECOVER_FAIL');
     expect(deps.searchApi.searchGoogle).toHaveBeenCalledTimes(1);
     expect(deps.searchApi.searchScholar).toHaveBeenCalledTimes(1);
+    expect(deps.recoverHuman).not.toHaveBeenCalled();
   });
 
   it('supports SearchApi primary for parallel search in cloud mode', async () => {
@@ -153,6 +207,23 @@ describe('provider routing', () => {
     expect(deps.searchApi.searchGoogle).toHaveBeenCalledTimes(1);
     expect(deps.searchApi.searchGoogle).toHaveBeenCalledWith('failed', 10, 'en-US');
     expect(data.meta.provider).toBe('mixed');
+  });
+
+  it('falls back from pool CAPTCHA without waiting for human recovery', async () => {
+    const deps = makeDeps(root, { SURF_SEARCH_PROVIDER: 'fallback' });
+    deps.searchApi = fakeSearchApi();
+    deps.acquirePool = vi.fn(async () => ({
+      runMany: vi.fn(async () => { throw new CaptchaError('captcha'); }),
+      searchOne: vi.fn(),
+      extractOne: vi.fn(),
+    }));
+
+    const out = await searchParallelTool({ queries: ['one', 'two'] }, deps);
+    const data = out.structuredContent as Record<string, any>;
+
+    expect(data.meta.provider).toBe('searchapi');
+    expect(data.results).toHaveLength(2);
+    expect(deps.recoverHuman).not.toHaveBeenCalled();
   });
 
   it('does not repeat a normal empty browser response', async () => {

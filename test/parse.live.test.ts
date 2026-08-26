@@ -89,11 +89,11 @@ describe('live SERP fixture with ads', () => {
     for (const r of out.results) expect(adHrefs.has(r.url)).toBe(false);
   });
 
-  it('keeps organic ko results whose text merely mentions 광고', () => {
+  it('keeps organic Korean results whose text merely mentions the ad term', () => {
     loadLiveAds();
     const out = parseResultsInBrowser({ strategy: byId('class-mjjyud-v1'), max: 10 });
     const marker = getAdMarker(out.signals.lang);
-    const mentions = out.results.filter((r) => /광고/.test(r.title) || /광고/.test(r.description));
+    const mentions = out.results.filter((r) => /\uAD11\uACE0/.test(r.title) || /\uAD11\uACE0/.test(r.description));
     expect(mentions.length).toBeGreaterThan(0);
     for (const r of mentions) {
       expect(marker.test(r.title) || marker.test(r.description)).toBe(false);

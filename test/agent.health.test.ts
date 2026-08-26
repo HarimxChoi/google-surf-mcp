@@ -96,6 +96,8 @@ describe('healthTool', () => {
     deps.config.searchProvider = 'fallback';
     deps.config.scholarProvider = 'searchapi';
     deps.config.searchApiKey = 'secret';
+    deps.config.researchEnabled = true;
+    deps.config.researchRetrievalMode = 'live';
 
     const out = await healthTool(deps);
     const config = (out.structuredContent as Record<string, any>).config;
@@ -104,7 +106,25 @@ describe('healthTool', () => {
       searchProvider: 'fallback',
       scholarProvider: 'searchapi',
       searchApiConfigured: true,
+      researchEnabled: true,
+      researchRetrievalMode: 'live',
     });
     expect(JSON.stringify(config)).not.toContain('secret');
+  });
+
+  it('reports requested and effective browser engines', async () => {
+    const deps = mkDeps(dir);
+    deps.config.browserEngine = 'native';
+    deps.nativeBrowser = {
+      search: async () => ({ results: [], dropped: 0, dropped_reasons: [] }),
+      scholar: async () => [],
+      close: async () => {},
+    };
+
+    const out = await healthTool(deps);
+    const config = (out.structuredContent as Record<string, any>).config;
+
+    expect(config.browserEngine).toBe('native');
+    expect(config.effectiveBrowserEngine).toBe('native');
   });
 });

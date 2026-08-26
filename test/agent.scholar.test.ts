@@ -135,6 +135,12 @@ describe('scholarSearchTool', () => {
       expect(deps.acquireSeqCtx).toHaveBeenCalledTimes(1);
       expect(deps.closeSeq).not.toHaveBeenCalled();
       expect(deps.recoverHuman).not.toHaveBeenCalled();
+
+      const repeated = await scholarSearchTool({ query: 'different query' }, deps);
+      const repeatedError = (repeated.structuredContent as Record<string, any>).error;
+      expect(repeatedError.code).toBe('RATE_LIMITED');
+      expect(repeatedError.retry_after_ms).toBeGreaterThan(0);
+      expect(deps.acquireSeqCtx).toHaveBeenCalledTimes(1);
     } finally {
       await browser.close();
     }
