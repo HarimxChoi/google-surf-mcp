@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { resolve } from 'node:path';
 import { loadConfig } from '../src/config.js';
 
 describe('loadConfig', () => {
@@ -109,12 +110,13 @@ describe('loadConfig', () => {
   });
 
   it('enables local research by default and supports an explicit opt-out', () => {
+    const researchRoot = resolve('research', 'surf');
     const configured = loadConfig({
-      SURF_PROFILE_ROOT: 'C:\\profiles\\surf',
-      SURF_RESEARCH_ROOT: 'C:\\research\\surf',
+      SURF_PROFILE_ROOT: resolve('profiles', 'surf'),
+      SURF_RESEARCH_ROOT: researchRoot,
     });
     expect(configured.researchEnabled).toBe(true);
-    expect(configured.researchRoot).toBe('C:\\research\\surf');
+    expect(configured.researchRoot).toBe(researchRoot);
     expect(loadConfig({ SURF_RESEARCH_VECTOR_MODEL: ' model/id ' }).researchVectorModel)
       .toBe('model/id');
     expect(loadConfig({ SURF_RESEARCH_VECTOR_MODEL: 'off' }).researchVectorModel)
