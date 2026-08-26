@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { resolve, sep } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { RecordId, Table, type Surreal } from 'surrealdb';
+import { isTransactionConflict } from './errors.js';
 import type {
   AssertionCorrectionRecord, AssertionRecord, CodeRelationRecord, CodeSymbolRecord,
   DecisionRecord, EvidenceRecord,
@@ -217,6 +218,26 @@ export class ResearchStore {
     const db = await this.open();
     const value = await db.upsert<ProjectRecord>(new RecordId('project', project.project_id))
       .content(project as unknown as Record<string, unknown>);
+    return withoutId(value as RecordWithId<ProjectRecord>);
+  }
+
+  async forgetProject(projectId: string, now: string): Promise<ProjectRecord> {
+    const db = await this.open();
+    const value = await db.update<ProjectRecord>(new RecordId('project', projectId)).merge({
+      status: 'forgotten',
+      forgot_at: now,
+      updated_at: now,
+    }).retry({ attempts: 5, retryable: isTransactionConflict });
+    return withoutId(value as RecordWithId<ProjectRecord>);
+  }
+
+  async restoreProject(projectId: string, now: string): Promise<ProjectRecord> {
+    const db = await this.open();
+    const value = await db.update<ProjectRecord>(new RecordId('project', projectId)).patch([
+      { op: 'remove', path: '/forgot_at' },
+      { op: 'replace', path: '/status', value: 'active' },
+      { op: 'replace', path: '/updated_at', value: now },
+    ]).retry({ attempts: 5, retryable: isTransactionConflict });
     return withoutId(value as RecordWithId<ProjectRecord>);
   }
 

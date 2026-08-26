@@ -484,6 +484,7 @@ describe('research project memory', () => {
       },
     });
     const preview = await service.previewForgetProject('reversible-project');
+    const graph = await service.materializeGraph(['reversible-project']);
 
     expect(preview).toMatchObject({ documents: 1, source_entries: 0, sessions: 1 });
     await expect(service.forgetProject('reversible-project', 'wrong-token'))
@@ -495,6 +496,9 @@ describe('research project memory', () => {
       .rejects.toThrow('project forgotten');
 
     await service.restoreProject('reversible-project');
+    const restored = await service.getProject('reversible-project');
+    expect(restored.project.active_graph_projection_id).toBe(graph.projection.projection_id);
+    expect(restored.project.forgot_at).toBeUndefined();
     expect(await service.search('reversible-project', 'reversibleevidence', 10)).toHaveLength(1);
   });
 

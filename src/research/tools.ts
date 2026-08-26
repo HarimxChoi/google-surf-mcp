@@ -1,6 +1,7 @@
 import type { CallToolResult } from '../response.js';
 import { formatToolResponse } from '../response.js';
 import type { AssertionValue, ExperimentStatus } from './contracts.js';
+import { isTransactionConflict } from './errors.js';
 import { ResearchService } from './service.js';
 
 export interface ProjectMemoryInput {
@@ -47,7 +48,7 @@ function toolError(error: unknown): CallToolResult {
   return formatToolResponse(null, {
     code: 'INTERNAL',
     message: error instanceof Error ? error.message : String(error),
-    retryable: false,
+    retryable: isTransactionConflict(error),
   });
 }
 

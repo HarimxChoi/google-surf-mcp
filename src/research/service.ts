@@ -742,12 +742,7 @@ export class ResearchService {
     const project = await this.store.getProject(preview.project_id);
     if (!project) throw new Error(`project not found: ${preview.project_id}`);
     const now = new Date().toISOString();
-    return await this.store.putProject({
-      ...project,
-      status: 'forgotten',
-      forgot_at: now,
-      updated_at: now,
-    });
+    return await this.store.forgetProject(project.project_id, now);
   }
 
   async restoreProject(projectIdValue: string): Promise<ProjectRecord> {
@@ -756,12 +751,7 @@ export class ResearchService {
     const project = await this.store.getProject(projectId);
     if (!project) throw new Error(`project not found: ${projectId}`);
     if (project.status !== 'forgotten') throw new Error(`project is active: ${projectId}`);
-    const { forgot_at: _forgotAt, ...active } = project;
-    return await this.store.putProject({
-      ...active,
-      status: 'active',
-      updated_at: new Date().toISOString(),
-    });
+    return await this.store.restoreProject(project.project_id, new Date().toISOString());
   }
 
   async previewForgetAssertion(
