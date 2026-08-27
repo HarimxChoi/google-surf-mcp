@@ -51,7 +51,7 @@ function fakeSearchApi(): SearchApiHandle {
 }
 
 function fakeNativeBrowser(): NativeBrowserHandle {
-  return {
+  const browser: NativeBrowserHandle = {
     search: vi.fn(async (query) => ({
       results: [{
         title: `Native ${query}`,
@@ -61,6 +61,10 @@ function fakeNativeBrowser(): NativeBrowserHandle {
       dropped: 0,
       dropped_reasons: [],
     })),
+    searchMany: vi.fn(async (queries, limit, opts) => await Promise.all(queries.map(async (query) => ({
+      query,
+      outcome: await browser.search(query, limit, opts),
+    })))),
     scholar: vi.fn(async () => [{
       rank: 1,
       title: 'Native paper',
@@ -70,6 +74,7 @@ function fakeNativeBrowser(): NativeBrowserHandle {
     }]),
     close: vi.fn(async () => {}),
   };
+  return browser;
 }
 
 describe('provider routing', () => {
@@ -118,6 +123,21 @@ describe('provider routing', () => {
     expect(deps.nativeBrowser.scholar).toHaveBeenCalledTimes(1);
     expect(deps.acquireSeqCtx).not.toHaveBeenCalled();
     expect(deps.acquirePool).not.toHaveBeenCalled();
+  });
+
+  it('accepts 12 parallel queries and rejects larger batches', async () => {
+    const deps = makeDeps(root);
+    deps.nativeBrowser = fakeNativeBrowser();
+    deps.limiter = new RateLimiter(1_000);
+    const queries = Array.from({ length: 12 }, (_, index) => `query ${index}`);
+
+    const accepted = await searchParallelTool({ queries }, deps);
+    const rejected = await searchParallelTool({ queries: [...queries, 'query 12'] }, deps);
+
+    expect((accepted.structuredContent as Record<string, any>).results).toHaveLength(12);
+    expect((rejected.structuredContent as Record<string, any>).error.message)
+      .toBe('queries must contain at most 12 items');
+    expect(deps.nativeBrowser.search).toHaveBeenCalledTimes(12);
   });
 
   it('falls back from native Chrome CAPTCHA without acquiring Playwright', async () => {

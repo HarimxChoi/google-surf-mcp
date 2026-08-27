@@ -152,9 +152,9 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 항상 라이브 웹 검색을 실행합니다. 신규 외부 정보가 필요할 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
+- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 항상 라이브 웹 검색을 실행합니다. 신규 외부 정보가 필요할 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. 리서치에서는 별도 extract 호출 대신 이 호출에 `extract_mode`를 지정합니다. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
 - `scholar_search(query, limit?)` - Google Scholar metadata 검색. 브라우저, SearchApi 메인, fallback을 지원합니다.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 항상 2-10개의 라이브 웹 검색을 실행하며 신규 외부 정보가 필요할 때만 사용합니다. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 최대 4개 탭이 계속 다음 작업을 가져가는 큐로 2-12개의 라이브 웹 검색을 실행합니다. 검색 시작 시각은 서로 겹치지 않게 조정합니다. 신규 외부 정보가 필요할 때만 사용하고 결과를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
 - `extract(url, max_chars?, mode?)` - URL 본문 읽기
   - `mode="full"` (기본): 최대 50000자, PDF는 `liteparse`(spatial parsing, 다단 읽기). research 모드에서는 문서 메타데이터도 본문과 함께 저장
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). research 모드에서는 문서 메타데이터도 요약과 함께 저장
@@ -173,6 +173,35 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 | 웹에서 신규 정보 검색 | `search` |
 | 신규 웹 결과와 저장된 프로젝트 지식을 함께 비교 | `project_id`를 지정한 `search` |
 | 여러 신규 웹 쿼리 실행 | `search_parallel` |
+
+## 재실행 가능한 리서치 수집
+
+`google-surf-collect`는 버전형 JSON 명세를 하나의 지속 MCP 세션에서 실행합니다. 하나의 명세에 라이브 `search`와 로컬 전용 `project_memory_search` 작업을 함께 넣을 수 있습니다. 라이브 작업은 같은 호출에서 본문을 추출하고, 로컬 작업은 Google을 열지 않고 이미 색인된 프로젝트 지식을 검색합니다.
+
+```bash
+npx google-surf-collect examples/research-collection.example.json
+```
+
+소스 체크아웃에서는 다음과 같이 실행합니다.
+
+```bash
+npm run build
+npm run research:collect -- examples/research-collection.example.json
+```
+
+프로젝트 워크플로에서는 지속 세션과 계획을 기록하고, 승인된 코드 root를 색인하고, 생성된 로컬 지식을 검색한 뒤 그래프를 export할 수 있습니다.
+
+```bash
+npm run research:collect -- examples/project-memory-workflow.example.json
+```
+
+`project_memory` 수집 작업은 `record`, `rebuild`, `export`만 허용합니다. 삭제 작업인 `forget`은 수집 명세에서 허용하지 않습니다. 전체 프로젝트 export가 아니면 상위 `project_id`를 모든 작업이 상속합니다.
+
+출력은 append-only JSONL입니다. manifest에는 정규화된 명세 hash, 패키지 버전, Git commit, Node 런타임, 플랫폼, 프로젝트 준비 상태와 서버 상태가 기록됩니다. 검색, 기록, 색인과 export 결과에는 안정적인 job id, 정확한 도구 인자, attempt, 시작·종료 시각, 소요시간, 응답과 오류 상태가 남습니다. 재실행하면 성공한 작업은 건너뛰고 실패한 작업만 다시 시도합니다. 명세가 바뀌면 새 출력 파일을 사용해야 합니다. 없는 프로젝트를 실행기가 생성해야 하면 `project_id`와 함께 `project_name`을 지정합니다. 기존 프로젝트는 그대로 재사용합니다.
+
+기존 프로젝트 RAG 상태가 라이브 결과 순위에 영향을 주지 않아야 하면 `retrieval_mode`를 `live`로 설정합니다. 검색 결과는 그대로 `project_id`에 저장됩니다. 신규 웹 근거와 저장 지식을 의도적으로 함께 평가할 때는 `hybrid`를 사용합니다. API 키와 환경변수 값은 수집 로그에 기록하지 않습니다.
+
+이 방식은 수집 절차와 반환된 snapshot을 재실행하고 감사할 수 있게 합니다. 라이브 웹 결과 자체는 시각, 로케일, 네트워크 경로와 upstream ranking에 따라 달라질 수 있습니다.
 
 ## 온톨로지와 데이터 리니지가 적용된 그래프 하이브리드 RAG 구조
 
@@ -366,7 +395,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 
 ## Troubleshooting
 
-- Native 검색 CAPTCHA는 구조화된 오류를 반환합니다. 나중에 재시도하거나 네트워크 경로를 바꾸거나 `SURF_SEARCH_PROVIDER=fallback`, `SURF_SCHOLAR_PROVIDER=fallback`을 사용하세요.
+- Native 검색은 CAPTCHA가 나타나면 현재 세션을 유지한 채 Chrome을 최대화합니다. 해당 창에서 CAPTCHA를 푼 뒤 재시도하면 다음 호출이 해제 여부를 확인하고 Chrome을 다시 최소화한 뒤 같은 세션을 계속 사용합니다. `SURF_SEARCH_PROVIDER=fallback`, `SURF_SCHOLAR_PROVIDER=fallback`으로 SearchApi fallback도 사용할 수 있습니다.
 - Playwright CAPTCHA 복구 4모드 (env로 자동 결정):
   - 기본 (로컬 데스크탑): OS 알림 발송, headed Chrome을 연 뒤 호출 반환. 사람이 풀고 재시도
   - `SURF_HEADLESS=false`: 알림 없이 headed Chrome을 연 뒤 호출 반환. 사람이 풀고 재시도
@@ -375,7 +404,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 - **headed Chrome이 CAPTCHA 대신 그냥 검색창으로 열림**: 그냥 아무 검색어 입력하고 Enter 치면 됨. 이후 호출은 정상 동작
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정
 - 셀렉터 깨짐: 런타임 strategy 재배열 (`SURF_SELF_HEALING`, deterministic)과 수동 repair workflow로 대응 (`SURF_LLM_HEAL` 선택, 사람이 리뷰)
-- Playwright 검색이 예상보다 느리면 `health().pool.fallback` 확인. `true`면 워커 풀이 single-context를 사용 중입니다. Native 검색은 쿼리마다 최소화된 Chrome 창을 열고 닫습니다.
+- Playwright 검색이 예상보다 느리면 `health().pool.fallback` 확인. `true`면 워커 풀이 single-context를 사용 중입니다. Native 검색은 MCP 서버가 종료될 때까지 `search`, `search_parallel`, `scholar_search`에서 최소화된 Chrome 프로세스 하나와 재사용 탭을 최대 4개 유지합니다. 검색 시작 시각은 서로 겹치지 않게 조정합니다. CAPTCHA는 사용자 해결을 위해 같은 세션을 최대화하고, 브라우저 충돌은 다음 호출에서 새 세션을 시작합니다.
 - SSRF: `extract`는 기본적으로 `localhost`, 사설 IP, AWS metadata 차단. `SURF_ALLOW_PRIVATE=true`로 우회
 - 캐시 정리: `npm run cache:clear`는 search/extract cache와 내려받은 vector model cache만 지우며 research DB는 유지
 - local research DB는 application-level 암호화를 하지 않습니다. 장비나 backup의 at-rest 보호가 필요하면 OS 계정 권한과 BitLocker 또는 FileVault를 사용하세요.

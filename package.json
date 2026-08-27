@@ -1,15 +1,17 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "type": "module",
   "bin": {
-    "google-surf-mcp": "build/index.js"
+    "google-surf-mcp": "build/index.js",
+    "google-surf-collect": "build/collect.js"
   },
   "files": [
     "build",
     "assets/searchapi-banner.png",
+    "examples",
     "vendor",
     "README.md",
     "LICENSE"
@@ -18,7 +20,7 @@
     "sync-versions": "node scripts/sync-versions.mjs",
     "prebuild": "npm run sync-versions",
     "build": "npm run build:core",
-    "build:core": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build:core": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc && node -e \"for(const f of ['build/index.js','build/collect.js'])require('fs').chmodSync(f,'755')\"",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "bootstrap": "node build/bootstrap.js",
@@ -28,6 +30,7 @@
     "test:watch": "vitest",
     "check:prereg": "node scripts/check-prereg.mjs",
     "research:reopen-probe": "node scripts/probe-research-reopen.mjs",
+    "research:collect": "node build/collect.js",
     "research:storage-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-project-storage.js",
     "research:graph-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-graph-engines.js",
     "research:index-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-research-indexing.js",

@@ -541,6 +541,11 @@ export async function searchParallelTool(
       code: 'INTERNAL', message: 'queries required', retryable: false,
     });
   }
+  if (queries.length > 12) {
+    return formatToolResponse(null, {
+      code: 'INTERNAL', message: 'queries must contain at most 12 items', retryable: false,
+    });
+  }
 
   const configError = providerConfigError(mode, deps);
   if (configError) return configError;
@@ -620,26 +625,17 @@ async function runNativeParallel(
   limit: number,
   deps: Deps,
 ): Promise<PoolSearchResult[]> {
-  const results: PoolSearchResult[] = [];
-  for (const query of queries) {
-    try {
-      const outcome = await deps.nativeBrowser!.search(query, limit, {
-        locale: deps.config.locale,
-        healing: deps.healing,
-      });
-      results.push({
-        query,
-        results: outcome.results,
-        dropped: outcome.dropped,
-        dropped_reasons: outcome.dropped_reasons,
-        degraded_reasons: outcome.degraded_reasons,
-      });
-    } catch (error) {
-      if (error instanceof CaptchaError) throw error;
-      results.push({ query, results: [], error: (error as Error).message });
-    }
-  }
-  return results;
+  const rows = await deps.nativeBrowser!.searchMany(queries, limit, {
+    locale: deps.config.locale,
+    healing: deps.healing,
+  });
+  return rows.map(({ query, outcome, error }) => outcome ? {
+    query,
+    results: outcome.results,
+    dropped: outcome.dropped,
+    dropped_reasons: outcome.dropped_reasons,
+    degraded_reasons: outcome.degraded_reasons,
+  } : { query, results: [], error });
 }
 
 async function runSearchApiParallel(

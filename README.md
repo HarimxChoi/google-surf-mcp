@@ -182,9 +182,9 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - always performs live web search. Use it only when new external information is required. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
+- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - always performs live web search. Use it only when new external information is required. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. For research, set `extract_mode` in this call instead of making separate extract calls. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
 - `scholar_search(query, limit?)` - Google Scholar metadata search, max 10 papers. Supports browser, SearchApi primary, and fallback modes.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - always performs 2-10 live web searches. Use it only for new external information. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - always performs 2-12 live web searches through a continuous four-tab queue. Query starts are staggered. Use it only for new external information and set `extract_mode` in the same call when results must be read. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
 - `extract(url, max_chars?, mode?)` - fetch a URL.
   - `mode="full"` (default): up to 50000 characters. HTML via Readability, PDFs via `liteparse` (spatial parsing, multi-column reading order). Document metadata is included and stored with the extracted body when research mode is enabled.
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when research mode is enabled.
@@ -203,6 +203,35 @@ Local clone variant:
 | Find new information on the web | `search` |
 | Compare new web results with stored project knowledge | `search` with `project_id` |
 | Run several new web queries | `search_parallel` |
+
+## Replayable research collection
+
+`google-surf-collect` runs a versioned JSON specification through one persistent MCP session. A specification can mix live `search` jobs with local-only `project_memory_search` jobs. Live jobs can extract bodies in the same call, while local jobs reuse indexed project knowledge without opening Google.
+
+```bash
+npx google-surf-collect examples/research-collection.example.json
+```
+
+From a source checkout:
+
+```bash
+npm run build
+npm run research:collect -- examples/research-collection.example.json
+```
+
+A project workflow can also record durable sessions and plans, rebuild approved code roots, search the resulting local knowledge, and export its graph:
+
+```bash
+npm run research:collect -- examples/project-memory-workflow.example.json
+```
+
+`project_memory` collection jobs allow `record`, `rebuild`, and `export`. Destructive `forget` operations are not accepted by the collection schema. Project-level `project_id` is inherited by every job unless an all-project export is requested.
+
+The output is append-only JSONL. Its manifest records the normalized specification hash, package version, Git commit, Node runtime, platform, project setup, and server health. Every search, record, rebuild, and export result records the stable job id, exact tool arguments, attempt, timestamps, elapsed time, response, and error state. Successful jobs are skipped on resume; failed jobs are retried. A changed specification requires a new output file. Set `project_name` with `project_id` when the runner should create a missing project; existing projects are reused.
+
+Set `retrieval_mode` to `live` when prior project RAG state must not affect live result ranking. Results are still captured under `project_id`. Use `hybrid` when the collection intentionally ranks new web evidence together with stored project knowledge. API keys and environment variable values are never written to the collection log.
+
+This makes the collection procedure and returned snapshot replayable and auditable. Live web results can still change with time, locale, network route, and upstream ranking.
 
 ## Graph hybrid RAG with ontology and lineage
 
@@ -396,7 +425,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 
 ## Troubleshooting
 
-- Native search CAPTCHA returns a structured error. Retry later, change the network route, or use `SURF_SEARCH_PROVIDER=fallback` and `SURF_SCHOLAR_PROVIDER=fallback`.
+- Native search keeps the current session open and maximizes Chrome when a CAPTCHA appears. Solve it in that window and retry; the next call verifies the page, minimizes Chrome, and continues with the same session. SearchApi fallback remains available through `SURF_SEARCH_PROVIDER=fallback` and `SURF_SCHOLAR_PROVIDER=fallback`.
 - Playwright CAPTCHA recovery has 4 modes (picked automatically from env):
   - default (local desktop): OS notification fires, headed Chrome opens, and the call returns; solve it and retry
   - `SURF_HEADLESS=false`: headed Chrome opens without a notification; solve it and retry
@@ -405,7 +434,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 - **Headed Chrome opens to a plain search box instead of CAPTCHA**: just type any query in the box and press Enter. Subsequent calls work.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
 - Stale selectors: runtime per-strategy reorder (`SURF_SELF_HEALING`, deterministic) plus a manually dispatched repair workflow (`SURF_LLM_HEAL` optional, human review required, never auto-merged).
-- Playwright searches feel slower than expected: check `health().pool.fallback`. `true` means the worker pool is using a single context. Native search intentionally starts and closes one minimized Chrome window per query.
+- Playwright searches feel slower than expected: check `health().pool.fallback`. `true` means the worker pool is using a single context. Native search keeps one minimized Chrome process with up to four reusable tabs for `search`, `search_parallel`, and `scholar_search` until the MCP server stops. Query starts are staggered. A CAPTCHA maximizes and preserves that session for user recovery; a browser crash starts a new session on the next call.
 - SSRF: `extract` blocks `localhost`, private IPs, AWS metadata by default. Set `SURF_ALLOW_PRIVATE=true` to allow them.
 - Cache cleanup: `npm run cache:clear` removes search/extract and downloaded vector-model caches. It does not remove the research DB.
 - The local research DB is not application-encrypted. Use OS account permissions and disk encryption such as BitLocker or FileVault when the machine or backups need at-rest protection.

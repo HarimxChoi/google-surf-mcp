@@ -477,7 +477,7 @@ const ProjectCaptureInput = baseDeps.config.researchEnabled ? {
 
 const SearchExtractionFields = {
   extract_mode: z.enum(['none', 'abstract', 'full']).default('none').describe(
-    'Content depth after search. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
+    'Content depth in this search call. Use abstract or full during research instead of following search with separate extract calls. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
   ),
   extract_limit: z.number().int().min(1).max(10).default(5).describe(
     'Maximum unique result URLs to extract. For parallel search this is one call-wide limit, not a per-query limit.',
@@ -501,7 +501,7 @@ const ScholarSearchInput = {
 };
 
 const SearchParallelInput = {
-  queries: z.array(z.string().min(1).max(400)).min(2).max(10).describe('2-10 independent queries to run concurrently.'),
+  queries: z.array(z.string().min(1).max(400)).min(2).max(12).describe('2-12 independent live queries.'),
   limit: z.number().int().min(1).max(20).default(10).describe('Max results per query.'),
   ...SearchExtractionFields,
   ...ProjectSearchInput,
@@ -711,7 +711,7 @@ server.registerTool('search', {
     'Use this tool only when new external information from Google, public websites, papers, or repositories is required. ' +
     'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'Use extract_mode=abstract for bounded inspection and full only for complete text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'For research collection, set extract_mode=abstract or full in this call. Use extract separately only to revisit a known URL or request deeper text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
     'Captured search, source, session, and project provenance form data lineage; extracted bodies become evidence while unread hits remain metadata. ' +
@@ -781,13 +781,13 @@ server.registerTool('search_parallel', {
   title: 'Google Search Parallel',
   description:
     'ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES. ' +
-    'Use this tool only when 2-10 new external queries are required. Providing project_id adds stored evidence but never makes the searches local-only. ' +
+    'Use this tool only when 2-12 new external queries are required. Providing project_id adds stored evidence but never makes the searches local-only. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'Set extract_mode=abstract or full here so discovery and reading complete in one tool call; use extract separately only for a known URL or deeper text. extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
     'Extracted bodies become evidence while unread hits remain metadata. ' +
-    'Native Chrome serializes profile use; the Playwright compatibility path uses a worker pool. ' +
+    'Native Chrome keeps one minimized process with up to four reusable tabs. Query starts are staggered and each tab continuously consumes the remaining queue until the MCP server stops. ' +
     'SearchApi fallback replaces failed queries individually.',
   inputSchema: SearchParallelInput,
   outputSchema: SearchParallelOutput,

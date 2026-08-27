@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "collection_id": "project-memory-workflow-example",
+  "project_id": "google-surf-workflow-example",
+  "project_name": "Google Surf Workflow Example",
+  "session_id": "google-surf-workflow-20260827",
+  "session_intent": "Collect current evidence, index the local codebase, and preserve the project plan and lineage.",
+  "retrieval_mode": "live",
+  "default_tool": "search",
+  "on_error": "stop",
+  "output": "../artifacts/project-memory-workflow-example.results.jsonl",
+  "defaults": {
+    "search": {
+      "limit": 5,
+      "extract_mode": "abstract",
+      "extract_limit": 2,
+      "max_chars": 1500
+    },
+    "project_memory_search": {
+      "limit": 10
+    }
+  },
+  "jobs": [
+    {
+      "id": "record-session",
+      "tool": "project_memory",
+      "arguments": {
+        "action": "record",
+        "record_type": "session",
+        "intent": "Evaluate the local retrieval and research workflow with explicit provenance."
+      }
+    },
+    {
+      "id": "record-plan",
+      "tool": "project_memory",
+      "arguments": {
+        "action": "record",
+        "record_type": "plan",
+        "title": "Evaluate the research workflow",
+        "body": "Collect current primary sources, index the approved local root, compare local and live evidence, and export the resulting lineage."
+      }
+    },
+    {
+      "id": "collect-current-evidence",
+      "tool": "search",
+      "query": "local graph RAG provenance data lineage primary sources"
+    },
+    {
+      "id": "index-local-code",
+      "tool": "project_memory",
+      "arguments": {
+        "action": "rebuild",
+        "roots": [
+          {
+            "label": "workspace",
+            "path": "."
+          }
+        ],
+        "git_root": "."
+      }
+    },
+    {
+      "id": "search-project-knowledge",
+      "tool": "project_memory_search",
+      "query": "How does the local retrieval and provenance pipeline work?"
+    },
+    {
+      "id": "export-lineage",
+      "tool": "project_memory",
+      "arguments": {
+        "action": "export",
+        "export_format": "html",
+        "export_view": "lineage"
+      }
+    }
+  ]
+}

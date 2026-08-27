@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "collection_id": "calibration-research-example",
+  "project_id": "calibration-research",
+  "project_name": "Calibration Research",
+  "session_id": "calibration-research-20260827",
+  "session_intent": "Collect primary sources for calibration under distribution shift and compare them with existing project knowledge.",
+  "retrieval_mode": "live",
+  "default_tool": "search",
+  "on_error": "stop",
+  "output": "../artifacts/calibration-research-example.results.jsonl",
+  "defaults": {
+    "search": {
+      "limit": 8,
+      "extract_mode": "abstract",
+      "extract_limit": 4,
+      "max_chars": 1500
+    },
+    "project_memory_search": {
+      "limit": 10
+    }
+  },
+  "jobs": [
+    "predictive uncertainty under dataset shift primary paper",
+    "expected calibration error pitfalls adaptive calibration error primary paper",
+    {
+      "id": "stored-calibration-evidence",
+      "tool": "project_memory_search",
+      "query": "What evidence and failed experiments are already stored for calibration under shift?"
+    }
+  ]
+}
