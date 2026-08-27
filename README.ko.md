@@ -37,9 +37,9 @@ Exact + BM25 + Vector + Code graph + Graph PPR
                         ↓
         Results with evidence and provenance
 ```
-기본 도구 6개: `search` / `search_parallel` / `extract` / `scholar_search` / `project_memory` / `health`
+기본 도구 7개: `search` / `search_parallel` / `extract` / `scholar_search` / `project_memory_search` / `project_memory` / `health`
 
-Research 모드와 자동 저장은 기본으로 활성화됩니다. 검색과 추출만 사용하려면 `SURF_RESEARCH=false`로 설정합니다. 이때 DB와 graph sidecar를 열지 않고 `project_memory`도 등록하지 않습니다.
+Research 모드와 자동 저장은 기본으로 활성화됩니다. 검색과 추출만 사용하려면 `SURF_RESEARCH=false`로 설정합니다. 이때 DB와 graph sidecar를 열지 않고 프로젝트 메모리 도구도 등록하지 않습니다.
 
 기본 브라우저 검색은 API 키가 필요 없습니다. SearchApi는 선택적으로 기본 provider 또는 fallback으로 사용할 수 있습니다.
 
@@ -132,7 +132,7 @@ CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 }
 ```
 
-Claude Code를 재시작하면 기본 도구 6개를 사용할 수 있습니다. `SURF_RESEARCH=false`이면 `project_memory`가 제외됩니다.
+Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다. `SURF_RESEARCH=false`이면 `project_memory_search`와 `project_memory`가 제외됩니다.
 
 다른 MCP 클라이언트도 같은 JSON 구조 그대로 (config 파일 경로만 다름)
 
@@ -152,23 +152,24 @@ Claude Code를 재시작하면 기본 도구 6개를 사용할 수 있습니다.
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 신규 웹, 논문, 저장소를 찾는 기본 진입점. 항상 라이브 Google 검색을 실행하며 `project_id`가 있으면 저장된 프로젝트 지식과 함께 결합합니다. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
+- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 항상 라이브 웹 검색을 실행합니다. 신규 외부 정보가 필요할 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
 - `scholar_search(query, limit?)` - Google Scholar metadata 검색. 브라우저, SearchApi 메인, fallback을 지원합니다.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 신규 웹, 논문, 저장소를 찾는 독립 쿼리 2-10개. 각 쿼리가 라이브 Google 검색을 실행합니다. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 항상 2-10개의 라이브 웹 검색을 실행하며 신규 외부 정보가 필요할 때만 사용합니다. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
 - `extract(url, max_chars?, mode?)` - URL 본문 읽기
   - `mode="full"` (기본): 최대 50000자, PDF는 `liteparse`(spatial parsing, 다단 읽기). research 모드에서는 문서 메타데이터도 본문과 함께 저장
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). research 모드에서는 문서 메타데이터도 요약과 함께 저장
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
   - 응답: 본문 필드와 확인 가능한 문서 메타데이터. 실패는 `{ error }` 반환, throw 안 함
-- `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때만 제공
-  - `action="search"`: 저장된 로컬 지식만 검색합니다. 브라우저, Google, SearchApi를 호출하지 않고 exact, BM25, vector, graph 결과를 RRF와 로컬 리랭커로 결합합니다. 단일 프로젝트는 `project_id`, 선택 통합은 `include_project_ids`, 전체 통합은 `all_projects=true`를 사용합니다.
+- `project_memory_search(query, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. 브라우저, Google, SearchApi를 호출하지 않고 exact, BM25, vector, graph 결과를 RRF와 로컬 리랭커로 결합합니다. 단일 프로젝트는 `project_id`, 선택 통합은 `include_project_ids`, 전체 통합은 `all_projects=true`를 사용합니다.
+- `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때 프로젝트 지식을 관리합니다.
+  - `action="search"`: `project_memory_search`를 위한 호환 alias입니다.
   - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
 - `health()` - 검색과 로컬 research runtime 상태
 
 | 목적 | 도구 |
 |---|---|
-| 이전에 저장한 리서치와 프로젝트 메모리만 검색 | `project_memory(action="search")` |
+| 이전에 저장한 리서치와 프로젝트 메모리만 검색 | `project_memory_search` |
 | 웹에서 신규 정보 검색 | `search` |
 | 신규 웹 결과와 저장된 프로젝트 지식을 함께 비교 | `project_id`를 지정한 `search` |
 | 여러 신규 웹 쿼리 실행 | `search_parallel` |
@@ -315,7 +316,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 프로젝트: Graph memory | 세션: temporal graph research | 저장: 논문 1 (Graphiti), 레포 1 (getzep), 검색 요약 3 | 상태: 준비
 ```
 
-`SURF_RESEARCH=false`이면 DB와 sidecar를 열지 않고 `project_memory`도 등록하지 않습니다. Obsidian과 Notion 동기화는 포함하지 않으며 이후에도 프로젝트별 opt-in으로만 제공합니다.
+`SURF_RESEARCH=false`이면 DB와 sidecar를 열지 않고 `project_memory_search`와 `project_memory`도 등록하지 않습니다. Obsidian과 Notion 동기화는 포함하지 않으며 이후에도 프로젝트별 opt-in으로만 제공합니다.
 
 ## Env vars
 
@@ -328,7 +329,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 | `SURF_BROWSER_ENGINE` | `auto` | 브라우저 엔진: `auto`, `native`, `playwright`. Native Chrome은 검색 요청 완료 후 읽기 전용 CDP를 연결합니다. |
 | `CHROME_PATH` | 자동 감지 | Chrome 바이너리 절대 경로 |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | warm 프로필 위치 |
-| `SURF_RESEARCH` | `true` | 로컬 프로젝트 메모리, 저장, 색인과 `project_memory` 활성화 |
+| `SURF_RESEARCH` | `true` | 로컬 프로젝트 메모리, 저장, 색인, `project_memory_search`와 `project_memory` 활성화 |
 | `SURF_RETRIEVAL_MODE` | `hybrid` | 연구 검색 분기: `live` 또는 `hybrid`. `SURF_RESEARCH=true`일 때만 사용 |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB 데이터 디렉터리 |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | HNSW vector 검색과 최종 리랭킹에 쓰는 local 384차원 모델. 기본 model revision은 고정되며 `off`로 vector lane 비활성화 |

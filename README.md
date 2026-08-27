@@ -39,9 +39,9 @@ Exact + BM25 + Vector + Code graph + Graph PPR
         Results with evidence and provenance
 ```
 
-Six tools are available by default: `search` / `search_parallel` / `extract` / `scholar_search` / `project_memory` / `health`.
+Seven tools are available by default: `search` / `search_parallel` / `extract` / `scholar_search` / `project_memory_search` / `project_memory` / `health`.
 
-Research mode and automatic capture are enabled by default. Set `SURF_RESEARCH=false` to use search and extraction without opening the database or graph sidecar; `project_memory` is not registered in that mode.
+Research mode and automatic capture are enabled by default. Set `SURF_RESEARCH=false` to use search and extraction without opening the database or graph sidecar; the project memory tools are not registered in that mode.
 
 Browser search needs no API key. SearchApi can be configured as an optional primary provider or fallback.
 
@@ -134,7 +134,7 @@ Paste this into your `~/.claude.json`:
 }
 ```
 
-Restart Claude Code. All six tools, including `project_memory`, are available by default.
+Restart Claude Code. All seven tools, including `project_memory_search` and `project_memory`, are available by default.
 
 For other MCP clients, use the same JSON shape in their config file.
 
@@ -182,23 +182,24 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - default entry point for new web, paper, and repository discovery. It always runs a live Google search. With `project_id`, stored project knowledge is fused with the live results. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
+- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - always performs live web search. Use it only when new external information is required. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
 - `scholar_search(query, limit?)` - Google Scholar metadata search, max 10 papers. Supports browser, SearchApi primary, and fallback modes.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 2-10 independent new web, paper, and repository queries. Every query runs live Google search. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - always performs 2-10 live web searches. Use it only for new external information. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
 - `extract(url, max_chars?, mode?)` - fetch a URL.
   - `mode="full"` (default): up to 50000 characters. HTML via Readability, PDFs via `liteparse` (spatial parsing, multi-column reading order). Document metadata is included and stored with the extracted body when research mode is enabled.
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when research mode is enabled.
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.
   - Response: content fields plus available document metadata. Failures return `{ error }`, never throw.
-- `project_memory(action, ...)` - available only when `SURF_RESEARCH=true`.
-  - `action="search"`: searches stored local knowledge only. It combines exact, BM25, vector, and graph retrieval with RRF and a local reranker without opening a browser or calling Google or SearchApi. Use `project_id` for one project, `include_project_ids` for selected cross-project retrieval, or `all_projects=true` for every named project.
+- `project_memory_search(query, project_id?, include_project_ids?, all_projects?, limit?)` - searches stored local knowledge only. It combines exact, BM25, vector, and graph retrieval with RRF and a local reranker without opening a browser or calling Google or SearchApi. Use `project_id` for one project, `include_project_ids` for selected cross-project retrieval, or `all_projects=true` for every named project.
+- `project_memory(action, ...)` - manages durable project knowledge when `SURF_RESEARCH=true`.
+  - `action="search"`: compatibility alias for `project_memory_search`.
   - `action="export"`: writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`.
 - `health()` - server status, including the local research runtime.
 
 | Need | Tool |
 |---|---|
-| Search only previously stored research and project memory | `project_memory(action="search")` |
+| Search only previously stored research and project memory | `project_memory_search` |
 | Find new information on the web | `search` |
 | Compare new web results with stored project knowledge | `search` with `project_id` |
 | Run several new web queries | `search_parallel` |
@@ -345,7 +346,7 @@ Project and assertion deletion require a count preview and confirmation token. T
 Project: Graph memory | Session: temporal graph research | Stored: paper 1 (Graphiti), repo 1 (getzep), search summaries 3 | Status: ready
 ```
 
-Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `project_memory`. Obsidian and Notion sync are not included and will remain project-level opt-in when added.
+Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `project_memory_search` and `project_memory`. Obsidian and Notion sync are not included and will remain project-level opt-in when added.
 
 ## Env vars
 
@@ -358,7 +359,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 | `SURF_BROWSER_ENGINE` | `auto` | Browser engine: `auto`, `native`, or `playwright`. Native Chrome performs the request before read-only CDP attachment. |
 | `CHROME_PATH` | auto-detected | absolute path to Chrome binary |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | where the warm profile lives |
-| `SURF_RESEARCH` | `true` | enables local project memory, capture, indexing, and `project_memory`; set `false` for search and extraction only |
+| `SURF_RESEARCH` | `true` | enables local project memory, capture, indexing, `project_memory_search`, and `project_memory`; set `false` for search and extraction only |
 | `SURF_RETRIEVAL_MODE` | `hybrid` | research search route: `live` or `hybrid`; used only when `SURF_RESEARCH=true` |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB data directory |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | local 384-dimensional model used by HNSW vector retrieval and final reranking. The default model revision is pinned; `off` disables the vector lane. |

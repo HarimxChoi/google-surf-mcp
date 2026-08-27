@@ -35,8 +35,8 @@ try {
   }
   const descriptions = new Map(listed.tools.map((tool) => [tool.name, tool.description ?? '']));
   const requiredDescriptions = {
-    search: 'Default entry point',
-    search_parallel: '2-10 independent',
+    search: 'ALWAYS PERFORMS LIVE WEB SEARCH',
+    search_parallel: 'ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES',
     extract: 'exact URL',
     scholar_search: 'Do not use',
   };
@@ -78,7 +78,7 @@ try {
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name).sort();
   const expected = [
-    'extract', 'health', 'project_memory', 'scholar_search',
+    'extract', 'health', 'project_memory', 'project_memory_search', 'scholar_search',
     'search', 'search_parallel',
   ].sort();
   if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error('tool list mismatch');
@@ -107,8 +107,8 @@ try {
   const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
     ?.description ?? '';
   for (const phrase of [
-    'Local project knowledge retrieval', 'exact, BM25, vector, and graph',
-    'RRF', 'never opens a browser', 'session intent', 'immutable plan revisions',
+    'PROJECT MEMORY MANAGEMENT', 'compatibility alias', 'project_memory_search',
+    'session intent', 'immutable plan revisions',
     'versioned ontology', 'bitemporal data lineage', 'entity merge or split',
     'rebuild', 'export', 'interactive HTML', 'Graphviz DOT', 'D3 JSON', 'Neo4j', 'forget',
     'search_parallel', 'scholar_search', 'extract',
@@ -120,12 +120,30 @@ try {
   const searchDescription = listed.tools.find((tool) => tool.name === 'search')
     ?.description ?? '';
   for (const phrase of [
-    'Always performs a live Google search', 'action=search',
+    'ALWAYS PERFORMS LIVE WEB SEARCH', 'project_memory_search',
     'live web', 'exact', 'BM25', 'vector', 'code', 'graph',
     'prior searches', 'data lineage', 'versioned ontology', 'schema/entity links',
   ]) {
     if (!searchDescription.includes(phrase)) {
       throw new Error(`search research description missing: ${phrase}`);
+    }
+  }
+  const localSearchTool = listed.tools.find((tool) => tool.name === 'project_memory_search');
+  const localSearchProperties = localSearchTool?.inputSchema?.properties ?? {};
+  if (!('query' in localSearchProperties) || !('limit' in localSearchProperties)
+    || !('project_id' in localSearchProperties) || !('include_project_ids' in localSearchProperties)
+    || !('all_projects' in localSearchProperties)
+    || localSearchTool?.annotations?.readOnlyHint !== true
+    || localSearchTool?.annotations?.idempotentHint !== true
+    || localSearchTool?.annotations?.openWorldHint !== false) {
+    throw new Error('project_memory_search contract missing');
+  }
+  for (const phrase of [
+    'LOCAL PROJECT KNOWLEDGE SEARCH ONLY', 'exact, BM25, vector, and graph',
+    'RRF', 'never opens Google', 'new external information',
+  ]) {
+    if (!localSearchTool?.description?.includes(phrase)) {
+      throw new Error(`project_memory_search description missing: ${phrase}`);
     }
   }
 
@@ -175,9 +193,8 @@ try {
     throw new Error('project index reuse failed');
   }
   const localSearch = await client.callTool({
-    name: 'project_memory',
+    name: 'project_memory_search',
     arguments: {
-      action: 'search',
       project_id: 'smoke',
       query: 'smoke_index_token',
       limit: 5,

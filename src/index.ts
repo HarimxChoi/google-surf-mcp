@@ -25,7 +25,10 @@ import {
   captureOnly, runParallelWithResearch, runSearchWithResearch,
 } from './research/orchestrator.js';
 import { ResearchService } from './research/service.js';
-import { projectMemoryTool, type ProjectMemoryInput } from './research/tools.js';
+import {
+  projectMemorySearchTool, projectMemoryTool,
+  type ProjectMemoryInput, type ProjectMemorySearchInput,
+} from './research/tools.js';
 import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
 import { PKG_NAME, VERSION } from './version.js';
@@ -693,13 +696,23 @@ const ProjectMemoryOutput = {
   error: ErrorInfoShape.optional(),
 };
 
+const ProjectMemorySearchSchema = {
+  query: z.string().min(1).max(400).describe('Natural-language query over indexed local project knowledge.'),
+  project_id: z.string().min(1).max(64).optional().describe('Primary project to search. Required unless all_projects=true.'),
+  include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects searched with the primary project.'),
+  all_projects: z.boolean().optional().describe('Search every active named project. Excludes Inbox and cannot be combined with project ids.'),
+  limit: z.number().int().min(1).max(20).default(10).describe('Maximum local RAG results.'),
+};
+
 server.registerTool('search', {
   title: 'Google Search',
   description:
-    'Default entry point for new web, paper, and repository discovery. Always performs a live Google search. ' +
+    'ALWAYS PERFORMS LIVE WEB SEARCH. ' +
+    'Use this tool only when new external information from Google, public websites, papers, or repositories is required. ' +
+    'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
+    'For stored project knowledge without live web discovery, use project_memory_search. ' +
     'Use extract_mode=abstract for bounded inspection and full only for complete text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
-    'For stored local knowledge without any Google, browser, or SearchApi search, use project_memory with action=search instead. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
     'Captured search, source, session, and project provenance form data lineage; extracted bodies become evidence while unread hits remain metadata. ' +
     'include_project_ids adds read-only cross-project retrieval through versioned ontology and verified schema/entity links without merging records. ' +
@@ -767,10 +780,11 @@ server.registerTool('scholar_search', {
 server.registerTool('search_parallel', {
   title: 'Google Search Parallel',
   description:
-    'Use for 2-10 independent new web queries known in advance. Every query performs a live Google search. ' +
+    'ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES. ' +
+    'Use this tool only when 2-10 new external queries are required. Providing project_id adds stored evidence but never makes the searches local-only. ' +
+    'For stored project knowledge without live web discovery, use project_memory_search. ' +
     'extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
-    'For stored local knowledge without live web requests, use project_memory with action=search instead. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
     'Extracted bodies become evidence while unread hits remain metadata. ' +
     'Native Chrome serializes profile use; the Playwright compatibility path uses a worker pool. ' +
@@ -868,19 +882,33 @@ server.registerTool('extract', {
     : result;
 });
 
+if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search', {
+  title: 'Local Project Memory Search',
+  description:
+    'LOCAL PROJECT KNOWLEDGE SEARCH ONLY. ' +
+    'Always use this tool when the user asks to find, recall, inspect, or search information already stored in project memory, indexed local roots, papers, codebases, plans, experiments, or decisions. ' +
+    'Uses exact, BM25, vector, and graph retrieval, followed by RRF and a local reranker. It never opens Google, a browser, or SearchApi. ' +
+    'Use search or search_parallel only when new external information is required.',
+  inputSchema: ProjectMemorySearchSchema,
+  outputSchema: ProjectMemoryOutput,
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+}, async (args: ProjectMemorySearchInput) => {
+  return await projectMemorySearchTool(args, researchService);
+});
+
 if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
   title: 'Project Memory',
   description:
-    'Local project knowledge retrieval and management tool. ' +
-    'search queries stored papers, web evidence, code, plans, experiments, decisions, and graph records only. It uses exact, BM25, vector, and graph retrieval, then RRF and a local reranker. It never opens a browser or calls Google or SearchApi. Use search or search_parallel when new web information is required. ' +
-    'create and show manage projects; record stores session intent, immutable plan revisions, experiments, decisions, versioned ontology entity types or relations, and evidence-preserving corrections. ' +
+    'PROJECT MEMORY MANAGEMENT. ' +
+    'Use create to create a project; show to inspect known projects or durable records; record to store session intent, immutable plan revisions, experiments, decisions, versioned ontology terms, or corrections; rebuild to index approved local roots; export to write graph or lineage views; and forget for reversible deletion. ' +
+    'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
     'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
     'forget previews impact before reversible project or assertion deletion. ' +
     'Search, search_parallel, scholar_search, and extract automatically capture sources and provenance; project_memory manages their durable structure.',
   inputSchema: {
     action: z.enum(['create', 'show', 'search', 'record', 'rebuild', 'export', 'forget']).describe(
-      'create: project_id and name required. show: project_id optional; target_id or name narrows inspection. search: query plus project_id or all_projects=true required; reads stored local knowledge only. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
+      'create: project_id and name required. show: inspect a known project, assertion, entity, or durable record. search: compatibility alias for project_memory_search. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
     ),
     project_id: z.string().min(1).max(64).optional().describe('Stable project id. For search, this is the write-isolated primary scope. Omit to list projects or use all_projects.'),
     include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects for one local search or integrated visualization export.'),

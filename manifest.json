@@ -72,7 +72,7 @@
   "tools": [
     {
       "name": "search",
-      "description": "Always runs new live Google discovery for web, papers, and repositories, with optional extraction and graph hybrid RAG over stored project knowledge."
+      "description": "Always performs live web search for new external information, with optional extraction and graph hybrid RAG over stored project knowledge."
     },
     {
       "name": "scholar_search",
@@ -80,15 +80,19 @@
     },
     {
       "name": "search_parallel",
-      "description": "Run 2-10 independent new live Google queries with one extraction budget and optional graph hybrid RAG over stored project knowledge."
+      "description": "Always performs 2-10 live web searches for new external information with one extraction budget and optional graph hybrid RAG."
     },
     {
       "name": "extract",
       "description": "Read one known page, paper, PDF, or repository URL and optionally store it as provenance-linked searchable evidence."
     },
     {
+      "name": "project_memory_search",
+      "description": "Search stored local project knowledge with exact, BM25, vector, graph, RRF, and a local reranker without Google, browser, or SearchApi access."
+    },
+    {
       "name": "project_memory",
-      "description": "Search stored local knowledge with exact, BM25, vector, graph, RRF, and a local reranker without live web access; also manage project memory, lineage, ontology, rebuilds, exports, and reversible deletion."
+      "description": "Manage projects, sessions, plans, experiments, decisions, ontology, lineage, rebuilds, exports, corrections, and reversible deletion."
     },
     {
       "name": "health",
@@ -139,7 +143,7 @@
     "research": {
       "type": "boolean",
       "title": "Local research memory",
-      "description": "Enable local project memory, capture, indexing, and project_memory.",
+      "description": "Enable local project memory, capture, indexing, project_memory_search, and project_memory.",
       "default": true,
       "required": false
     },

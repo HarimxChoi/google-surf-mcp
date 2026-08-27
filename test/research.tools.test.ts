@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ResearchService } from '../src/research/service.js';
-import { projectMemoryTool } from '../src/research/tools.js';
+import { projectMemorySearchTool, projectMemoryTool } from '../src/research/tools.js';
 
 describe('project_memory tool', () => {
   let root: string;
@@ -105,8 +105,7 @@ describe('project_memory tool', () => {
     }
     await service.waitForIdle();
     const before = await service.getProject('memory-a');
-    const result = await projectMemoryTool({
-      action: 'search',
+    const result = await projectMemorySearchTool({
       project_id: 'memory-a',
       include_project_ids: ['memory-b'],
       query: 'localmemoryneedle',
@@ -137,16 +136,23 @@ describe('project_memory tool', () => {
     });
     expect(after.search_event_count).toBe(before.search_event_count);
 
-    const allProjects = await projectMemoryTool({
+    const alias = await projectMemoryTool({
       action: 'search',
+      project_id: 'memory-a',
+      include_project_ids: ['memory-b'],
+      query: 'localmemoryneedle',
+      limit: 5,
+    }, service);
+    expect(alias.structuredContent?.results).toEqual(result.structuredContent?.results);
+
+    const allProjects = await projectMemorySearchTool({
       all_projects: true,
       query: 'localmemoryneedle',
       limit: 5,
     }, service);
     expect(allProjects.structuredContent?.results).toHaveLength(1);
 
-    const invalid = await projectMemoryTool({
-      action: 'search',
+    const invalid = await projectMemorySearchTool({
       project_id: 'memory-a',
       all_projects: true,
       query: 'localmemoryneedle',
