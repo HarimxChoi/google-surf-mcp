@@ -122,6 +122,23 @@ describe('verifyResultsGeometricInBrowser', () => {
     expect(v[0].signals.hasExternalLink).toBe(false);
   });
 
+  it('marks opaque Google result wrappers as external candidates', () => {
+    const html = `<html><body>
+      <div class="result" id="r1"><a href="/goto?url=opaque"><h3>Wrapped</h3></a></div>
+    </body></html>`;
+    const rects = new Map<string, RectOverride>([
+      ['#r1', { x: 100, y: 300, w: 600, h: 80 }],
+    ]);
+    loadDomWithRects(html, rects);
+
+    const wrapped = verifyResultsGeometricInBrowser({ blockSelector: '.result' });
+    expect(wrapped[0].signals.hasExternalLink).toBe(true);
+
+    document.querySelector('a')?.setAttribute('href', '/search?q=internal');
+    const internal = verifyResultsGeometricInBrowser({ blockSelector: '.result' });
+    expect(internal[0].signals.hasExternalLink).toBe(false);
+  });
+
   it('viewport-relative thresholds work for different viewports', () => {
     const html = `<html><body>
       <div class="result" id="r1"><h3>T</h3><a href="https://x.com">link</a></div>

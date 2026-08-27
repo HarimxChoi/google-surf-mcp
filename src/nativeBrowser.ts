@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { join } from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import {
   clearProfileLocks, detectBlock, dismissConsent, killZombieChromium,
@@ -14,6 +15,40 @@ const GOOGLE_HOST = 'www.google.com';
 const SCHOLAR_HOST = 'scholar.google.com';
 const NATIVE_CAPTCHA_ACTION =
   'Wait before retrying, change the network route, or configure SearchApi fallback.';
+const WINDOWS_WINDOW_GUARD = String.raw`
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SurfNativeWindow {
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  public static void Minimize(int processId) {
+    EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+      uint owner;
+      GetWindowThreadProcessId(hWnd, out owner);
+      if (owner == (uint)processId && IsWindowVisible(hWnd)) {
+        ShowWindowAsync(hWnd, GetForegroundWindow() == hWnd ? 6 : 7);
+      }
+      return true;
+    }, IntPtr.Zero);
+  }
+}
+'@
+[Console]::Out.WriteLine('ready')
+$line = [Console]::In.ReadLine()
+$targetProcessId = 0
+if (-not [int]::TryParse($line, [ref]$targetProcessId)) { exit 0 }
+$deadline = [DateTime]::UtcNow.AddSeconds(30)
+while ([DateTime]::UtcNow -lt $deadline) {
+  try { [System.Diagnostics.Process]::GetProcessById($targetProcessId) | Out-Null } catch { break }
+  [SurfNativeWindow]::Minimize($targetProcessId)
+  Start-Sleep -Milliseconds 15
+}
+`;
 
 export interface NativeBrowserHandle {
   search(query: string, limit: number, opts?: SearchOptions): Promise<SearchOutcome>;
@@ -54,7 +89,6 @@ export function buildNativeChromeArgs(
     throw new Error('Chrome debugging port must be a fixed non-zero port');
   }
   return [
-    '--new-window',
     '--start-minimized',
     '--no-first-run',
     '--no-default-browser-check',
@@ -76,6 +110,37 @@ async function reservePort(): Promise<number> {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   if (port === 0) throw new Error('failed to reserve Chrome debugging port');
   return port;
+}
+
+async function startWindowsWindowGuard(): Promise<ChildProcess | undefined> {
+  if (process.platform !== 'win32') return undefined;
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  const child = spawn(
+    join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', WINDOWS_WINDOW_GUARD],
+    { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true },
+  );
+  const ready = await new Promise<boolean>((resolve) => {
+    const finish = (value: boolean) => {
+      clearTimeout(timer);
+      child.removeListener('error', failed);
+      child.removeListener('exit', failed);
+      child.stdout?.removeListener('data', onData);
+      resolve(value);
+    };
+    const failed = () => finish(false);
+    const onData = (chunk: Buffer) => {
+      if (!chunk.toString().includes('ready')) return;
+      finish(true);
+    };
+    const timer = setTimeout(failed, 3_000);
+    child.once('error', failed);
+    child.once('exit', failed);
+    child.stdout?.on('data', onData);
+  });
+  if (ready) return child;
+  child.kill();
+  return undefined;
 }
 
 async function waitForTarget(port: number, hostnames: string[], child: ChildProcess): Promise<void> {
@@ -184,11 +249,13 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     killZombieChromium(this.profileDir);
     await clearProfileLocks(this.profileDir);
     const port = await reservePort();
+    const windowGuard = await startWindowsWindowGuard();
     const child = spawn(
       this.executablePath,
       buildNativeChromeArgs(this.profileDir, port, targetUrl),
       { stdio: 'ignore', windowsHide: false },
     );
+    if (child.pid) windowGuard?.stdin?.end(String(child.pid));
     this.active.add(child);
     let browser: Browser | undefined;
     try {
@@ -206,6 +273,7 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
       this.active.delete(child);
       killZombieChromium(this.profileDir);
       await clearProfileLocks(this.profileDir);
+      windowGuard?.kill();
     }
   }
 }

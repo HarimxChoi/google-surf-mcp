@@ -142,7 +142,7 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 
 | 값 | 동작 |
 |---|---|
-| `browser` | 기본값. 전용 비로그인 프로필의 최소화된 시스템 Chrome을 사용하며 `SEARCH_API`가 필요하지 않습니다. |
+| `browser` | 기본값. 전용 비로그인 프로필의 시스템 Chrome 검색 창을 최소화 상태로 유지하며 `SEARCH_API`가 필요하지 않습니다. |
 | `searchapi` | SearchApi를 메인 provider로 사용합니다. 해당 도구 실행 시 Chrome을 초기화하지 않습니다. |
 | `fallback` | 현재 브라우저 tier를 한 번 시도한 뒤 브라우저 오류, CAPTCHA나 rate limit, 프로필 실패, 파서 열화 시 SearchApi로 전환합니다. 사람의 CAPTCHA 해결을 기다리지 않으며 성공 응답과 정상적인 빈 결과는 다시 요청하지 않습니다. |
 
@@ -340,7 +340,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 | `SURF_RESEARCH_CODE_WORKERS` | 자동, 최대 4 | 최초 코드 구조 색인에 사용하는 Tree-sitter worker 수 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |
 | `SURF_TZ` | 시스템 tz | 예: `America/New_York` |
-| `SURF_HEADLESS` | `true` | Playwright 추출, 호환성과 복구 경로에 적용. Native 검색은 최소화된 시스템 Chrome 창을 사용 |
+| `SURF_HEADLESS` | `true` | Playwright 추출, 호환성과 복구 경로에 적용. Native 검색 창은 최소화 상태로 유지하며 CAPTCHA 복구 창에는 적용하지 않음 |
 | `SURF_REMOTE_DEBUG` | `false` | headless 서버 + 원격 DevTools 환경에서 `true`. CAPTCHA 발생 시 DevTools 포트 안내 후 throw, 별도 창 안 띄움. 로컬 머신에서 SSH 포트포워드 + `chrome://inspect`로 풀고 재시도. |
 | `SURF_CAPTCHA_TIMEOUT_MS` | `180000` | 백그라운드 CAPTCHA 해결 창 유지 시간. MCP 호출은 이 timeout을 기다리지 않고 즉시 반환 |
 | `SURF_IDLE_CLOSE_MS` | `30000` | sequential ctx와 pool을 idle 후 닫는 ms. `0`이면 비활성화. 낮으면 빠른 정리, 높으면 띄엄띄엄 호출에 캐시 유지. |

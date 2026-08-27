@@ -46,10 +46,12 @@ export function verifyResultsGeometricInBrowser(args: VerifyArgs): GeometricVeri
     ) : (rect.left > vw * organicLeftRatio);
 
     const hasH3 = !!block.querySelector('h3');
-    const hasExternalLink = !!Array.from(block.querySelectorAll('a[href^="http"]')).find((a) => {
+    const hasExternalLink = !!Array.from(block.querySelectorAll('a[href]')).find((a) => {
       try {
-        const host = new URL((a as HTMLAnchorElement).href).hostname;
-        return !host.includes('google.com');
+        const url = new URL((a as HTMLAnchorElement).href);
+        const wrapped = url.hostname === 'www.google.com'
+          && (url.pathname === '/goto' || url.pathname === '/url');
+        return !url.hostname.includes('google.com') || wrapped;
       } catch { return false; }
     });
 

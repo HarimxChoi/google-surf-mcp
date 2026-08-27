@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +50,24 @@ describe('wire-up: pickAndScoreResults', () => {
     await page.setContent(loadFixture('serp-subdomains.html'), { waitUntil: 'domcontentloaded' });
     const outcome = await pickAndScoreResults(page, 10, { locale: 'en-US' });
     expect(outcome.results).toHaveLength(3);
+  });
+
+  it('resolves opaque /goto result links from the current data-snc layout', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: 'https://modelcontextprotocol.io/docs/getting-started/intro' },
+    })) as typeof fetch;
+    try {
+      await page.setContent(loadFixture('serp-live-goto.html'), { waitUntil: 'domcontentloaded' });
+      const outcome = await pickAndScoreResults(page, 10, { locale: 'en-US' });
+      expect(outcome.results).toEqual([expect.objectContaining({
+        title: 'Model Context Protocol',
+        url: 'https://modelcontextprotocol.io/docs/getting-started/intro',
+      })]);
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   it('returns empty results for serp-empty.html without throwing', async () => {

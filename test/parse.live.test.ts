@@ -12,6 +12,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixture = (name: string) => readFileSync(resolve(__dirname, 'fixtures', name), 'utf-8');
 const LIVE = fixture('serp-live.html');
 const LIVE_ADS = fixture('serp-live-ads.html');
+const LIVE_GOTO = fixture('serp-live-goto.html');
 
 let dom: JSDOM;
 function load(html: string, query: string) {
@@ -22,6 +23,7 @@ function load(html: string, query: string) {
 }
 const loadLive = () => load(LIVE, 'github+actions');
 const loadLiveAds = () => load(LIVE_ADS, 'vpn');
+const loadLiveGoto = () => load(LIVE_GOTO, 'model+context+protocol');
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -44,9 +46,9 @@ describe('live SERP fixture', () => {
     expect(out.signals.lang).toBe('ko');
   });
 
-  it('every strategy still extracts results from live markup', () => {
+  it('legacy strategies still extract results from the previous live markup', () => {
     loadLive();
-    for (const strategy of STRATEGIES) {
+    for (const strategy of STRATEGIES.filter((item) => item.id !== 'data-snc-goto-v1')) {
       const out = parseResultsInBrowser({ strategy, max: 10 });
       expect(out.results.length, `${strategy.id} extracted nothing`).toBeGreaterThanOrEqual(5);
       expect(out.results[0].title.length).toBeGreaterThan(0);
@@ -98,5 +100,29 @@ describe('live SERP fixture with ads', () => {
     for (const r of mentions) {
       expect(marker.test(r.title) || marker.test(r.description)).toBe(false);
     }
+  });
+});
+
+describe('live SERP fixture with opaque redirect links', () => {
+  it('extracts data-snc results whose title link uses /goto', () => {
+    loadLiveGoto();
+    const out = parseResultsInBrowser({ strategy: byId('data-snc-goto-v1'), max: 10 });
+    expect(out.results).toEqual([{
+      title: 'Model Context Protocol',
+      url: 'https://www.google.com/goto?url=opaque-token',
+      description: 'An open standard for connecting AI applications to external systems.',
+    }]);
+    expect(out.signals.externalLinkCount).toBe(1);
+  });
+
+  it.each([
+    ['data-snc block', (document: Document) => document.querySelector('[data-snc]')?.removeAttribute('data-snc')],
+    ['UWckNb title link', (document: Document) => document.querySelector('[jsname="UWckNb"]')?.removeAttribute('jsname')],
+    ['goto target', (document: Document) => document.querySelector('[jsname="UWckNb"]')?.setAttribute('href', '/search?q=internal')],
+  ])('extracts nothing without the %s condition', (_name, mutate) => {
+    loadLiveGoto();
+    mutate(document);
+    const out = parseResultsInBrowser({ strategy: byId('data-snc-goto-v1'), max: 10 });
+    expect(out.results).toEqual([]);
   });
 });

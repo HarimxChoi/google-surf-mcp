@@ -52,6 +52,47 @@ interface StrategyCandidate {
   conf: number;
 }
 
+function externalHttpUrl(value: string, base?: string): string | undefined {
+  try {
+    const url = new URL(value, base);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+    if (url.hostname === 'www.google.com' || url.hostname === 'accounts.google.com') return undefined;
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function resolveGoogleResultUrl(
+  value: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<string | undefined> {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (url.hostname !== 'www.google.com') return externalHttpUrl(value);
+  if (url.pathname !== '/goto' && url.pathname !== '/url') return undefined;
+
+  const direct = url.searchParams.get('q') || url.searchParams.get('url');
+  const directUrl = direct ? externalHttpUrl(direct) : undefined;
+  if (directUrl) return directUrl;
+
+  try {
+    const response = await fetchFn(url, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (response.status < 300 || response.status >= 400) return undefined;
+    const location = response.headers.get('location');
+    return location ? externalHttpUrl(location, url.href) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function evaluateStrategy(
   page: Page,
   strategy: ParserStrategy,
@@ -60,6 +101,7 @@ async function evaluateStrategy(
   const out = await page.evaluate(parseResultsInBrowser, {
     strategy: {
       blockSelector: strategy.blockSelector,
+      linkSelector: strategy.linkSelector,
       snippetSelector: strategy.snippetSelector,
       adFilter: strategy.adFilter,
     },
@@ -221,10 +263,10 @@ export async function pickAndScoreResults(
   // Google picks SERP language by IP, so the page's lang beats our config.
   const locale = markerLocaleFor(best.lang, opts.locale ?? 'en-US');
   const results: SearchResult[] = [];
+  const accepted: SearchResult[] = [];
   const droppedSet = new Set<ResultClassification>();
   let droppedCount = 0;
   for (let i = 0; i < best.results.length; i++) {
-    if (results.length >= limit) break;
     const r = best.results[i];
     const score = scoreResult(r, best.verify[best.blockIndices[i]], { locale });
     if (DROP_CLASSIFICATIONS.has(score.classification)) {
@@ -232,12 +274,32 @@ export async function pickAndScoreResults(
       droppedSet.add(score.classification);
       continue;
     }
-    results.push(r);
+    accepted.push(r);
   }
+  let unresolved = 0;
+  for (let offset = 0; offset < accepted.length && results.length < limit; offset += 4) {
+    const batch = accepted.slice(offset, offset + 4);
+    const urls = await Promise.all(batch.map((result) => resolveGoogleResultUrl(result.url)));
+    for (let i = 0; i < batch.length && results.length < limit; i++) {
+      const resolved = urls[i];
+      if (!resolved) {
+        unresolved++;
+        continue;
+      }
+      results.push({ ...batch[i], url: resolved });
+    }
+  }
+  if (accepted.length > 0 && results.length === 0) {
+    throw new Error(`parser stale: ${accepted.length} result targets could not be resolved`);
+  }
+  const degradedReasons = [
+    ...degraded,
+    ...(unresolved > 0 ? [`redirect_resolution_failed:${unresolved}`] : []),
+  ];
   return {
     results,
     dropped: droppedCount,
     dropped_reasons: Array.from(droppedSet),
-    ...(degraded.length ? { degraded_reasons: degraded } : {}),
+    ...(degradedReasons.length ? { degraded_reasons: degradedReasons } : {}),
   };
 }

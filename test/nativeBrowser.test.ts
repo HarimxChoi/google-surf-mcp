@@ -24,6 +24,8 @@ describe('native Chrome search route', () => {
     expect(args).toContain('--user-data-dir=C:\\surf\\native');
     expect(args).toContain('--remote-debugging-port=9223');
     expect(args).toContain('--remote-debugging-address=127.0.0.1');
+    expect(args).toContain('--start-minimized');
+    expect(args).not.toContain('--new-window');
     expect(joined).not.toMatch(/headless|no-sandbox|AutomationControlled|enable-automation/i);
   });
 

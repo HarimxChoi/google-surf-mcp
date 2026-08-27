@@ -144,7 +144,7 @@ Browser search remains the default. [SearchApi](https://www.searchapi.io/?utm_so
 
 | value | behavior |
 |---|---|
-| `browser` | Default. Uses minimized system Chrome with a dedicated logged-out profile and does not require `SEARCH_API`. |
+| `browser` | Default. Uses system Chrome with a dedicated logged-out profile, keeps native search windows minimized, and does not require `SEARCH_API`. |
 | `searchapi` | Uses SearchApi as the primary provider and does not initialize Chrome for that tool. |
 | `fallback` | Tries the current browser tier once, then uses SearchApi on browser errors, CAPTCHA/rate limits, profile failure, or parser degradation. It does not wait for human CAPTCHA recovery. Successful and normal empty browser responses are not repeated. |
 
@@ -370,7 +370,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 | `SURF_RESEARCH_CODE_WORKERS` | auto, max 4 | Tree-sitter worker count for initial code structure indexing |
 | `SURF_LOCALE` | `en-US` | browser locale |
 | `SURF_TZ` | system tz | e.g. `America/New_York` |
-| `SURF_HEADLESS` | `true` | Controls Playwright extraction, compatibility, and recovery paths. Native search always uses a minimized system Chrome window. |
+| `SURF_HEADLESS` | `true` | Controls Playwright extraction, compatibility, and recovery paths. Native search keeps its system Chrome window minimized without changing CAPTCHA recovery windows. |
 | `SURF_REMOTE_DEBUG` | `false` | set `true` on a headless server with remote DevTools. CAPTCHA path emits the DevTools port and throws instead of spawning a window; attach `chrome://inspect` from a local machine over SSH port-forward to solve. |
 | `SURF_CAPTCHA_TIMEOUT_MS` | `180000` | lifetime of the background human-recovery window. MCP calls return immediately and do not wait for this timeout. |
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |

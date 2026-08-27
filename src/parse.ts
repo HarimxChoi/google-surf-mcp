@@ -3,8 +3,6 @@
 
 import type { ParserStrategy, ParseSignals } from './types.js';
 
-// Ordered by measured win rate, not presumed stability: div[data-ved] matches
-// ~190 blocks per page and loses on geometry.
 export const STRATEGIES: ParserStrategy[] = [
   {
     id: 'class-mjjyud-v1',
@@ -12,6 +10,14 @@ export const STRATEGIES: ParserStrategy[] = [
     snippetSelector: '[data-sncf="1"], .VwiC3b, div[style*="-webkit-line-clamp"]',
     adFilter: '#tads, #tadsb, #bottomads, [aria-label*="Sponsored" i], [data-text-ad], [data-pcu]',
     description: 'class-name based',
+  },
+  {
+    id: 'data-snc-goto-v1',
+    blockSelector: 'div[data-snc]',
+    linkSelector: 'a[jsname="UWckNb"][href*="/goto?"]',
+    snippetSelector: '[data-sncf="1"], .VwiC3b, div[style*="-webkit-line-clamp"]',
+    adFilter: '#tads, #tadsb, #bottomads, [aria-label*="Sponsored" i], [data-text-ad], [data-pcu]',
+    description: 'data-snc result with opaque goto link',
   },
   {
     id: 'hveid-jscontroller-v1',
@@ -47,7 +53,12 @@ export interface LegacyParseOutput {
 }
 
 export function parseResultsInBrowser(args: {
-  strategy: { blockSelector: string; snippetSelector: string; adFilter: string };
+  strategy: {
+    blockSelector: string;
+    linkSelector?: string;
+    snippetSelector: string;
+    adFilter: string;
+  };
   max: number;
 }): ParseOutput {
   const SKIP_HOSTS = new Set([
@@ -62,13 +73,15 @@ export function parseResultsInBrowser(args: {
 
   const allElements = document.querySelectorAll('*');
   const h3Count = document.querySelectorAll('h3').length;
-  const externalLinks = document.querySelectorAll('a[href^="http"]');
+  const externalLinks = document.querySelectorAll('a[href]');
   let externalLinkCount = 0;
   externalLinks.forEach((a) => {
     try {
       const href = (a as HTMLAnchorElement).href;
-      const host = new URL(href).hostname;
-      if (!host.includes('google.com')) externalLinkCount++;
+      const parsed = new URL(href);
+      const wrapped = parsed.hostname === 'www.google.com'
+        && (parsed.pathname === '/goto' || parsed.pathname === '/url');
+      if (!parsed.hostname.includes('google.com') || wrapped) externalLinkCount++;
     } catch { /* malformed href */ }
   });
   const hveidCount = document.querySelectorAll('[data-hveid]').length;
@@ -106,21 +119,34 @@ export function parseResultsInBrowser(args: {
     ) continue;
 
     const t = el.querySelector('h3');
-    const a = el.querySelector('a[href^="http"]') as HTMLAnchorElement | null;
-    if (!t || !a) continue;
+    const a = (args.strategy.linkSelector
+      ? el.querySelector(args.strategy.linkSelector)
+      : t?.closest('a[href]') ?? el.querySelector('a[href]')) as HTMLAnchorElement | null;
+    if (!t || !a || !a.contains(t)) continue;
 
-    const url = a.href;
+    let url = a.href;
+    try {
+      const wrapped = new URL(a.getAttribute('href') || '', document.location.origin);
+      if (wrapped.hostname === 'www.google.com'
+        && (wrapped.pathname === '/goto' || wrapped.pathname === '/url')) {
+        const direct = wrapped.searchParams.get('q') || wrapped.searchParams.get('url');
+        url = direct && /^https?:\/\//i.test(direct) ? direct : wrapped.href;
+      }
+    } catch {}
     if (seen.has(url)) continue;
 
     let host = '';
-    try { host = new URL(url).hostname; } catch { continue; }
-    if (SKIP_HOSTS.has(host)) continue;
+    let path = '';
+    try {
+      const parsed = new URL(url);
+      host = parsed.hostname;
+      path = parsed.pathname;
+    } catch { continue; }
+    const wrappedGoogle = host === 'www.google.com' && (path === '/goto' || path === '/url');
+    if (SKIP_HOSTS.has(host) && !wrappedGoogle) continue;
     seen.add(url);
 
-    const sn =
-      el.querySelector('[data-sncf="1"]') ||
-      el.querySelector('.VwiC3b') ||
-      el.querySelector('div[style*="-webkit-line-clamp"]');
+    const sn = el.querySelector(args.strategy.snippetSelector);
 
     results.push({
       title: (t.textContent || '').trim(),

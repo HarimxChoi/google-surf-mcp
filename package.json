@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "type": "module",

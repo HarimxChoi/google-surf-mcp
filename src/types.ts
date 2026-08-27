@@ -29,6 +29,7 @@ export interface ParseSignals {
 export interface ParserStrategy {
   id: string;
   blockSelector: string;
+  linkSelector?: string;
   snippetSelector: string;
   adFilter: string;
   description: string;
