@@ -295,7 +295,7 @@ flowchart TB
 
 ### One local knowledge base
 
-One SurrealDB instance persistently stores web results, papers, code, sessions, plans, experiments, decisions, ontology, and provenance. Graph projections and analytics such as PageRank and communities are derived data that can be rebuilt from source hashes and ontology versions.
+One SurrealDB instance persistently stores web results, papers, code, sessions, plans, experiments, decisions, ontology, and provenance. A single local research broker owns the embedded RocksDB connection. Multiple MCP sessions connect to it through authenticated local IPC, run reads concurrently, and order writes without opening the database themselves. Graph projections and analytics such as PageRank and communities are derived data that can be rebuilt from source hashes and ontology versions.
 
 ### Ontology and cross-project links
 

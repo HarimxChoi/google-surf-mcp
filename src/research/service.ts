@@ -481,6 +481,11 @@ export class ResearchService {
     };
   }
 
+  async probe(): Promise<ReturnType<ResearchService['status']>> {
+    if (this.options.enabled) await this.ready();
+    return this.status();
+  }
+
   async close(): Promise<void> {
     for (const timer of this.graphTimers.values()) clearTimeout(timer);
     this.graphTimers.clear();

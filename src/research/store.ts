@@ -191,7 +191,21 @@ export class ResearchStore {
     const db = new Surreal({
       engines: { ...createRemoteEngines(), ...createNodeEngines() },
     });
-    await db.connect(this.endpoint, { namespace: 'google_surf', database: 'research' });
+    const connect = db.connect(this.endpoint, { namespace: 'google_surf', database: 'research' });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        connect,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('research database open timed out after 15 seconds')), 15_000);
+        }),
+      ]);
+    } catch (error) {
+      void db.close().catch(() => {});
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     await db.query(SCHEMA).collect();
     for (const term of CORE_ONTOLOGY) {
       const id = new RecordId('ontology_term', term.term_id);

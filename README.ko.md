@@ -265,7 +265,7 @@ flowchart TB
 
 ### 하나의 로컬 지식 베이스
 
-SurrealDB 하나가 웹 검색, 논문, 코드, 세션, 계획, 실험, 결정, 온톨로지와 provenance를 영구 저장합니다. Graph projection과 PageRank, community 같은 분석 결과는 원본이 아니라 source hash와 ontology version에서 다시 만들 수 있는 파생 데이터로 관리합니다.
+SurrealDB 하나가 웹 검색, 논문, 코드, 세션, 계획, 실험, 결정, 온톨로지와 provenance를 영구 저장합니다. 로컬 research broker 하나만 embedded RocksDB 연결을 소유합니다. 여러 MCP 세션은 인증된 로컬 IPC로 broker에 연결해 조회를 병렬 실행하고 쓰기 순서를 보장하며 DB를 직접 열지 않습니다. Graph projection과 PageRank, community 같은 분석 결과는 원본이 아니라 source hash와 ontology version에서 다시 만들 수 있는 파생 데이터로 관리합니다.
 
 ### 온톨로지와 프로젝트 간 연결
 

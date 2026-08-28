@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -106,6 +106,13 @@ try {
   }
   const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
     ?.description ?? '';
+  const brokerPhrase = 'multiple MCP sessions query the same knowledge base concurrently';
+  for (const name of [
+    'search', 'search_parallel', 'scholar_search', 'extract', 'project_memory_search', 'project_memory',
+  ]) {
+    const description = listed.tools.find((tool) => tool.name === name)?.description ?? '';
+    if (!description.includes(brokerPhrase)) throw new Error(`${name} shared broker description missing`);
+  }
   for (const phrase of [
     'PROJECT MEMORY MANAGEMENT', 'compatibility alias', 'project_memory_search',
     'session intent', 'immutable plan revisions',
@@ -259,7 +266,25 @@ try {
   if (restored.isError) throw new Error('project restore failed');
   console.log('MCP smoke passed');
 } finally {
+  let brokerPid;
+  try {
+    brokerPid = JSON.parse(readFileSync(join(root, 'broker', 'owner', 'owner.json'), 'utf8')).pid;
+  } catch {}
   await transport.close();
-  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  const brokerAlive = () => {
+    if (!brokerPid) return false;
+    try {
+      process.kill(brokerPid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (let attempt = 0; attempt < 200 && brokerAlive(); attempt++) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  if (brokerAlive()) throw new Error('research broker did not stop');
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  rmSync(root, { recursive: true, force: true, maxRetries: 100, retryDelay: 100 });
   rmSync(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

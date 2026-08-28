@@ -24,7 +24,7 @@ import { formatToolResponse } from './response.js';
 import {
   captureOnly, runParallelWithResearch, runSearchWithResearch,
 } from './research/orchestrator.js';
-import { ResearchService } from './research/service.js';
+import { createSharedResearchService } from './research/broker.js';
 import {
   projectMemorySearchTool, projectMemoryTool,
   type ProjectMemoryInput, type ProjectMemorySearchInput,
@@ -261,7 +261,7 @@ if (!baseDeps.config.cloudMode
 if (baseDeps.config.browserEngine === 'native' && baseDeps.config.remoteDebug) {
   nativeBrowserError = 'native Chrome is incompatible with SURF_REMOTE_DEBUG';
 }
-const researchService = new ResearchService({
+const researchService = createSharedResearchService({
   enabled: baseDeps.config.researchEnabled,
   root: baseDeps.config.researchRoot,
   vectorModel: baseDeps.config.researchVectorModel,
@@ -468,6 +468,9 @@ const ProjectSearchInput = baseDeps.config.researchEnabled ? {
   memory_handle: z.string().uuid().optional().describe('Reuse the handle returned by a prior project-aware call.'),
   ...SessionMemoryInput,
 } : {};
+
+const SharedResearchBrokerDescription =
+  'With research enabled, one local broker lets multiple MCP sessions query the same knowledge base concurrently and orders writes safely. ';
 
 const ProjectCaptureInput = baseDeps.config.researchEnabled ? {
   project_id: z.string().min(1).max(64).optional().describe('Project memory id.'),
@@ -708,6 +711,7 @@ server.registerTool('search', {
   title: 'Google Search',
   description:
     'ALWAYS PERFORMS LIVE WEB SEARCH. ' +
+    SharedResearchBrokerDescription +
     'Use this tool only when new external information from Google, public websites, papers, or repositories is required. ' +
     'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
@@ -751,6 +755,7 @@ server.registerTool('scholar_search', {
   title: 'Google Scholar Search',
   description:
     'Use only for paper metadata such as authors, venue, year, versions, and citation counts. ' +
+    SharedResearchBrokerDescription +
     'Do not use it to discover or read paper content; use search with extract_mode instead. ' +
     'Returns title, authors, publication, year, snippet, citation count, related/version links, and an available full-text link. ' +
     'With research enabled, metadata and citation observations retain provider provenance and research_context exposes related prior searches. ' +
@@ -781,6 +786,7 @@ server.registerTool('search_parallel', {
   title: 'Google Search Parallel',
   description:
     'ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES. ' +
+    SharedResearchBrokerDescription +
     'Use this tool only when 2-12 new external queries are required. Providing project_id adds stored evidence but never makes the searches local-only. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
     'Set extract_mode=abstract or full here so discovery and reading complete in one tool call; use extract separately only for a known URL or deeper text. extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
@@ -823,6 +829,7 @@ server.registerTool('extract', {
   title: 'Extract Article Content',
   description:
     'Use when the exact URL is already known. Fetch one public URL and return clean article text. ' +
+    SharedResearchBrokerDescription +
     'For GitHub repository URLs, metadata reads the README; abstract and full use the same bounded download gate and differ only in indexed source depth. ' +
     'HTML via Mozilla Readability; academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) auto-detected via Content-Type, %PDF magic, citation_pdf_url meta, and per-domain URL rules. ' +
     'Tiered depth: `mode="metadata"` returns document metadata without body text, `mode="abstract"` returns about 1500 chars for relevance checks, and `mode="full"` returns up to the configured 50000 chars. ' +
@@ -886,6 +893,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search'
   title: 'Local Project Memory Search',
   description:
     'LOCAL PROJECT KNOWLEDGE SEARCH ONLY. ' +
+    SharedResearchBrokerDescription +
     'Always use this tool when the user asks to find, recall, inspect, or search information already stored in project memory, indexed local roots, papers, codebases, plans, experiments, or decisions. ' +
     'Uses exact, BM25, vector, and graph retrieval, followed by RRF and a local reranker. It never opens Google, a browser, or SearchApi. ' +
     'Use search or search_parallel only when new external information is required.',
@@ -900,6 +908,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
   title: 'Project Memory',
   description:
     'PROJECT MEMORY MANAGEMENT. ' +
+    SharedResearchBrokerDescription +
     'Use create to create a project; show to inspect known projects or durable records; record to store session intent, immutable plan revisions, experiments, decisions, versioned ontology terms, or corrections; rebuild to index approved local roots; export to write graph or lineage views; and forget for reversible deletion. ' +
     'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
@@ -972,9 +981,19 @@ server.registerTool('health', {
 }, async () => {
   const result = await healthTool(buildDeps());
   if (result.isError || !result.structuredContent) return result;
+  let research: Record<string, unknown> = researchService.status();
+  try {
+    research = await researchService.probe();
+  } catch (error) {
+    research = {
+      ...researchService.status(),
+      state: 'unavailable',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
   return formatToolResponse({
     ...result.structuredContent,
-    research: researchService.status(),
+    research,
   });
 });
 
