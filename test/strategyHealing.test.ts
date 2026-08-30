@@ -259,6 +259,14 @@ describe('StrategyHealing', () => {
       expect(readFileSync(file, 'utf8')).toBe(firstMtime);
     });
 
+    it('serializes concurrent timer and explicit flushes', async () => {
+      const h = new StrategyHealing(file, true, IDS, 0);
+      await h.load();
+      h.recordOutcome('alpha', 'win');
+      await Promise.all(Array.from({ length: 20 }, () => h.flush()));
+      expect(JSON.parse(readFileSync(file, 'utf8')).stats.alpha.wins).toBe(1);
+    });
+
     it('does not throw when target dir is not writable', async () => {
       const bad = '/dev/null/strategy-order.json';
       const h = new StrategyHealing(bad, true, IDS, 0);

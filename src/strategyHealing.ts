@@ -39,6 +39,7 @@ function pickLatestIso(a: string | null, b: string | null): string | null {
 export class StrategyHealing {
   private state: PersistedState = { schema: 1, stats: {} };
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushPromise: Promise<void> = Promise.resolve();
   private dirty = false;
   private loaded = false;
 
@@ -175,14 +176,21 @@ export class StrategyHealing {
   }
 
   async flush(): Promise<void> {
-    if (!this.enabled || !this.dirty) return;
-    const tmp = `${this.file}.tmp`;
-    const payload = JSON.stringify(this.state, null, 2);
-    try {
-      await writeFile(tmp, payload, 'utf8');
-      await rename(tmp, this.file);
-      this.dirty = false; // only clear on success → next flush retries on failure
-    } catch {}
+    if (!this.enabled) return;
+    const pending = this.flushPromise.then(async () => {
+      if (!this.dirty) return;
+      const tmp = `${this.file}.tmp`;
+      const payload = JSON.stringify(this.state, null, 2);
+      this.dirty = false;
+      try {
+        await writeFile(tmp, payload, 'utf8');
+        await rename(tmp, this.file);
+      } catch {
+        this.dirty = true;
+      }
+    });
+    this.flushPromise = pending;
+    await pending;
   }
 
   shutdown(): void {
