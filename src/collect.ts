@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { z } from 'zod';
+import { searchExtractLimitSchema } from './searchLimits.js';
 
 const ToolSchema = z.enum(['search', 'project_memory_search', 'project_memory']);
 const SearchToolSchema = z.enum(['search', 'project_memory_search']);
@@ -15,8 +16,9 @@ const SearchArgumentsSchema = z.object({
   include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
   limit: z.number().int().min(1).max(20).default(10),
   extract_mode: z.enum(['none', 'abstract', 'full']).default('none'),
-  extract_limit: z.number().int().min(1).max(10).default(5),
+  extract_limit: searchExtractLimitSchema(),
   max_chars: z.number().int().min(200).max(50_000).optional(),
+  response_content: z.enum(['summary', 'full']).default('full'),
 }).strict();
 const LocalArgumentsSchema = z.object({
   project_id: z.string().min(1).max(64).optional(),

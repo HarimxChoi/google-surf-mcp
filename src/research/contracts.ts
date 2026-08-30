@@ -340,6 +340,15 @@ export interface ProjectDocumentRecord {
   scholar_id?: string;
 }
 
+export interface ProjectDocumentChunkRecord {
+  document_id: string;
+  chunk_index: number;
+  title: string;
+  url: string;
+  text: string;
+  content_hash: string;
+}
+
 export interface CodeSymbolRecord {
   symbol_id: string;
   project_id: string;

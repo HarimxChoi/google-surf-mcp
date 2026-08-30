@@ -104,6 +104,7 @@ export interface RecoveryAction {
 }
 
 export type ErrorCode =
+  | 'INVALID_ARGUMENT'
   | 'CAPTCHA_REQUIRED'
   | 'CAPTCHA_RECOVER_FAIL'
   | 'BLOCKED_BY_GOOGLE'

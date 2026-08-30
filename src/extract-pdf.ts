@@ -10,6 +10,8 @@ export interface PdfExtractResult extends DocumentMetadata {
   extraction_quality: 'full_text' | 'abstract' | 'metadata_only';
   content?: string;
   length?: number;
+  source_length?: number;
+  truncated?: boolean;
 }
 
 function metadataDate(value: Date | undefined): string | undefined {
@@ -91,5 +93,7 @@ export async function extractPdfTiered(
     extraction_quality: mode === 'abstract' ? 'abstract' : 'full_text',
     content: clipped,
     length: clipped.length,
+    source_length: raw.length,
+    truncated: raw.length > maxChars,
   };
 }

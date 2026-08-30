@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  applyParallelSearchExtraction, applySearchExtraction, extractTool, type Deps, type PoolHandle,
+  applyParallelSearchExtraction, applySearchExtraction, extractTool, shapeExtractionResponse,
+  type Deps, type PoolHandle,
 } from '../src/agent.js';
 import { UnifiedCache } from '../src/cache.js';
 import { createCascadeState } from '../src/cascade.js';
@@ -91,7 +92,11 @@ describe('integrated search extraction', () => {
     expect(rows[2]).not.toHaveProperty('content');
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent?.meta).toMatchObject({
-      extraction: { mode: 'abstract', requested: 2, succeeded: 1, failed: 1 },
+      extraction: {
+        mode: 'abstract', requested: 2, applied: 2, succeeded: 1, failed: 1,
+        skipped: 1, truncated: true, total_chars: 4,
+        remaining_urls: ['https://c.test'],
+      },
     });
   });
 
@@ -129,7 +134,23 @@ describe('integrated search extraction', () => {
     expect(groups[0].results[1]).not.toHaveProperty('content');
   });
 
-  it('uses 50000 characters for full extraction by default', async () => {
+  it('allows 20 abstract extractions but keeps full extraction at 10', async () => {
+    const pool = makePool();
+    const deps = makeDeps(root, pool);
+    const input = formatToolResponse({ results: [], elapsed_ms: 0 });
+
+    await expect(applyParallelSearchExtraction(input, {
+      extract_mode: 'abstract', extract_limit: 20,
+    }, deps)).resolves.toBeDefined();
+    await expect(applyParallelSearchExtraction(input, {
+      extract_mode: 'full', extract_limit: 11,
+    }, deps)).rejects.toThrow(
+      'extract_limit must be an integer between 1 and 10 for full parallel; received 11',
+    );
+    expect(deps.acquirePool).not.toHaveBeenCalled();
+  });
+
+  it('captures up to 1000000 characters for research storage', async () => {
     const pool = makePool();
     const deps = makeDeps(root, pool);
     const input = formatToolResponse({
@@ -140,7 +161,7 @@ describe('integrated search extraction', () => {
 
     await applySearchExtraction(input, { extract_mode: 'full', extract_limit: 1 }, deps);
 
-    expect(pool.extractOne).toHaveBeenCalledWith('https://a.test', 50_000, 'full');
+    expect(pool.extractOne).toHaveBeenCalledWith('https://a.test', 1_000_000, 'full');
   });
 
   it('keeps extracted document metadata on search results', async () => {
@@ -180,7 +201,7 @@ describe('integrated search extraction', () => {
     });
   });
 
-  it('uses mode-specific defaults for direct extraction', async () => {
+  it('uses mode-specific capture limits for direct extraction', async () => {
     const pool = makePool();
     const deps = makeDeps(root, pool);
 
@@ -188,6 +209,34 @@ describe('integrated search extraction', () => {
     await extractTool({ url: 'https://full.test', mode: 'full' }, deps);
 
     expect(pool.extractOne).toHaveBeenNthCalledWith(1, 'https://abstract.test', 1_500, 'abstract');
-    expect(pool.extractOne).toHaveBeenNthCalledWith(2, 'https://full.test', 50_000, 'full');
+    expect(pool.extractOne).toHaveBeenNthCalledWith(2, 'https://full.test', 1_000_000, 'full');
+  });
+
+  it('returns a compact response after retaining extracted character counts', async () => {
+    const pool = makePool();
+    pool.extractOne = vi.fn(async (url) => ({
+      url,
+      content: 'x'.repeat(2_000),
+      length: 2_000,
+      extraction_quality: 'full_text' as const,
+    }));
+    const deps = makeDeps(root, pool);
+    const input = formatToolResponse({
+      query: 'q',
+      results: [{ title: 'A', url: 'https://a.test', description: 'a' }],
+      elapsed_ms: 0,
+    });
+
+    const extracted = await applySearchExtraction(input, {
+      extract_mode: 'full', extract_limit: 1,
+    }, deps);
+    const shaped = shapeExtractionResponse(extracted, { response_content: 'summary' }, 'full');
+    const row = (shaped.structuredContent?.results as Array<Record<string, unknown>>)[0];
+
+    expect((row.content as string)).toHaveLength(1_500);
+    expect(row.length).toBe(2_000);
+    expect(shaped.structuredContent?.meta).toMatchObject({
+      extraction: { total_chars: 2_000, response_content: 'summary', truncated: true },
+    });
   });
 });

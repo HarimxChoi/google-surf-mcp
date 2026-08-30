@@ -72,7 +72,7 @@ describe('vector retrieval', () => {
         payload: {
           title: 'Exact Vector Document',
           url: 'https://example.com/vector',
-          content: 'semantic target contains lexicalneedle.',
+          content: `${'neutral '.repeat(600)} semantic target contains lexicalneedle.`,
           extraction_quality: 'full_text',
         },
       });

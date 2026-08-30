@@ -182,11 +182,12 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - always performs live web search. Use it only when new external information is required. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. For research, set `extract_mode` in this call instead of making separate extract calls. Extraction defaults to `none`; abstract defaults to 1500 characters and full to 50000.
+- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - always performs live web search. Use it only when new external information is required. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. For research, set `extract_mode` in this call instead of making separate extract calls. `limit` is 1-20. Extraction defaults to `none`; `extract_limit` is 1-10 with default 5. `response_content` defaults to `full`.
 - `scholar_search(query, limit?)` - Google Scholar metadata search, max 10 papers. Supports browser, SearchApi primary, and fallback modes.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - always performs 2-12 live web searches through a continuous four-tab queue. Query starts are staggered. Use it only for new external information and set `extract_mode` in the same call when results must be read. `extract_limit` is shared across the call; abstract defaults to 1500 characters and full to 50000.
-- `extract(url, max_chars?, mode?)` - fetch a URL.
-  - `mode="full"` (default): up to 50000 characters. HTML via Readability, PDFs via `liteparse` (spatial parsing, multi-column reading order). Document metadata is included and stored with the extracted body when research mode is enabled.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - always performs 2-12 live web searches through a continuous four-tab queue. Query starts are staggered. Use it only for new external information and set `extract_mode` in the same call when results must be read. `limit` is 1-20 per query. The call-wide `extract_limit` defaults to 12 and allows up to 20 for abstract; full defaults to and allows 10. `response_content` defaults to `summary` to bound one-call output.
+- Integrated search extraction reports `requested`, `applied`, `skipped`, `truncated`, and `total_chars`. `remaining_urls` can be passed to `extract` without repeating the search.
+- `extract(url, max_chars?, mode?, response_content?)` - fetch a URL.
+  - `mode="full"` (default): reads up to 1000000 characters for research capture. Research mode stores deterministic 4000-character chunks; `response_content="full"` returns up to 50000 characters and `summary` returns a 1500-character evidence excerpt.
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when research mode is enabled.
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.

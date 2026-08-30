@@ -21,6 +21,10 @@ import { Telemetry, getTelemetry } from './telemetry.js';
 import { StrategyHealing, getStrategyHealing } from './strategyHealing.js';
 import { STRATEGIES } from './parse.js';
 import { VERSION } from './version.js';
+import {
+  MAX_RESEARCH_CAPTURE_CHARS, SUMMARY_RESPONSE_CHARS, parseSearchExtractLimit,
+  type SearchExtractScope,
+} from './searchLimits.js';
 
 import type { ExtractMode, ExtractResult } from './extract.js';
 import type { PoolSearchResult } from './pool.js';
@@ -65,6 +69,7 @@ export interface SearchExtractionInput {
   extract_mode?: SearchExtractionMode;
   extract_limit?: number;
   max_chars?: number;
+  response_content?: 'summary' | 'full';
 }
 
 export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel' | 'healing'> {
@@ -689,7 +694,10 @@ export async function extractTool(
   const url = input.url.trim();
   const mode: ExtractMode = input.mode ?? 'full';
   const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
-  const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
+  const responseMaxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
+  const maxChars = mode === 'full' && deps.config.researchEnabled
+    ? MAX_RESEARCH_CAPTURE_CHARS
+    : responseMaxChars;
 
   if (!url) {
     return formatToolResponse(null, {
@@ -731,8 +739,13 @@ type ExtractableRow = Record<string, unknown> & { url?: string };
 interface ExtractionSummary {
   mode: 'abstract' | 'full';
   requested: number;
+  applied: number;
   succeeded: number;
   failed: number;
+  skipped: number;
+  truncated: boolean;
+  total_chars: number;
+  remaining_urls: string[];
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -751,7 +764,7 @@ function extractionPatch(result: CallToolResult): Record<string, unknown> {
   if (error) return { extract_error: error };
   const data = asObject(result.structuredContent);
   return Object.fromEntries([
-    'content', 'excerpt', 'length', 'is_pdf', 'page_count', 'extraction_quality',
+    'content', 'excerpt', 'length', 'source_length', 'truncated', 'is_pdf', 'page_count', 'extraction_quality',
     'authors', 'publication', 'published_at', 'year', 'doi', 'description',
     'keywords', 'canonical_url', 'language', 'subject', 'creator', 'producer',
     'created_at', 'modified_at',
@@ -768,7 +781,10 @@ function extractionUrlKey(url: string): string {
   }
 }
 
-function uniqueUrls(rows: ExtractableRow[], limit: number): string[] {
+function selectUniqueUrls(rows: ExtractableRow[], limit: number): {
+  selected: string[];
+  remaining: string[];
+} {
   const urls: string[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
@@ -777,40 +793,57 @@ function uniqueUrls(rows: ExtractableRow[], limit: number): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     urls.push(row.url);
-    if (urls.length >= limit) break;
   }
-  return urls;
+  return { selected: urls.slice(0, limit), remaining: urls.slice(limit) };
 }
 
 async function extractUrls(
   urls: string[],
+  requested: number,
+  remaining: string[],
   mode: 'abstract' | 'full',
   maxChars: number,
   deps: Deps,
 ): Promise<{ patches: Map<string, Record<string, unknown>>; summary: ExtractionSummary }> {
   const patches = new Map<string, Record<string, unknown>>();
-  try {
-    const pool = await deps.acquirePool(deps.cascade.mode);
-    await Promise.all(urls.map(async (url) => {
-      try {
-        const result = await pool.extractOne(url, maxChars, mode);
-        patches.set(extractionUrlKey(url), result.error && !result.content
-          ? { extract_error: result.error }
-          : extractionPatch(formatToolResponse({ ...result })));
-      } catch (error) {
-        patches.set(extractionUrlKey(url), {
-          extract_error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    for (const url of urls) patches.set(extractionUrlKey(url), { extract_error: message });
+  if (urls.length) {
+    try {
+      const pool = await deps.acquirePool(deps.cascade.mode);
+      await Promise.all(urls.map(async (url) => {
+        try {
+          const result = await pool.extractOne(url, maxChars, mode);
+          patches.set(extractionUrlKey(url), result.error && !result.content
+            ? { extract_error: result.error }
+            : extractionPatch(formatToolResponse({ ...result })));
+        } catch (error) {
+          patches.set(extractionUrlKey(url), {
+            extract_error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const url of urls) patches.set(extractionUrlKey(url), { extract_error: message });
+    }
   }
   const failed = [...patches.values()].filter((patch) => 'extract_error' in patch).length;
+  const totalChars = [...patches.values()].reduce((total, patch) => (
+    total + (typeof patch.content === 'string' ? patch.content.length : 0)
+  ), 0);
+  const contentTruncated = [...patches.values()].some((patch) => patch.truncated === true);
   return {
     patches,
-    summary: { mode, requested: urls.length, succeeded: urls.length - failed, failed },
+    summary: {
+      mode,
+      requested,
+      applied: urls.length,
+      succeeded: urls.length - failed,
+      failed,
+      skipped: remaining.length,
+      truncated: remaining.length > 0 || contentTruncated,
+      total_chars: totalChars,
+      remaining_urls: remaining,
+    },
   };
 }
 
@@ -830,12 +863,15 @@ function withExtraction(
   });
 }
 
-function extractionSettings(input: SearchExtractionInput, deps: Deps) {
+function extractionSettings(input: SearchExtractionInput, deps: Deps, scope: SearchExtractScope) {
   const mode = input.extract_mode ?? 'none';
-  const limit = Math.min(Math.max(input.extract_limit ?? 5, 1), 10);
+  const limit = parseSearchExtractLimit(input.extract_limit, scope, mode);
   const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
-  const maxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
-  return { mode, limit, maxChars };
+  const responseMaxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
+  const extractMaxChars = mode === 'full' && deps.config.researchEnabled
+    ? MAX_RESEARCH_CAPTURE_CHARS
+    : responseMaxChars;
+  return { mode, limit, extractMaxChars };
 }
 
 export async function applySearchExtraction(
@@ -843,14 +879,21 @@ export async function applySearchExtraction(
   input: SearchExtractionInput,
   deps: Deps,
 ): Promise<CallToolResult> {
-  const settings = extractionSettings(input, deps);
+  const settings = extractionSettings(input, deps, 'search');
   if (settings.mode === 'none' || result.isError || !result.structuredContent) return result;
   const started = Date.now();
   const rows = Array.isArray(result.structuredContent.results)
     ? result.structuredContent.results.map((row) => asObject(row))
     : [];
-  const urls = uniqueUrls(rows, settings.limit);
-  const extracted = await extractUrls(urls, settings.mode, settings.maxChars, deps);
+  const urls = selectUniqueUrls(rows, settings.limit);
+  const extracted = await extractUrls(
+    urls.selected,
+    settings.limit,
+    urls.remaining,
+    settings.mode,
+    settings.extractMaxChars,
+    deps,
+  );
   const results = rows.map((row) => typeof row.url === 'string'
     && extracted.patches.has(extractionUrlKey(row.url))
     ? { ...row, ...extracted.patches.get(extractionUrlKey(row.url)) }
@@ -864,7 +907,7 @@ export async function applyParallelSearchExtraction(
   input: SearchExtractionInput,
   deps: Deps,
 ): Promise<CallToolResult> {
-  const settings = extractionSettings(input, deps);
+  const settings = extractionSettings(input, deps, 'parallel');
   if (settings.mode === 'none' || result.isError || !result.structuredContent) return result;
   const started = Date.now();
   const groups = Array.isArray(result.structuredContent.results)
@@ -883,8 +926,15 @@ export async function applyParallelSearchExtraction(
       if (group.results[rank]) candidates.push(group.results[rank]);
     }
   }
-  const urls = uniqueUrls(candidates, settings.limit);
-  const extracted = await extractUrls(urls, settings.mode, settings.maxChars, deps);
+  const urls = selectUniqueUrls(candidates, settings.limit);
+  const extracted = await extractUrls(
+    urls.selected,
+    settings.limit,
+    urls.remaining,
+    settings.mode,
+    settings.extractMaxChars,
+    deps,
+  );
   const results = groups.map((group) => ({
     ...group,
     results: group.results.map((row) => typeof row.url === 'string'
@@ -894,6 +944,71 @@ export async function applyParallelSearchExtraction(
   }));
   const elapsed = Number(result.structuredContent.elapsed_ms ?? 0) + Date.now() - started;
   return withExtraction(result, results, extracted.summary, elapsed);
+}
+
+function shapeRowContent(row: Record<string, unknown>, maxChars: number): {
+  row: Record<string, unknown>;
+  truncated: boolean;
+} {
+  if (typeof row.content !== 'string' || row.content.length <= maxChars) {
+    return { row, truncated: false };
+  }
+  const content = row.content.slice(0, maxChars);
+  return {
+    row: { ...row, content, excerpt: content.slice(0, 200) },
+    truncated: true,
+  };
+}
+
+export function shapeExtractionResponse(
+  result: CallToolResult,
+  input: Pick<SearchExtractionInput, 'max_chars' | 'response_content'>,
+  defaultResponse: 'summary' | 'full',
+): CallToolResult {
+  if (result.isError || !result.structuredContent) return result;
+  const responseContent = input.response_content ?? defaultResponse;
+  const fullMax = Math.min(Math.max(input.max_chars ?? 50_000, 200), 50_000);
+  const responseMax = responseContent === 'summary' ? SUMMARY_RESPONSE_CHARS : fullMax;
+  let responseTruncated = false;
+  const shape = (row: unknown): Record<string, unknown> => {
+    const shaped = shapeRowContent(asObject(row), responseMax);
+    responseTruncated ||= shaped.truncated;
+    return shaped.row;
+  };
+  const data = result.structuredContent;
+  let shapedData: Record<string, unknown>;
+  if (Array.isArray(data.results)) {
+    const parallel = data.results.some((entry) => Array.isArray(asObject(entry).results));
+    shapedData = {
+      ...data,
+      results: parallel
+        ? data.results.map((group) => {
+          const value = asObject(group);
+          return {
+            ...value,
+            results: Array.isArray(value.results) ? value.results.map(shape) : [],
+          };
+        })
+        : data.results.map(shape),
+    };
+  } else {
+    shapedData = shape(data);
+  }
+  const meta = asObject(shapedData.meta);
+  const extraction = asObject(meta.extraction);
+  return formatToolResponse({
+    ...shapedData,
+    meta: {
+      ...meta,
+      ...(Object.keys(extraction).length ? {
+        extraction: {
+          ...extraction,
+          response_content: responseContent,
+          truncated: extraction.truncated === true || responseTruncated,
+        },
+      } : {}),
+    },
+  });
 }
 
 export async function healthTool(deps: Deps): Promise<CallToolResult> {

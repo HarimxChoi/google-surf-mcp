@@ -32,6 +32,8 @@ export interface ExtractResult extends DocumentMetadata {
   content?: string;
   excerpt?: string;
   length?: number;
+  source_length?: number;
+  truncated?: boolean;
   is_pdf?: boolean;
   page_count?: number;
   extraction_quality?: ExtractionQuality;
@@ -297,6 +299,8 @@ async function discoverViaFetch(
       content,
       excerpt: content.slice(0, 200),
       length: content.length,
+      source_length: metaAbstract.content.length,
+      truncated: metaAbstract.content.length > maxChars,
       extraction_quality: 'meta_abstract',
     } };
   }
@@ -382,7 +386,8 @@ export async function extract(
     }) as ReadabilityOutput | null;
 
     if (article && article.content) {
-      const md = turndown.turndown(article.content).slice(0, maxChars);
+      const raw = turndown.turndown(article.content);
+      const md = raw.slice(0, maxChars);
       return {
         url,
         ...discovery.metadata,
@@ -392,6 +397,8 @@ export async function extract(
         content: fence ? fenceUntrustedContent(md) : md,
         excerpt: (article.excerpt || article.textContent || '').slice(0, 200).trim() || undefined,
         length: md.length,
+        source_length: raw.length,
+        truncated: raw.length > maxChars,
         extraction_quality: 'full_text',
       };
     }
@@ -416,6 +423,8 @@ export async function extract(
       content: fence ? fenceUntrustedContent(text) : text,
       excerpt: text.slice(0, 200),
       length: text.length,
+      source_length: fallback.text.length,
+      truncated: fallback.text.length > maxChars,
       extraction_quality: 'full_text',
     };
   } catch (e) {

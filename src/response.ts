@@ -97,6 +97,7 @@ export function formatToolResponse(
 
 export function isErrorCode(s: string): s is ErrorCode {
   return [
+    'INVALID_ARGUMENT',
     'CAPTCHA_REQUIRED', 'CAPTCHA_RECOVER_FAIL', 'BLOCKED_BY_GOOGLE',
     'NAV_TIMEOUT', 'EXTRACT_FAILED', 'PRIVATE_ADDRESS', 'PROFILE_MISSING',
     'PARSER_STALE', 'RATE_LIMITED', 'API_KEY_MISSING', 'SEARCH_API_ERROR', 'INTERNAL',

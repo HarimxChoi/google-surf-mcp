@@ -108,6 +108,17 @@ describe('replayable research collection', () => {
     })).toThrow('body required');
   });
 
+  it('rejects collection extraction limits with an actionable message', () => {
+    expect(() => normalizeCollectionSpec({
+      schema_version: 1,
+      collection_id: 'invalid-extract-limit',
+      defaults: { search: { extract_limit: 14 } },
+      jobs: ['query'],
+    })).toThrow(
+      'extract_limit must be an integer between 1 and 10 for abstract search; received 14',
+    );
+  });
+
   it('runs project memory jobs without adding a query argument', async () => {
     const root = mkdtempSync(join(tmpdir(), 'surf-collect-memory-'));
     roots.push(root);

@@ -16,7 +16,7 @@ import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
 import { withTimeout } from './timeout.js';
 import {
-  applyParallelSearchExtraction, applySearchExtraction, searchTool, scholarSearchTool,
+  applyParallelSearchExtraction, applySearchExtraction, shapeExtractionResponse, searchTool, scholarSearchTool,
   searchParallelTool, extractTool, healthTool, initDeps, type Deps, type PoolHandle,
   type SearchExtractionInput,
 } from './agent.js';
@@ -33,6 +33,12 @@ import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
 import { PKG_NAME, VERSION } from './version.js';
 import { NativeChromeBrowser } from './nativeBrowser.js';
+import {
+  DEFAULT_PARALLEL_EXTRACT_LIMIT, DEFAULT_SEARCH_EXTRACT_LIMIT,
+  MAX_FULL_EXTRACT_LIMIT, MAX_PARALLEL_EXTRACT_LIMIT, MAX_SEARCH_EXTRACT_LIMIT,
+  MIN_SEARCH_EXTRACT_LIMIT, parallelExtractLimitSchema, parseSearchExtractLimit,
+  searchExtractLimitSchema,
+} from './searchLimits.js';
 
 const NAME = PKG_NAME;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -478,42 +484,65 @@ const ProjectCaptureInput = baseDeps.config.researchEnabled ? {
   ...SessionMemoryInput,
 } : {};
 
-const SearchExtractionFields = {
+const SearchExtractionModeField = z.enum(['none', 'abstract', 'full']).default('none').describe(
+  'Content depth in this search call. Use abstract or full during research instead of following search with separate extract calls. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
+);
+
+const SingleSearchExtractionFields = {
+  extract_mode: SearchExtractionModeField,
+  extract_limit: searchExtractLimitSchema().describe(
+    `Maximum unique result URLs to extract. Integer ${MIN_SEARCH_EXTRACT_LIMIT}-${MAX_SEARCH_EXTRACT_LIMIT}, default ${DEFAULT_SEARCH_EXTRACT_LIMIT}.`,
+  ),
+  response_content: z.enum(['summary', 'full']).default('full').describe(
+    'Controls only the returned body. full returns up to max_chars; summary returns a 1500-character evidence excerpt. Research storage keeps the full captured text in deterministic chunks.',
+  ),
+  max_chars: z.number().int().min(200).max(50_000).optional().describe(
+    `Maximum returned characters per extracted result in response_content=full. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`,
+  ),
+};
+
+const ParallelSearchExtractionFields = {
   extract_mode: z.enum(['none', 'abstract', 'full']).default('none').describe(
     'Content depth in this search call. Use abstract or full during research instead of following search with separate extract calls. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
   ),
-  extract_limit: z.number().int().min(1).max(10).default(5).describe(
-    'Maximum unique result URLs to extract. For parallel search this is one call-wide limit, not a per-query limit.',
+  extract_limit: parallelExtractLimitSchema().describe(
+    `Call-wide maximum unique result URLs to extract. Integer ${MIN_SEARCH_EXTRACT_LIMIT}-${MAX_PARALLEL_EXTRACT_LIMIT}, default ${DEFAULT_PARALLEL_EXTRACT_LIMIT} for abstract; full defaults to and allows at most ${MAX_FULL_EXTRACT_LIMIT}.`,
+  ),
+  response_content: z.enum(['summary', 'full']).default('summary').describe(
+    'Controls only returned bodies. summary is the default and returns 1500-character evidence excerpts; full returns up to max_chars. Research storage keeps the full captured text in deterministic chunks.',
   ),
   max_chars: z.number().int().min(200).max(50_000).optional().describe(
-    `Maximum characters per extracted result. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`,
+    `Maximum returned characters per extracted result in response_content=full. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`,
   ),
 };
 
 const SearchInput = {
   query: z.string().min(1).max(400).describe('Google search query. Use site: filters and quotes for exact match.'),
-  limit: z.number().int().min(1).max(20).default(10).describe('Max results (default 10).'),
-  ...SearchExtractionFields,
+  limit: z.number().int().min(1).max(20).default(10).describe('Maximum results. Integer 1-20, default 10.'),
+  ...SingleSearchExtractionFields,
   ...ProjectSearchInput,
 };
 
 const ScholarSearchInput = {
   query: z.string().min(1).max(400).describe('Google Scholar query. Supports quotes and author: operators.'),
-  limit: z.number().int().min(1).max(10).default(10).describe('Max papers (default 10).'),
+  limit: z.number().int().min(1).max(10).default(10).describe('Maximum papers. Integer 1-10, default 10.'),
   ...ProjectCaptureInput,
 };
 
 const SearchParallelInput = {
   queries: z.array(z.string().min(1).max(400)).min(2).max(12).describe('2-12 independent live queries.'),
-  limit: z.number().int().min(1).max(20).default(10).describe('Max results per query.'),
-  ...SearchExtractionFields,
+  limit: z.number().int().min(1).max(20).default(10).describe('Maximum results per query. Integer 1-20, default 10.'),
+  ...ParallelSearchExtractionFields,
   ...ProjectSearchInput,
 };
 
 const ExtractInput = {
   url: z.string().describe('Public http(s) URL. Loopback/private IPs blocked unless SURF_ALLOW_PRIVATE=true.'),
   ...ProjectCaptureInput,
-  max_chars: z.number().int().min(200).max(50_000).optional().describe(`Truncate body to this many chars. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`),
+  max_chars: z.number().int().min(200).max(50_000).optional().describe(`Maximum returned characters when response_content=full. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`),
+  response_content: z.enum(['summary', 'full']).default('full').describe(
+    'Controls only the returned body. full returns up to max_chars; summary returns a 1500-character evidence excerpt. Research storage keeps the full captured text in deterministic chunks.',
+  ),
   mode: z.enum(['full', 'abstract', 'metadata']).default('full').describe(
     'Extraction depth. `full` = whole article body (default; uses Playwright if needed). ' +
     '`abstract` = cheap survey: PDF page 1 OR HTML meta description (~1500 chars); use to triage relevance before paying for full text. ' +
@@ -546,6 +575,8 @@ const ResultItem = z.object({
   content: z.string().optional(),
   excerpt: z.string().optional(),
   length: z.number().optional(),
+  source_length: z.number().optional(),
+  truncated: z.boolean().optional(),
   is_pdf: z.boolean().optional(),
   page_count: z.number().optional(),
   extraction_quality: z.enum(['full_text', 'abstract', 'meta_abstract', 'metadata_only']).optional(),
@@ -641,6 +672,8 @@ const ExtractOutput = {
   content: z.string().optional(),
   excerpt: z.string().optional(),
   length: z.number().optional(),
+  source_length: z.number().optional(),
+  truncated: z.boolean().optional(),
   is_pdf: z.boolean().optional(),
   page_count: z.number().optional(),
   extraction_quality: z.enum(['full_text', 'abstract', 'meta_abstract', 'metadata_only']).optional(),
@@ -715,6 +748,7 @@ server.registerTool('search', {
     'Use this tool only when new external information from Google, public websites, papers, or repositories is required. ' +
     'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
+    'limit accepts integers from 1 to 20. extract_limit accepts integers from 1 to 10, defaults to 5, and limits unique extracted URLs. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
     'For research collection, set extract_mode=abstract or full in this call. Use extract separately only to revisit a known URL or request deeper text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
@@ -731,6 +765,15 @@ server.registerTool('search', {
   include_project_ids?: string[];
   memory_handle?: string;
 } & SessionMemoryArgs & SearchExtractionInput) => {
+  try {
+    parseSearchExtractLimit(args.extract_limit, 'parallel', args.extract_mode ?? 'none');
+  } catch (error) {
+    return formatToolResponse(null, {
+      code: 'INVALID_ARGUMENT',
+      message: error instanceof Error ? error.message : String(error),
+      retryable: false,
+    });
+  }
   const runLive = async (requestedLimit = args.limit) => {
     const provider = await prepareSearchProvider(baseDeps.config.searchProvider);
     if (provider.error) {
@@ -743,12 +786,13 @@ server.registerTool('search', {
     const result = await searchTool(request, deps, provider);
     return await applySearchExtraction(result, request, deps);
   };
-  return baseDeps.config.researchEnabled
+  const result = baseDeps.config.researchEnabled
     ? await runSearchWithResearch({
       ...args,
       retrieval_mode: baseDeps.config.researchRetrievalMode,
     }, researchService, runLive)
     : await runLive();
+  return shapeExtractionResponse(result, args, 'full');
 });
 
 server.registerTool('scholar_search', {
@@ -789,7 +833,8 @@ server.registerTool('search_parallel', {
     SharedResearchBrokerDescription +
     'Use this tool only when 2-12 new external queries are required. Providing project_id adds stored evidence but never makes the searches local-only. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'Set extract_mode=abstract or full here so discovery and reading complete in one tool call; use extract separately only for a known URL or deeper text. extract_limit is shared across the call. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'Each query limit accepts integers from 1 to 20. Call-wide extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
+    'Set extract_mode=abstract or full here so discovery and reading complete in one tool call; use extract separately only for a known URL or deeper text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
     'Extracted bodies become evidence while unread hits remain metadata. ' +
@@ -817,12 +862,13 @@ server.registerTool('search_parallel', {
     const result = await searchParallelTool(request, deps, provider);
     return await applyParallelSearchExtraction(result, request, deps);
   };
-  return baseDeps.config.researchEnabled
+  const result = baseDeps.config.researchEnabled
     ? await runParallelWithResearch({
       ...args,
       retrieval_mode: baseDeps.config.researchRetrievalMode,
     }, researchService, runLive)
     : await runLive();
+  return shapeExtractionResponse(result, args, 'summary');
 });
 
 server.registerTool('extract', {
@@ -832,7 +878,7 @@ server.registerTool('extract', {
     SharedResearchBrokerDescription +
     'For GitHub repository URLs, metadata reads the README; abstract and full use the same bounded download gate and differ only in indexed source depth. ' +
     'HTML via Mozilla Readability; academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) auto-detected via Content-Type, %PDF magic, citation_pdf_url meta, and per-domain URL rules. ' +
-    'Tiered depth: `mode="metadata"` returns document metadata without body text, `mode="abstract"` returns about 1500 chars for relevance checks, and `mode="full"` returns up to the configured 50000 chars. ' +
+    'Tiered depth: `mode="metadata"` returns document metadata without body text, `mode="abstract"` returns about 1500 chars for relevance checks, and `mode="full"` reads the full bounded source. response_content controls whether the response contains a 1500-character summary or up to 50000 characters. ' +
     'PDF and landing-page metadata are merged when available. With research enabled, abstract and full PDF reads are stored as searchable evidence with bibliographic metadata and provenance. ' +
     'Best-effort: failures return an errorInfo instead of throwing.',
   inputSchema: ExtractInput,
@@ -841,6 +887,7 @@ server.registerTool('extract', {
 }, async (args: {
   url: string;
   max_chars?: number;
+  response_content?: 'summary' | 'full';
   mode: 'full' | 'abstract' | 'metadata';
   project_id?: string;
   memory_handle?: string;
@@ -865,7 +912,8 @@ server.registerTool('extract', {
       extraction_quality: repositoryRow.extraction_quality ?? 'abstract',
       meta: { repository_ingest: prepared.decisions },
     });
-    return await captureOnly(researchService, 'extract', args, result);
+    const captured = await captureOnly(researchService, 'extract', args, result);
+    return shapeExtractionResponse(captured, args, 'full');
   }
   const ready = await ensureProfileReady();
   if (!ready.ok) {
@@ -884,9 +932,10 @@ server.registerTool('extract', {
       meta: { ...meta, repository_ingest: prepared.decisions },
     });
   }
-  return baseDeps.config.researchEnabled
+  const captured = baseDeps.config.researchEnabled
     ? await captureOnly(researchService, 'extract', args, result)
     : result;
+  return shapeExtractionResponse(captured, args, 'full');
 });
 
 if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search', {

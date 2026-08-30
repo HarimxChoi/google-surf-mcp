@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, rm, statfs, writeFile } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
 import { fenceUntrustedContent } from '../response.js';
+import { MAX_RESEARCH_CAPTURE_CHARS } from '../searchLimits.js';
 import type {
   AssertionCorrectionRecord, AssertionRecord, AssertionValue, CaptureResult, DecisionRecord,
   EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord,
@@ -241,6 +242,25 @@ function exactTerms(...values: Array<string | undefined>): string[] {
     const normalized = normalizeEntityName(value);
     return normalized ? [normalized] : [];
   }))];
+}
+
+const DOCUMENT_CHUNK_CHARS = 4_000;
+
+function documentChunks(text: string): Array<{
+  chunk_index: number;
+  text: string;
+  content_hash: string;
+}> {
+  const chunks = [];
+  for (let start = 0, index = 0; start < text.length; start += DOCUMENT_CHUNK_CHARS, index++) {
+    const chunk = text.slice(start, start + DOCUMENT_CHUNK_CHARS);
+    chunks.push({
+      chunk_index: index,
+      text: chunk,
+      content_hash: createHash('sha256').update(chunk).digest('hex'),
+    });
+  }
+  return chunks;
 }
 
 function queryTerms(value: string): Set<string> {
@@ -1746,8 +1766,9 @@ export class ResearchService {
   }
 
   private async buildRetrievalItems(projectId: string): Promise<RetrievalIndexItem[]> {
-    const [documents, sources, symbols] = await Promise.all([
+    const [documents, documentChunks, sources, symbols] = await Promise.all([
       this.store.listProjectDocuments(projectId),
+      this.store.listProjectDocumentChunks(projectId),
       this.store.listProjectSourceBodies(projectId),
       this.store.listCodeSymbols(projectId),
     ]);
@@ -1757,18 +1778,20 @@ export class ResearchService {
       values.push(symbol.name);
       symbolNames.set(symbol.source_entry_id, values);
     }
-    const documentItems: RetrievalIndexItem[] = documents.flatMap((document) => {
-      if (document.state !== 'lexical_active' || !document.text) return [];
+    const documentsById = new Map(documents.map((document) => [document.document_id, document]));
+    const documentItems: RetrievalIndexItem[] = documentChunks.flatMap((chunk) => {
+      const document = documentsById.get(chunk.document_id);
+      if (!document || document.state !== 'lexical_active') return [];
       return [{
-        item_id: `document:${document.document_id}`,
+        item_id: `document:${document.document_id}:${chunk.chunk_index}`,
         project_id: projectId,
         source_family: 'document',
         source_id: document.document_id,
         title: document.title,
         url: document.url,
-        content_hash: createHash('sha256').update(document.text).digest('hex'),
+        content_hash: chunk.content_hash,
         exact_terms: exactTerms(document.title, document.url, document.scholar_id),
-        text: document.text,
+        text: chunk.text,
       }];
     });
     const sourceItems: RetrievalIndexItem[] = sources.map((source) => {
@@ -2829,6 +2852,11 @@ export class ResearchService {
         const kind = classify(row, input.tool);
         const content = row.content?.trim();
         const active = !!content && row.extraction_quality !== 'metadata_only';
+        const text = active
+          ? `${row.title}\n${content}`.slice(0, MAX_RESEARCH_CAPTURE_CHARS)
+          : undefined;
+        const chunks = text ? documentChunks(text) : [];
+        const chunkSetId = text ? createHash('sha256').update(text).digest('hex') : undefined;
         kinds[kind].push(shortLabel(row.title));
         documentIds.push(id);
         observations.push({
@@ -2858,6 +2886,7 @@ export class ResearchService {
           ...(row.modified_at ? { modified_at: row.modified_at.slice(0, 100) } : {}),
           ...(row.page_count !== undefined ? { page_count: row.page_count } : {}),
           ...(row.scholar_id ? { scholar_id: row.scholar_id } : {}),
+          ...(chunkSetId ? { content_hash: chunkSetId } : {}),
           updated_at: now,
         });
         await this.store.upsertMembership({
@@ -2876,28 +2905,31 @@ export class ResearchService {
           status: 'confirmed',
         });
         await this.recordMetadataAssertions(project.project_id, id, entity, row);
-        if (active) {
-          const text = `${row.title}\n${content}`.slice(0, 50_000);
-          const contentHash = createHash('sha256').update(text).digest('hex');
-          await this.store.upsertChunk({
+        if (active && chunkSetId) {
+          await this.store.replaceDocumentChunks(id, chunkSetId, chunks.map((chunk) => ({
+            chunk_id: `${id}_${chunkSetId.slice(0, 16)}_${chunk.chunk_index}`,
             document_id: id,
+            chunk_set_id: chunkSetId,
+            chunk_index: chunk.chunk_index,
             title: row.title.slice(0, 1_000),
             url: row.url,
-            text,
-            content_hash: contentHash,
+            text: chunk.text,
+            content_hash: chunk.content_hash,
             updated_at: now,
-          });
-          await this.store.upsertExactItem({
-            item_id: `document:${id}`,
-            project_id: project.project_id,
-            source_family: 'document',
-            source_id: id,
-            title: row.title.slice(0, 1_000),
-            url: row.url,
-            content_hash: contentHash,
-            exact_terms: exactTerms(row.title, row.url, row.scholar_id),
-            text,
-          });
+          })));
+          for (const chunk of chunks) {
+            await this.store.upsertExactItem({
+              item_id: `document:${id}:${chunk.chunk_index}`,
+              project_id: project.project_id,
+              source_family: 'document',
+              source_id: id,
+              title: row.title.slice(0, 1_000),
+              url: row.url,
+              content_hash: chunk.content_hash,
+              exact_terms: exactTerms(row.title, row.url, row.scholar_id),
+              text: chunk.text,
+            });
+          }
         }
         if (row.cited_by_count !== undefined) {
           await this.store.createMetadataObservation({

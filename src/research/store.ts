@@ -11,7 +11,8 @@ import type {
   GraphAnalysis, GraphArtifact, GraphProjection, IntentRevisionRecord,
   KnowledgeJobRecord, KnowledgeJobStatus,
   LocalSearchHit, MemorySessionRecord, OntologyTermRecord, PlanRevisionRecord,
-  ProjectDocumentRecord, ProjectRecord, ProjectSourceEntryRecord, ProjectSourceSnapshot,
+  ProjectDocumentChunkRecord, ProjectDocumentRecord, ProjectRecord,
+  ProjectSourceEntryRecord, ProjectSourceSnapshot,
   RetrievalIndexItem, SearchEventRecord,
 } from './contracts.js';
 
@@ -47,6 +48,7 @@ DEFINE TABLE IF NOT EXISTS project_source_change SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS embedding_cache SCHEMALESS;
 DEFINE ANALYZER IF NOT EXISTS research_text TOKENIZERS blank,class,camel FILTERS lowercase;
 DEFINE INDEX IF NOT EXISTS chunk_text ON TABLE chunk FIELDS text FULLTEXT ANALYZER research_text BM25;
+DEFINE INDEX IF NOT EXISTS chunk_document ON TABLE chunk FIELDS document_id, chunk_set_id;
 DEFINE INDEX IF NOT EXISTS source_body_text ON TABLE source_body FIELDS text FULLTEXT ANALYZER research_text BM25;
 DEFINE INDEX IF NOT EXISTS membership_project ON TABLE project_document FIELDS project_id;
 DEFINE INDEX IF NOT EXISTS event_project ON TABLE search_event FIELDS project_id;
@@ -988,9 +990,21 @@ export class ResearchStore {
     });
   }
 
-  async upsertChunk(data: Record<string, unknown>): Promise<void> {
+  async replaceDocumentChunks(
+    documentId: string,
+    chunkSetId: string,
+    chunks: Array<Record<string, unknown> & { chunk_id: string }>,
+  ): Promise<void> {
     const db = await this.open();
-    await db.upsert(new RecordId('chunk', `${data.document_id}_0`)).content(data);
+    for (const chunk of chunks) {
+      const { chunk_id, ...data } = chunk;
+      await db.upsert(new RecordId('chunk', chunk_id)).content(data);
+    }
+    await db.query(
+      `DELETE chunk WHERE document_id = $document_id
+       AND (chunk_set_id = NONE OR chunk_set_id != $chunk_set_id)`,
+      { document_id: documentId, chunk_set_id: chunkSetId },
+    );
   }
 
   private exactRows(item: RetrievalIndexItem): Array<Record<string, unknown> & { id: RecordId }> {
@@ -1408,9 +1422,34 @@ export class ResearchStore {
       `SELECT project_id, document_id, state,
         (SELECT VALUE title FROM ONLY type::record('document', $parent.document_id)) AS title,
         (SELECT VALUE canonical_url FROM ONLY type::record('document', $parent.document_id)) AS url,
-        (SELECT VALUE scholar_id FROM ONLY type::record('document', $parent.document_id)) AS scholar_id,
-        (SELECT VALUE text FROM ONLY type::record('chunk', $parent.document_id + '_0')) AS text
+        (SELECT VALUE scholar_id FROM ONLY type::record('document', $parent.document_id)) AS scholar_id
        FROM project_document WHERE project_id = $project_id ORDER BY document_id ASC`,
+      { project_id: projectId },
+    ).collect();
+    const documentIds = rows.map((row) => row.document_id);
+    const [chunks] = documentIds.length
+      ? await db.query<[Array<{ document_id: string; chunk_index: number; text: string }>]>(
+        `SELECT document_id, chunk_index, text FROM chunk
+         WHERE document_id IN $document_ids ORDER BY document_id ASC, chunk_index ASC`,
+        { document_ids: documentIds },
+      ).collect()
+      : [[]];
+    const firstText = new Map<string, string>();
+    for (const chunk of chunks) {
+      if (!firstText.has(chunk.document_id)) firstText.set(chunk.document_id, chunk.text);
+    }
+    return rows.map((row) => ({ ...row, text: firstText.get(row.document_id) }));
+  }
+
+  async listProjectDocumentChunks(projectId: string): Promise<ProjectDocumentChunkRecord[]> {
+    const db = await this.open();
+    const [rows] = await db.query<[ProjectDocumentChunkRecord[]]>(
+      `SELECT document_id, chunk_index, title, url, text, content_hash FROM chunk
+       WHERE document_id IN (
+         SELECT VALUE document_id FROM project_document
+         WHERE project_id = $project_id AND state = 'lexical_active'
+       )
+       ORDER BY document_id ASC, chunk_index ASC`,
       { project_id: projectId },
     ).collect();
     return rows;
@@ -1509,13 +1548,16 @@ export class ResearchStore {
         { hashes },
       ).collect()
       : [[]];
-    const documents = new Map(documentRows.map((row) => [row.document_id, row]));
+    const documents = new Map(documentRows.map((row) => [
+      `${row.document_id}\0${row.content_hash}`,
+      row,
+    ]));
     const entries = new Map(sourceEntries.map((row) => [`${row.project_id}\0${row.entry_id}`, row]));
     const bodies = new Map(sourceBodies.map((row) => [row.content_hash, row.text]));
     return references.flatMap<LocalSearchHit>((reference) => {
       if (reference.source_family === 'document') {
-        const row = documents.get(reference.source_id);
-        if (!row || row.content_hash !== reference.content_hash) return [];
+        const row = documents.get(`${reference.source_id}\0${reference.content_hash}`);
+        if (!row) return [];
         return [{
           document_id: reference.source_id,
           title: reference.title,
@@ -1543,7 +1585,11 @@ export class ResearchStore {
         source_family: 'code' as const,
         retrieval_family: retrievalFamily,
       }];
-    });
+    }).filter((row, index, rows) => rows.findIndex((candidate) => (
+      candidate.source_family === row.source_family
+      && candidate.document_id === row.document_id
+      && candidate.project_ids[0] === row.project_ids[0]
+    )) === index);
   }
 
   async searchProjectExact(
@@ -1657,10 +1703,12 @@ export class ResearchStore {
            SELECT VALUE document_id FROM project_document
            WHERE project_id = $project_id AND state = 'lexical_active'
          )
-       ORDER BY score DESC LIMIT $limit`,
-      { project_id: projectId, query, limit },
+       ORDER BY score DESC LIMIT $chunk_limit`,
+      { project_id: projectId, query, chunk_limit: Math.min(100, limit * 4) },
     ).collect();
-    const documents = rows.map((row) => ({
+    const documents = rows.filter((row, index) => (
+      rows.findIndex((candidate) => candidate.document_id === row.document_id) === index
+    )).map((row) => ({
       document_id: row.document_id,
       title: row.title,
       url: row.url,

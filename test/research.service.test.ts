@@ -90,6 +90,39 @@ describe('research project memory', () => {
     expect(hits[0]).toMatchObject({ title: 'Temporal Graph Memory', source_family: 'document' });
   });
 
+  it('indexes long documents beyond 50000 characters and replaces stale chunks', async () => {
+    await service.createProject('Long evidence', 'long-evidence');
+    const url = 'https://example.com/long-paper';
+    await service.capture({
+      tool: 'extract',
+      project_id: 'long-evidence',
+      payload: {
+        title: 'Long Paper',
+        url,
+        content: `${'prefix '.repeat(9_000)} latechunkneedle`,
+        extraction_quality: 'full_text',
+      },
+    });
+    await service.waitForIdle();
+
+    expect(await service.search('long-evidence', 'latechunkneedle', 10)).toHaveLength(1);
+
+    await service.capture({
+      tool: 'extract',
+      project_id: 'long-evidence',
+      payload: {
+        title: 'Long Paper',
+        url,
+        content: 'replacement body without the prior marker',
+        extraction_quality: 'full_text',
+      },
+    });
+    await service.waitForIdle();
+
+    expect(await service.search('long-evidence', 'latechunkneedle', 10)).toHaveLength(0);
+    expect(await service.search('long-evidence', 'replacement body', 10)).toHaveLength(1);
+  });
+
   it('stores PDF metadata with abstract and full evidence', async () => {
     await service.createProject('PDF evidence', 'pdf-evidence');
     for (const extraction_quality of ['abstract', 'full_text']) {

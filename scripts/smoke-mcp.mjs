@@ -46,6 +46,7 @@ try {
     }
   }
   for (const name of ['search', 'search_parallel']) {
+    const description = listed.tools.find((tool) => tool.name === name)?.description ?? '';
     const properties = listed.tools.find((tool) => tool.name === name)?.inputSchema?.properties ?? {};
     if (!('extract_mode' in properties) || 'project_id' in properties || 'retrieval_mode' in properties) {
       throw new Error(`${name} default schema mismatch`);
@@ -53,11 +54,37 @@ try {
     if (properties.max_chars?.maximum !== 50_000) {
       throw new Error(`${name} extraction limit mismatch`);
     }
+    if (properties.limit?.minimum !== 1 || properties.limit?.maximum !== 20) {
+      throw new Error(`${name} result limit contract mismatch`);
+    }
+    const expectedExtractMax = name === 'search_parallel' ? 20 : 10;
+    const expectedResponseDefault = name === 'search_parallel' ? 'summary' : 'full';
+    if (properties.extract_limit?.minimum !== 1
+      || properties.extract_limit?.maximum !== expectedExtractMax
+      || (name === 'search' && properties.extract_limit?.default !== 5)
+      || properties.response_content?.default !== expectedResponseDefault
+      || !description.includes(name === 'search_parallel'
+        ? 'extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full'
+        : 'extract_limit accepts integers from 1 to 10')) {
+      throw new Error(`${name} extract_limit contract mismatch`);
+    }
   }
   const parallel = listed.tools.find((tool) => tool.name === 'search_parallel');
-  if (parallel?.inputSchema?.properties?.queries?.minItems !== 2) {
-    throw new Error('search_parallel must require at least two queries');
+  if (parallel?.inputSchema?.properties?.queries?.minItems !== 2
+    || parallel?.inputSchema?.properties?.queries?.maxItems !== 12) {
+    throw new Error('search_parallel query count contract mismatch');
   }
+  const invalidLimit = await offClient.callTool({
+    name: 'search_parallel',
+    arguments: { queries: ['one', 'two'], extract_mode: 'full', extract_limit: 11 },
+  });
+  const invalidLimitText = invalidLimit.content
+    .filter((entry) => entry.type === 'text')
+    .map((entry) => entry.text)
+    .join('\n');
+  if (!invalidLimit.isError || !invalidLimitText.includes(
+    'extract_limit must be an integer between 1 and 10 for full parallel; received 11',
+  )) throw new Error('search_parallel extract_limit error contract mismatch');
 } finally {
   await offTransport.close();
 }

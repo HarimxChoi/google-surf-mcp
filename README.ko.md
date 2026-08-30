@@ -152,11 +152,12 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, max_chars?)` - 항상 라이브 웹 검색을 실행합니다. 신규 외부 정보가 필요할 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. 리서치에서는 별도 extract 호출 대신 이 호출에 `extract_mode`를 지정합니다. 추출 기본값은 `none`, abstract는 1500자, full은 50000자
-- `scholar_search(query, limit?)` - Google Scholar metadata 검색. 브라우저, SearchApi 메인, fallback을 지원합니다.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, max_chars?)` - 최대 4개 탭이 계속 다음 작업을 가져가는 큐로 2-12개의 라이브 웹 검색을 실행합니다. 검색 시작 시각은 서로 겹치지 않게 조정합니다. 신규 외부 정보가 필요할 때만 사용하고 결과를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. `extract_limit`은 호출 전체에서 공유하며 abstract는 1500자, full은 50000자
-- `extract(url, max_chars?, mode?)` - URL 본문 읽기
-  - `mode="full"` (기본): 최대 50000자, PDF는 `liteparse`(spatial parsing, 다단 읽기). research 모드에서는 문서 메타데이터도 본문과 함께 저장
+- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 항상 라이브 웹 검색을 실행합니다. 신규 외부 정보가 필요할 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. 리서치에서는 별도 extract 호출 대신 이 호출에 `extract_mode`를 지정합니다. `limit`은 1-20입니다. 추출 기본값은 `none`, `extract_limit`은 1-10이며 기본값은 5입니다. `response_content` 기본값은 `full`입니다.
+- `scholar_search(query, limit?)` - Google Scholar metadata 검색. `limit`은 1-10입니다. 브라우저, SearchApi 메인, fallback을 지원합니다.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 최대 4개 탭이 계속 다음 작업을 가져가는 큐로 2-12개의 라이브 웹 검색을 실행합니다. 검색 시작 시각은 서로 겹치지 않게 조정합니다. 신규 외부 정보가 필요할 때만 사용하고 결과를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. 쿼리별 `limit`은 1-20입니다. 호출 전체의 `extract_limit`은 abstract에서 기본 12, 최대 20이며 full에서 기본값과 최대값이 10입니다. `response_content`는 한 번의 응답 크기를 제한하기 위해 `summary`가 기본값입니다.
+- 통합 추출 결과는 `requested`, `applied`, `skipped`, `truncated`, `total_chars`를 반환합니다. `remaining_urls`는 검색을 반복하지 않고 `extract`에 바로 전달할 수 있습니다.
+- `extract(url, max_chars?, mode?, response_content?)` - URL 본문 읽기
+  - `mode="full"` (기본): research 저장용으로 최대 1000000자를 읽고 4000자 단위의 deterministic chunk로 저장합니다. `response_content="full"`은 최대 50000자, `summary`는 1500자 근거 발췌를 반환합니다.
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). research 모드에서는 문서 메타데이터도 요약과 함께 저장
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
