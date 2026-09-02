@@ -26,6 +26,8 @@ describe('native Chrome search route', () => {
     expect(args).toContain('--remote-debugging-port=9223');
     expect(args).toContain('--remote-debugging-address=127.0.0.1');
     expect(args).toContain('--start-minimized');
+    expect(args).toContain('--window-position=-32000,-32000');
+    expect(args).toContain('--window-size=1366,768');
     expect(args).not.toContain('--new-window');
     expect(joined).not.toMatch(/headless|no-sandbox|AutomationControlled|enable-automation/i);
   });
@@ -155,5 +157,79 @@ describe('native Chrome search route', () => {
 
     expect(exposeCaptcha).toHaveBeenCalledWith(session, page);
     expect(disposeSession).not.toHaveBeenCalled();
+  });
+
+  it('restores the background window guard after CAPTCHA is cleared', async () => {
+    const guard = {
+      stdin: { end: vi.fn() },
+      kill: vi.fn(),
+    };
+    const startWindowGuard = vi.fn(async () => guard as never);
+    const setWindowState = vi.fn(async () => {});
+    const page = {
+      isClosed: vi.fn(() => false),
+      url: vi.fn(() => 'https://www.google.com/search?q=cleared'),
+      evaluate: vi.fn(async () => false),
+    };
+    const session = {
+      child: { pid: 4321, exitCode: null, once: vi.fn() },
+      browser: { isConnected: vi.fn(() => true), once: vi.fn(), contexts: vi.fn() },
+      pages: [page],
+      captchaPage: page,
+      dead: false,
+    };
+    const native = new NativeChromeBrowser({
+      executablePath: 'chrome',
+      profileDir: 'profile',
+      startWindowGuard,
+      setWindowState,
+    });
+    const internal = native as unknown as {
+      session: typeof session;
+      prepareForSearch: () => Promise<void>;
+    };
+    internal.session = session;
+
+    await internal.prepareForSearch();
+
+    expect(startWindowGuard).toHaveBeenCalledOnce();
+    expect(guard.stdin.end).toHaveBeenCalledWith('4321\n');
+    expect(setWindowState).toHaveBeenCalledWith(4321, 0);
+    expect(session.captchaPage).toBeUndefined();
+  });
+
+  it('closes the session when the Windows guard cannot restart', async () => {
+    if (process.platform !== 'win32') return;
+    const setWindowState = vi.fn(async () => {});
+    const page = {
+      isClosed: vi.fn(() => false),
+      url: vi.fn(() => 'https://www.google.com/search?q=cleared'),
+      evaluate: vi.fn(async () => false),
+    };
+    const session = {
+      child: { pid: 4321, exitCode: null, once: vi.fn() },
+      browser: { isConnected: vi.fn(() => true), once: vi.fn(), contexts: vi.fn() },
+      pages: [page],
+      captchaPage: page,
+      dead: false,
+    };
+    const native = new NativeChromeBrowser({
+      executablePath: 'chrome',
+      profileDir: 'profile',
+      startWindowGuard: async () => undefined,
+      setWindowState,
+    });
+    const internal = native as unknown as {
+      session: typeof session;
+      disposeSession: (value: typeof session) => Promise<void>;
+      prepareForSearch: () => Promise<void>;
+    };
+    internal.session = session;
+    const disposeSession = vi.spyOn(internal, 'disposeSession').mockResolvedValue();
+
+    await expect(internal.prepareForSearch()).rejects.toThrow('window guard failed to restart');
+
+    expect(setWindowState).toHaveBeenCalledWith(4321, 0);
+    expect(disposeSession).toHaveBeenCalledWith(session);
   });
 });

@@ -72,6 +72,15 @@ describe('research broker', () => {
     }
     expect(detail.project.project_id).toBe('broker-4');
     expect(clients.every((client) => client.status().state === 'ready')).toBe(true);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(clients[0].search(
+      'broker-0',
+      'cancelled query',
+      10,
+      [],
+      controller.signal,
+    )).rejects.toThrow('research search cancelled');
 
     const owner = JSON.parse(await readFile(
       resolve(researchBrokerDirectory(root), 'owner', 'owner.json'),

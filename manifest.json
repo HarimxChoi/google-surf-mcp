@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Research mode is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
   "author": {
@@ -40,7 +40,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@1.0.1"
+        "google-surf-mcp@1.0.3"
       ],
       "env": {
         "SEARCH_API": "${user_config.search_api_key}",
@@ -53,9 +53,14 @@
         "SURF_RETRIEVAL_MODE": "${user_config.retrieval_mode}",
         "SURF_RESEARCH_ROOT": "${user_config.research_root}",
         "SURF_RESEARCH_VECTOR_MODEL": "${user_config.research_vector_model}",
+        "SURF_RESEARCH_VECTOR_LOW_MEMORY": "${user_config.research_vector_low_memory}",
+        "SURF_RESEARCH_VECTOR_THREADS": "${user_config.research_vector_threads}",
         "SURF_RESEARCH_REPO_AUTO": "${user_config.research_repo_auto}",
         "SURF_RESEARCH_REPO_AUTO_MAX_MB": "${user_config.research_repo_auto_max_mb}",
         "SURF_RESEARCH_REPO_AUTO_MAX_FILES": "${user_config.research_repo_auto_max_files}",
+        "SURF_RESEARCH_BROKER_IDLE_MS": "${user_config.research_broker_idle_ms}",
+        "SURF_RESEARCH_READ_CONCURRENCY": "${user_config.research_read_concurrency}",
+        "SURF_RESEARCH_QUERY_TIMEOUT_MS": "${user_config.research_query_timeout_ms}",
         "GITHUB_TOKEN": "${user_config.github_token}",
         "SURF_LOCALE": "${user_config.locale}",
         "SURF_TZ": "${user_config.timezone}",
@@ -88,7 +93,7 @@
     },
     {
       "name": "project_memory_search",
-      "description": "Search stored local project knowledge with exact, BM25, vector, graph, RRF, and a local reranker without Google, browser, or SearchApi access."
+      "description": "Search stored local project knowledge in one broker request with batched query variants, exact, BM25, vector, evidence-seeded graph expansion, RRF, and one local rerank."
     },
     {
       "name": "project_memory",
@@ -124,7 +129,7 @@
     "browser_engine": {
       "type": "string",
       "title": "Browser engine",
-      "description": "auto, native, or playwright. Auto uses native system Chrome on local desktops.",
+      "description": "auto, native, or playwright. Auto uses one hidden native Chrome broker shared across local MCP sessions.",
       "default": "auto",
       "required": false
     },
@@ -167,6 +172,20 @@
       "default": "Xenova/multilingual-e5-small",
       "required": false
     },
+    "research_vector_low_memory": {
+      "type": "boolean",
+      "title": "Low-memory vector runtime",
+      "description": "Disable the ONNX CPU memory arena and memory pattern to reduce peak memory.",
+      "default": true,
+      "required": false
+    },
+    "research_vector_threads": {
+      "type": "number",
+      "title": "Vector runtime threads",
+      "description": "ONNX intra-op thread count from 1 to 16.",
+      "default": 4,
+      "required": false
+    },
     "research_repo_auto": {
       "type": "boolean",
       "title": "Automatic repository indexing",
@@ -186,6 +205,27 @@
       "title": "Repository source file limit",
       "description": "Maximum searchable source file count for automatic indexing.",
       "default": 2000,
+      "required": false
+    },
+    "research_broker_idle_ms": {
+      "type": "number",
+      "title": "Research broker idle lifetime",
+      "description": "Milliseconds to keep the shared research broker available after the last client disconnects.",
+      "default": 60000,
+      "required": false
+    },
+    "research_read_concurrency": {
+      "type": "number",
+      "title": "Research read concurrency",
+      "description": "Maximum concurrent broker reads. Identical in-flight reads share one operation.",
+      "default": 4,
+      "required": false
+    },
+    "research_query_timeout_ms": {
+      "type": "number",
+      "title": "Research query timeout",
+      "description": "Embedded SurrealDB query timeout in milliseconds.",
+      "default": 30000,
       "required": false
     },
     "github_token": {
@@ -211,7 +251,7 @@
     "headless": {
       "type": "boolean",
       "title": "Headless",
-      "description": "Controls Playwright extraction, compatibility, and recovery paths. Native search uses minimized system Chrome.",
+      "description": "Controls Playwright extraction, compatibility, and recovery paths. Native search hides normal system Chrome and shows it only for CAPTCHA recovery.",
       "default": true,
       "required": false
     },

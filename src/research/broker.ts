@@ -38,6 +38,7 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'restoreAssertion',
   'restoreProject',
   'search',
+  'searchBatch',
   'searchFamilies',
   'splitEntity',
   'startExperiment',
@@ -53,6 +54,7 @@ export const RESEARCH_BROKER_READ_METHODS = new Set([
   'rerankCandidates',
   'researchSearchContext',
   'search',
+  'searchBatch',
   'searchFamilies',
 ]);
 
@@ -60,10 +62,14 @@ export interface ResearchBrokerConfig {
   enabled: boolean;
   root: string;
   vectorModel?: string;
+  vectorLowMemory?: boolean;
+  vectorThreads?: number;
   repositoryAuto?: boolean;
   repositoryMaxSourceBytes?: number;
   repositoryMaxSourceFiles?: number;
   idleMs: number;
+  readConcurrency: number;
+  queryTimeoutMs: number;
 }
 
 interface BrokerRequest {
@@ -87,15 +93,22 @@ interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  cleanup?: () => void;
 }
 
 export interface ResearchBrokerClientOptions {
   idleMs?: number;
+  readConcurrency?: number;
   processPath?: string;
 }
 
 function stableConfig(config: ResearchBrokerConfig): ResearchBrokerConfig {
   return { ...config, root: resolve(config.root) };
+}
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return !!value && typeof value === 'object'
+    && 'aborted' in value && typeof (value as AbortSignal).addEventListener === 'function';
 }
 
 export function researchBrokerConfigHash(config: ResearchBrokerConfig): string {
@@ -209,8 +222,9 @@ class ResearchBrokerClient {
     this.currentStatus = { ...this.currentStatus, state: 'broker_disconnected' };
   }
 
-  async call(method: string, args: unknown[]): Promise<unknown> {
+  async call(method: string, args: unknown[], signal?: AbortSignal): Promise<unknown> {
     if (!RESEARCH_BROKER_METHODS.has(method)) throw new Error(`unsupported research broker method: ${method}`);
+    if (signal?.aborted) throw new Error('research search cancelled');
     const token = await brokerToken(this.config.root);
     await this.ensureConnected();
     const socket = this.socket;
@@ -229,19 +243,57 @@ class ResearchBrokerClient {
       : 5 * 60_000;
     return await new Promise((resolveCall, reject) => {
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
         this.pending.delete(id);
-        reject(new Error(`research broker method timed out: ${method}`));
+        pending.cleanup?.();
+        this.cancel(id);
+        pending.reject(new Error(`research broker method timed out: ${method}`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolveCall, reject, timer });
+      const aborted = () => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(id);
+        pending.cleanup?.();
+        this.cancel(id);
+        pending.reject(new Error('research search cancelled'));
+      };
+      this.pending.set(id, {
+        resolve: resolveCall,
+        reject,
+        timer,
+        ...(signal ? { cleanup: () => signal.removeEventListener('abort', aborted) } : {}),
+      });
+      signal?.addEventListener('abort', aborted, { once: true });
+      if (signal?.aborted) aborted();
+      if (!this.pending.has(id)) return;
       socket.write(`${JSON.stringify(request)}\n`, (error) => {
         if (!error) return;
         const pending = this.pending.get(id);
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(id);
+        pending.cleanup?.();
         pending.reject(error);
       });
     });
+  }
+
+  private cancel(requestId: string): void {
+    const socket = this.socket;
+    if (!socket || socket.destroyed) return;
+    const request: BrokerRequest = {
+      protocol: RESEARCH_BROKER_PROTOCOL,
+      configHash: researchBrokerConfigHash(this.config),
+      token: '',
+      id: randomUUID(),
+      method: '$cancel',
+      args: [requestId],
+    };
+    brokerToken(this.config.root).then((token) => {
+      if (!socket.destroyed) socket.write(`${JSON.stringify({ ...request, token })}\n`);
+    }).catch(() => {});
   }
 
   private async ensureConnected(): Promise<void> {
@@ -323,6 +375,7 @@ class ResearchBrokerClient {
       if (!pending) continue;
       clearTimeout(pending.timer);
       this.pending.delete(response.id);
+      pending.cleanup?.();
       if (response.ok) pending.resolve(response.result);
       else pending.reject(new Error(response.error ?? 'research broker request failed'));
     }
@@ -338,6 +391,7 @@ class ResearchBrokerClient {
   private rejectPending(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       pending.reject(error);
     }
     this.pending.clear();
@@ -355,10 +409,14 @@ export function createSharedResearchService(
     enabled: options.enabled,
     root: options.root,
     vectorModel: options.vectorModel,
+    vectorLowMemory: options.vectorLowMemory,
+    vectorThreads: options.vectorThreads,
     repositoryAuto: options.repositoryAuto,
     repositoryMaxSourceBytes: options.repositoryMaxSourceBytes,
     repositoryMaxSourceFiles: options.repositoryMaxSourceFiles,
-    idleMs: clientOptions.idleMs ?? 1_000,
+    queryTimeoutMs: options.queryTimeoutMs ?? 30_000,
+    idleMs: clientOptions.idleMs ?? 60_000,
+    readConcurrency: clientOptions.readConcurrency ?? 4,
   });
   const client = new ResearchBrokerClient(config, clientOptions.processPath ?? defaultBrokerProcessPath());
   const target = {
@@ -369,7 +427,11 @@ export function createSharedResearchService(
     get(value, property, receiver) {
       if (Reflect.has(value as object, property)) return Reflect.get(value as object, property, receiver);
       if (typeof property !== 'string' || !RESEARCH_BROKER_METHODS.has(property)) return undefined;
-      return async (...args: unknown[]) => await client.call(property, args);
+      return async (...args: unknown[]) => {
+        const forwarded = [...args];
+        const signal = isAbortSignal(forwarded.at(-1)) ? forwarded.pop() as AbortSignal : undefined;
+        return await client.call(property, forwarded, signal);
+      };
     },
   });
 }

@@ -32,9 +32,14 @@ export interface Config {
   researchRetrievalMode: ResearchRetrievalMode;
   researchRoot: string;
   researchVectorModel?: string;
+  researchVectorLowMemory: boolean;
+  researchVectorThreads: number;
   researchRepoAuto: boolean;
   researchRepoAutoMaxMb: number;
   researchRepoAutoMaxFiles: number;
+  researchBrokerIdleMs: number;
+  researchReadConcurrency: number;
+  researchQueryTimeoutMs: number;
 
   // Composite cloud flag: enables insecureTls + noSandbox + pool disabled +
   // tier-3 fail-fast. Cascade itself runs unchanged in cloud mode.
@@ -146,9 +151,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     researchVectorModel: parseResearchVectorModel(
       env.SURF_RESEARCH_VECTOR_MODEL ?? env.SURF_RESEARCH_DENSE_MODEL,
     ),
+    researchVectorLowMemory: parseBool(env.SURF_RESEARCH_VECTOR_LOW_MEMORY, true),
+    researchVectorThreads: parseInt0(env.SURF_RESEARCH_VECTOR_THREADS, 4, 1, 16),
     researchRepoAuto: parseBool(env.SURF_RESEARCH_REPO_AUTO, true),
     researchRepoAutoMaxMb: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_MB, 20, 1, 500),
     researchRepoAutoMaxFiles: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_FILES, 2_000, 10, 20_000),
+    researchBrokerIdleMs: parseInt0(env.SURF_RESEARCH_BROKER_IDLE_MS, 60_000, 100, 60 * 60_000),
+    researchReadConcurrency: parseInt0(env.SURF_RESEARCH_READ_CONCURRENCY, 4, 1, 16),
+    researchQueryTimeoutMs: parseInt0(env.SURF_RESEARCH_QUERY_TIMEOUT_MS, 30_000, 1_000, 10 * 60_000),
 
     cloudMode,
     remoteDebug: parseBool(env.SURF_REMOTE_DEBUG, false),

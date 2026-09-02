@@ -32,6 +32,7 @@ DEFINE TABLE IF NOT EXISTS experiment_run SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS entity_operation SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS knowledge_job SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS graph_projection SCHEMALESS;
+  DEFINE TABLE IF NOT EXISTS graph_search_node SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS code_symbol SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS code_relation SCHEMALESS;
   DEFINE TABLE IF NOT EXISTS document SCHEMALESS;
@@ -70,6 +71,8 @@ DEFINE INDEX IF NOT EXISTS intent_session ON TABLE intent_revision FIELDS memory
   DEFINE INDEX IF NOT EXISTS entity_operation_project ON TABLE entity_operation FIELDS project_id;
   DEFINE INDEX IF NOT EXISTS job_project ON TABLE knowledge_job FIELDS project_id;
   DEFINE INDEX IF NOT EXISTS job_key_unique ON TABLE knowledge_job FIELDS job_key UNIQUE;
+  DEFINE INDEX IF NOT EXISTS graph_search_text ON TABLE graph_search_node FIELDS text FULLTEXT ANALYZER research_text BM25;
+  DEFINE INDEX IF NOT EXISTS graph_search_project ON TABLE graph_search_node FIELDS project_id, projection_id;
   DEFINE INDEX IF NOT EXISTS code_symbol_project ON TABLE code_symbol FIELDS project_id;
   DEFINE INDEX IF NOT EXISTS code_symbol_source ON TABLE code_symbol FIELDS project_id, source_entry_id;
   DEFINE INDEX IF NOT EXISTS code_symbol_snapshot ON TABLE code_symbol FIELDS project_id, snapshot_id;
@@ -85,6 +88,17 @@ DEFINE INDEX IF NOT EXISTS source_entry_hash ON TABLE project_source_entry FIELD
   DEFINE INDEX IF NOT EXISTS retrieval_vector_embedding ON TABLE retrieval_vector FIELDS embedding HNSW DIMENSION 384 TYPE F32 DIST COSINE;
   DEFINE INDEX IF NOT EXISTS embedding_cache_key ON TABLE embedding_cache FIELDS cache_key UNIQUE;
 `;
+
+export interface GraphSearchSeed {
+  projection_id: string;
+  project_id: string;
+  node_id: string;
+  score: number;
+}
+
+const GRAPH_SEARCH_KINDS = new Set([
+  'plan', 'experiment', 'decision', 'assertion',
+]);
 
 const CORE_ONTOLOGY: OntologyTermRecord[] = [
   ['entity_type', 'paper', ['publication', 'article', 'preprint']],
@@ -170,6 +184,7 @@ export class ResearchStore {
   constructor(
     private readonly root: string,
     private readonly endpoint = rocksDbEndpoint(resolve(root, 'surreal', 'rocksdb')),
+    private readonly queryTimeoutMs = 30_000,
   ) {}
 
   async open(): Promise<Surreal> {
@@ -191,7 +206,13 @@ export class ResearchStore {
       import('@surrealdb/node'),
     ]);
     const db = new Surreal({
-      engines: { ...createRemoteEngines(), ...createNodeEngines() },
+      engines: {
+        ...createRemoteEngines(),
+        ...createNodeEngines({
+          query_timeout: Math.max(1, Math.ceil(this.queryTimeoutMs / 1_000)),
+          transaction_timeout: Math.max(60, Math.ceil(this.queryTimeoutMs / 1_000)),
+        }),
+      },
     });
     const connect = db.connect(this.endpoint, { namespace: 'google_surf', database: 'research' });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -761,7 +782,32 @@ export class ResearchStore {
         const payloadPath = resolve(graphRoot, projection.payload_file);
         if (payloadPath.startsWith(`${graphRoot}${sep}`)) await rm(payloadPath, { force: true });
       }
+      await db.query(
+        'DELETE graph_search_node WHERE projection_id = $projection_id',
+        { projection_id: projection.projection_id },
+      ).collect();
       await db.delete(new RecordId('graph_projection', projection.projection_id));
+    }
+  }
+
+  private async replaceGraphSearchNodes(db: Surreal, projection: GraphProjection): Promise<void> {
+    await db.query(
+      'DELETE graph_search_node WHERE projection_id = $projection_id',
+      { projection_id: projection.projection_id },
+    ).collect();
+    const rows = projection.nodes.filter((node) => (
+      node.project_id !== 'shared' && GRAPH_SEARCH_KINDS.has(node.kind)
+    )).map((node) => ({
+      id: new RecordId('graph_search_node', createHash('sha256')
+        .update(`${projection.projection_id}\0${node.node_id}`).digest('hex')),
+      projection_id: projection.projection_id,
+      project_id: node.project_id,
+      node_id: node.node_id,
+      kind: node.kind,
+      text: `${node.label}\n${node.text?.slice(0, 2_000) ?? ''}\n${node.source_id ?? ''}`,
+    }));
+    for (let index = 0; index < rows.length; index += 1_000) {
+      await db.insert(new Table('graph_search_node'), rows.slice(index, index + 1_000));
     }
   }
 
@@ -799,6 +845,7 @@ export class ResearchStore {
       )
       : false;
     if (reusable) {
+      await this.replaceGraphSearchNodes(db, projection);
       for (const projectId of projection.project_ids) {
         await db.update(new RecordId('project', projectId)).merge({
           active_graph_projection_id: projection.projection_id,
@@ -868,6 +915,7 @@ export class ResearchStore {
       await tx.cancel();
       throw error;
     }
+    await this.replaceGraphSearchNodes(db, projection);
     await this.reconcileGraphProjectionStatuses(db);
     await this.pruneGraphProjections(db);
     return { reused: false };
@@ -901,6 +949,148 @@ export class ResearchStore {
     } catch {
       return false;
     }
+  }
+
+  async searchGraphSeeds(
+    projectIds: string[],
+    queries: string[],
+    limit: number,
+  ): Promise<GraphSearchSeed[]> {
+    if (!projectIds.length || !queries.length) return [];
+    const db = await this.open();
+    const [projects] = await db.query<[Array<{
+      project_id: string;
+      active_graph_projection_id?: string;
+    }>]>(
+      `SELECT project_id, active_graph_projection_id FROM project
+       WHERE project_id IN $project_ids AND active_graph_projection_id != NONE`,
+      { project_ids: projectIds },
+    ).collect();
+    const active = new Map(projects.flatMap((project) => project.active_graph_projection_id
+      ? [[project.project_id, project.active_graph_projection_id] as const]
+      : []));
+    const projectionIds = [...new Set(active.values())];
+    if (!projectionIds.length) return [];
+    const ranked = new Map<string, GraphSearchSeed>();
+    for (const query of queries) {
+      const [rows] = await db.query<[Array<{
+        projection_id: string;
+        project_id: string;
+        node_id: string;
+        score: number;
+      }>]>(
+        `SELECT projection_id, project_id, node_id, search::score(0) AS score
+         FROM graph_search_node
+         WHERE project_id IN $project_ids AND projection_id IN $projection_ids
+           AND text @0@ $query
+         ORDER BY score DESC LIMIT $limit`,
+        { project_ids: projectIds, projection_ids: projectionIds, query, limit },
+      ).collect();
+      rows.forEach((row, index) => {
+        if (active.get(row.project_id) !== row.projection_id) return;
+        const key = `${row.projection_id}\0${row.node_id}`;
+        const contribution = 1 / (60 + index + 1);
+        const prior = ranked.get(key);
+        ranked.set(key, { ...row, score: (prior?.score ?? 0) + contribution });
+      });
+    }
+    return [...ranked.values()].sort((a, b) => b.score - a.score || a.node_id.localeCompare(b.node_id))
+      .slice(0, limit);
+  }
+
+  async ensureGraphSearchIndexes(projectIds: string[]): Promise<number> {
+    if (!projectIds.length) return 0;
+    const db = await this.open();
+    const [projects] = await db.query<[Array<{ active_graph_projection_id?: string }>]>(
+      `SELECT active_graph_projection_id FROM project
+       WHERE project_id IN $project_ids AND active_graph_projection_id != NONE`,
+      { project_ids: projectIds },
+    ).collect();
+    const projectionIds = [...new Set(projects.flatMap((project) => (
+      project.active_graph_projection_id ? [project.active_graph_projection_id] : []
+    )))];
+    let indexed = 0;
+    for (const projectionId of projectionIds) {
+      const [counts] = await db.query<[Array<{ count: number }>]>(
+        'SELECT count() AS count FROM graph_search_node WHERE projection_id = $projection_id GROUP ALL',
+        { projection_id: projectionId },
+      ).collect();
+      if (Number(counts[0]?.count ?? 0) > 0) continue;
+      const artifact = await this.loadGraphArtifact(projectionId);
+      if (!artifact) continue;
+      await this.replaceGraphSearchNodes(db, artifact.projection);
+      indexed++;
+    }
+    return indexed;
+  }
+
+  async linkedProjectIds(seedProjectIds: string[], scopeProjectIds: string[], limit: number): Promise<string[]> {
+    if (!seedProjectIds.length || !scopeProjectIds.length || limit < 1) return [];
+    const db = await this.open();
+    const [aliases] = await db.query<[Array<{
+      project_id: string;
+      entity_id: string;
+      alias: string;
+      normalized_alias: string;
+      source: string;
+      status: string;
+    }>]>(
+      `SELECT project_id, entity_id, alias, normalized_alias, source, status
+       FROM entity_alias WHERE project_id IN $project_ids AND status = 'active'`,
+      { project_ids: scopeProjectIds },
+    ).collect();
+    const stable = aliases.filter((alias) => alias.source === 'explicit'
+      || /^https?:\/\//i.test(alias.alias)
+      || /^(?:doi:|arxiv:|pmid:|pmcid:|s2:|scholar:|github:|10\.\d{4,9}\/)/i.test(alias.alias));
+    const seedAliases = new Set(stable.filter((alias) => seedProjectIds.includes(alias.project_id))
+      .map((alias) => alias.normalized_alias));
+    const scores = new Map<string, number>();
+    for (const alias of stable) {
+      if (seedProjectIds.includes(alias.project_id) || !seedAliases.has(alias.normalized_alias)) continue;
+      scores.set(alias.project_id, (scores.get(alias.project_id) ?? 0) + 1);
+    }
+    return [...scores].sort(([a, left], [b, right]) => right - left || a.localeCompare(b))
+      .slice(0, limit).map(([projectId]) => projectId);
+  }
+
+  async searchMemorySeedProjects(
+    projectIds: string[],
+    queries: string[],
+    limit: number,
+  ): Promise<string[]> {
+    if (!projectIds.length || !queries.length) return [];
+    const db = await this.open();
+    const [plans, experiments, decisions, intents, entities, assertions] = await db.query<[
+      Array<{ project_id: string; title?: string; body?: string }>,
+      Array<{ project_id: string; name?: string; hypothesis?: string; summary?: string }>,
+      Array<{ project_id: string; title?: string; summary?: string }>,
+      Array<{ project_id: string; intent?: string }>,
+      Array<{ project_id: string; canonical_name?: string; kind?: string }>,
+      Array<{ project_id: string; subject?: string; predicate?: string; object?: string; value?: unknown }>,
+    ]>(
+      `SELECT project_id, title, body FROM plan_revision WHERE project_id IN $project_ids;
+       SELECT project_id, name, hypothesis, summary FROM experiment_run WHERE project_id IN $project_ids;
+       SELECT project_id, title, summary FROM decision WHERE project_id IN $project_ids;
+       SELECT project_id, intent FROM intent_revision WHERE project_id IN $project_ids;
+       SELECT project_id, canonical_name, kind FROM entity WHERE project_id IN $project_ids;
+       SELECT project_id, subject, predicate, object, value FROM assertion
+       WHERE project_id IN $project_ids AND status IN ['suggested', 'confirmed'];`,
+      { project_ids: projectIds },
+    ).collect();
+    const terms = queries.map((query) => query.toLocaleLowerCase()
+      .match(/[\p{L}\p{N}_-]{2,}/gu) ?? []).filter((tokens) => tokens.length);
+    const scores = new Map<string, number>();
+    for (const row of [...plans, ...experiments, ...decisions, ...intents, ...entities, ...assertions]) {
+      const text = Object.entries(row).filter(([key]) => key !== 'project_id')
+        .map(([, value]) => typeof value === 'string' || typeof value === 'number' ? String(value) : '')
+        .join(' ').toLocaleLowerCase();
+      const score = Math.max(0, ...terms.map((tokens) => (
+        tokens.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0) / tokens.length
+      )));
+      if (score > 0) scores.set(row.project_id, Math.max(scores.get(row.project_id) ?? 0, score));
+    }
+    return [...scores].sort(([a, left], [b, right]) => right - left || a.localeCompare(b))
+      .slice(0, limit).map(([projectId]) => projectId);
   }
 
   async replaceCodeStructure(
@@ -1516,15 +1706,17 @@ export class ResearchStore {
   ): Promise<LocalSearchHit[]> {
     if (!references.length) return [];
     const db = await this.open();
-    const documentIds = [...new Set(references
-      .filter((row) => row.source_family === 'document').map((row) => row.source_id))];
+    const documentReferences = references.filter((row) => row.source_family === 'document');
+    const documentIds = [...new Set(documentReferences.map((row) => row.source_id))];
+    const documentHashes = [...new Set(documentReferences.map((row) => row.content_hash))];
     const sourceIds = [...new Set(references
       .filter((row) => row.source_family === 'code').map((row) => row.source_id))];
     const projectIds = [...new Set(references.map((row) => row.project_id))];
     const [documentRows] = documentIds.length
       ? await db.query<[Array<{ document_id: string; text: string; content_hash: string }>]>(
-        'SELECT document_id, text, content_hash FROM chunk WHERE document_id IN $document_ids',
-        { document_ids: documentIds },
+        `SELECT document_id, text, content_hash FROM chunk
+         WHERE document_id IN $document_ids AND content_hash IN $content_hashes`,
+        { document_ids: documentIds, content_hashes: documentHashes },
       ).collect()
       : [[]];
     const [sourceEntries] = sourceIds.length
@@ -1598,14 +1790,20 @@ export class ResearchStore {
     limit: number,
   ): Promise<LocalSearchHit[]> {
     const db = await this.open();
+    const candidateLimit = Math.min(100, Math.max(limit * 4, limit));
     const [rows] = await db.query<[RetrievalReference[]]>(
       `SELECT item_id, project_id, source_family, source_id, title, url, content_hash,
          1 AS score FROM retrieval_exact
        WHERE project_id = $project_id AND normalized_term = $normalized_query
        ORDER BY title ASC LIMIT $limit`,
-      { project_id: projectId, normalized_query: normalizedQuery, limit },
+      { project_id: projectId, normalized_query: normalizedQuery, limit: candidateLimit },
     ).collect();
-    return await this.hydrateRetrieval(rows, 'exact');
+    const distinct = rows.filter((row, index) => rows.findIndex((candidate) => (
+      candidate.project_id === row.project_id
+      && candidate.source_family === row.source_family
+      && candidate.source_id === row.source_id
+    )) === index).slice(0, limit);
+    return await this.hydrateRetrieval(distinct, 'exact');
   }
 
   async searchProjectVector(
@@ -1625,10 +1823,15 @@ export class ResearchStore {
        ORDER BY distance ASC LIMIT $limit`,
       { project_id: projectId, embedding_model: embeddingModel, embedding, limit: cappedLimit },
     ).collect();
-    return await this.hydrateRetrieval(rows.map((row) => ({
+    const references = rows.map((row) => ({
       ...row,
       score: 1 - Number(row.distance),
-    })), 'vector');
+    })).filter((row, index, values) => values.findIndex((candidate) => (
+      candidate.project_id === row.project_id
+      && candidate.source_family === row.source_family
+      && candidate.source_id === row.source_id
+    )) === index).slice(0, cappedLimit);
+    return await this.hydrateRetrieval(references, 'vector');
   }
 
   private async searchProjectSources(

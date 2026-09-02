@@ -14,6 +14,7 @@ const baseEnv = {
   SURF_SEARCH_PROVIDER: 'searchapi',
   SURF_SCHOLAR_PROVIDER: 'searchapi',
   SURF_RESEARCH_VECTOR_MODEL: 'off',
+  SURF_RESEARCH_BROKER_IDLE_MS: '100',
 };
 const offClient = new Client({ name: 'google-surf-smoke-off', version: '1.0.0' });
 const offTransport = new StdioClientTransport({
@@ -35,15 +36,45 @@ try {
   }
   const descriptions = new Map(listed.tools.map((tool) => [tool.name, tool.description ?? '']));
   const requiredDescriptions = {
-    search: 'ALWAYS PERFORMS LIVE WEB SEARCH',
-    search_parallel: 'ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES',
-    extract: 'exact URL',
+    search: 'PRIMARY SINGLE-QUERY LIVE DISCOVERY AND CONTENT INGESTION TOOL',
+    search_parallel: 'PRIMARY MULTI-QUERY LIVE DISCOVERY AND CONTENT INGESTION TOOL',
+    extract: 'SECONDARY KNOWN-URL CONTENT EXTRACTION TOOL',
     scholar_search: 'Do not use',
   };
   for (const [name, phrase] of Object.entries(requiredDescriptions)) {
     if (!descriptions.get(name)?.includes(phrase)) {
       throw new Error(`${name} routing description mismatch`);
     }
+  }
+  const expectedTitles = {
+    search: 'Web Search and Extract',
+    search_parallel: 'Parallel Web Search and Extract',
+    extract: 'Known URL Extract',
+  };
+  for (const [name, title] of Object.entries(expectedTitles)) {
+    if (listed.tools.find((tool) => tool.name === name)?.title !== title) {
+      throw new Error(`${name} routing title mismatch`);
+    }
+  }
+  for (const name of ['search', 'search_parallel']) {
+    const description = descriptions.get(name) ?? '';
+    for (const phrase of [
+      'set extract_mode=abstract or full in this call',
+      'Select extract_mode=full, not abstract',
+      'Do not download public PDFs, clone repositories, or invoke local parsers first',
+      'Use extract separately only when the exact public URL is already known',
+      'editing, building, testing, or full Git history',
+    ]) {
+      if (!description.includes(phrase)) throw new Error(`${name} routing hierarchy mismatch`);
+    }
+  }
+  const extractDescription = descriptions.get('extract') ?? '';
+  for (const phrase of [
+    'no new web discovery is required',
+    'use search or search_parallel with extract_mode instead',
+    'Local PDF tools are for local files, forms, OCR recovery, or visual layout inspection',
+  ]) {
+    if (!extractDescription.includes(phrase)) throw new Error('extract routing hierarchy mismatch');
   }
   for (const name of ['search', 'search_parallel']) {
     const description = listed.tools.find((tool) => tool.name === name)?.description ?? '';
@@ -165,6 +196,8 @@ try {
   const localSearchTool = listed.tools.find((tool) => tool.name === 'project_memory_search');
   const localSearchProperties = localSearchTool?.inputSchema?.properties ?? {};
   if (!('query' in localSearchProperties) || !('limit' in localSearchProperties)
+    || !('query_variants' in localSearchProperties)
+    || localSearchProperties.query_variants?.maxItems !== 19
     || !('project_id' in localSearchProperties) || !('include_project_ids' in localSearchProperties)
     || !('all_projects' in localSearchProperties)
     || localSearchTool?.annotations?.readOnlyHint !== true
@@ -174,7 +207,8 @@ try {
   }
   for (const phrase of [
     'LOCAL PROJECT KNOWLEDGE SEARCH ONLY', 'exact, BM25, vector, and graph',
-    'RRF', 'never opens Google', 'new external information',
+    'query_variants', 'one call', 'batched', 'RRF', 'reranked once',
+    'never opens Google', 'new external information',
   ]) {
     if (!localSearchTool?.description?.includes(phrase)) {
       throw new Error(`project_memory_search description missing: ${phrase}`);
@@ -231,12 +265,15 @@ try {
     arguments: {
       project_id: 'smoke',
       query: 'smoke_index_token',
+      query_variants: ['probe.ts', 'smoke code source'],
       limit: 5,
     },
   });
   if (localSearch.isError
     || localSearch.structuredContent?.results?.[0]?.source_family !== 'code'
     || localSearch.structuredContent?.meta?.provider !== 'local'
+    || localSearch.structuredContent?.meta?.query_count !== 3
+    || localSearch.structuredContent?.meta?.query_execution !== 'single_broker_request'
     || localSearch.structuredContent?.meta?.live_web_used !== false) {
     throw new Error('project local search failed');
   }

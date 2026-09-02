@@ -278,10 +278,18 @@ describe('research project memory', () => {
     });
 
     const isolated = await service.search('project-a', 'crossprojectrareterm', 10);
-    const linked = await service.search('project-a', 'crossprojectrareterm', 10, ['project-b']);
+    const linkedBatch = await service.searchBatch(
+      'project-a',
+      'crossprojectrareterm',
+      [],
+      10,
+      ['project-b'],
+    );
+    const linked = linkedBatch.results;
 
     expect(isolated.some((row) => row.title === 'Linked implementation decision')).toBe(false);
     expect(linked.some((row) => row.title === 'Linked implementation decision')).toBe(true);
+    expect(linkedBatch.graph_project_count).toBe(2);
   });
 
   it('abstains when one project has an ambiguous identity match', async () => {
@@ -331,6 +339,30 @@ describe('research project memory', () => {
     expect((await service.getProject('graph-b')).job_counts.done).toBe(1);
   });
 
+  it('routes graph-only all-project retrieval through indexed project seeds', async () => {
+    const projectIds = Array.from({ length: 6 }, (_, index) => `graph-route-${index}`);
+    for (const [index, projectId] of projectIds.entries()) {
+      await service.createProject(`Graph route ${index}`, projectId);
+      await service.recordDecision({
+        project_id: projectId,
+        title: `Decision ${index}`,
+        summary: index === 5 ? 'uniqueroutingneedle target decision' : `unrelated decision ${index}`,
+      });
+      await service.materializeGraph([projectId]);
+    }
+
+    const result = await service.searchBatch(
+      projectIds[0],
+      'uniqueroutingneedle',
+      [],
+      10,
+      projectIds.slice(1),
+    );
+
+    expect(result.graph_project_count).toBe(1);
+    expect(result.results.some((row) => row.title === 'Decision 5')).toBe(true);
+  });
+
   it('keeps a shared graph readable when one project publishes a replacement', async () => {
     await service.createProject('Graph A', 'graph-a');
     await service.createProject('Graph B', 'graph-b');
@@ -363,8 +395,8 @@ describe('research project memory', () => {
     }
 
     expect(service.status()).toMatchObject({
-      graph_projection_cache: 4,
-      graph_artifact_cache: 3,
+      graph_projection_cache: 1,
+      graph_artifact_cache: 1,
     });
   });
 

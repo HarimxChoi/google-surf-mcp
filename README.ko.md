@@ -142,27 +142,27 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 
 | 값 | 동작 |
 |---|---|
-| `browser` | 기본값. 전용 비로그인 프로필의 시스템 Chrome 검색 창을 최소화 상태로 유지하며 `SEARCH_API`가 필요하지 않습니다. |
+| `browser` | 기본값. 전용 비로그인 프로필의 시스템 Chrome 검색 창을 숨긴 상태로 유지하며 `SEARCH_API`가 필요하지 않습니다. 여러 MCP 세션이 로컬 browser broker 하나를 공유합니다. |
 | `searchapi` | SearchApi를 메인 provider로 사용합니다. 해당 도구 실행 시 Chrome을 초기화하지 않습니다. |
 | `fallback` | 현재 브라우저 tier를 한 번 시도한 뒤 브라우저 오류, CAPTCHA나 rate limit, 프로필 실패, 파서 열화 시 SearchApi로 전환합니다. 사람의 CAPTCHA 해결을 기다리지 않으며 성공 응답과 정상적인 빈 결과는 다시 요청하지 않습니다. |
 
 `SURF_SEARCH_PROVIDER`는 `search`, `search_parallel`에 적용됩니다. `SURF_SCHOLAR_PROVIDER`는 `scholar_search`에 적용됩니다. SearchApi 모드는 본인의 SearchApi 계정, API 키, 사용 가능한 크레딧이 필요합니다.
 
-`SURF_BROWSER_ENGINE=auto`는 로컬 데스크톱에서 native Chrome을, cloud 또는 remote-debug 환경에서 Playwright 호환 경로를 선택합니다. `native`나 `playwright`로 고정할 수 있습니다.
+`SURF_BROWSER_ENGINE=auto`는 로컬 데스크톱에서 native Chrome을, cloud 또는 remote-debug 환경에서 Playwright 호환 경로를 선택합니다. Native 모드는 headless Chrome이 아니라 숨겨진 일반 Chrome을 사용합니다. `native`나 `playwright`로 고정할 수 있습니다.
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 항상 라이브 웹 검색을 실행합니다. 신규 외부 정보가 필요할 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. 리서치에서는 별도 extract 호출 대신 이 호출에 `extract_mode`를 지정합니다. `limit`은 1-20입니다. 추출 기본값은 `none`, `extract_limit`은 1-10이며 기본값은 5입니다. `response_content` 기본값은 `full`입니다.
+- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 단일 쿼리의 라이브 탐색과 읽기를 함께 수행하는 기본 도구입니다. 신규 자료를 찾고 읽어야 하면 PDF 다운로드, 저장소 clone, 별도 `extract` 호출 대신 이 호출에 `extract_mode`를 지정합니다. `extract`는 정확한 공개 URL을 이미 알고 있고 신규 탐색이 필요 없을 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. `limit`은 1-20입니다. 추출 기본값은 `none`, `extract_limit`은 1-10이며 기본값은 5입니다. `response_content` 기본값은 `full`입니다.
 - `scholar_search(query, limit?)` - Google Scholar metadata 검색. `limit`은 1-10입니다. 브라우저, SearchApi 메인, fallback을 지원합니다.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 최대 4개 탭이 계속 다음 작업을 가져가는 큐로 2-12개의 라이브 웹 검색을 실행합니다. 검색 시작 시각은 서로 겹치지 않게 조정합니다. 신규 외부 정보가 필요할 때만 사용하고 결과를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. 쿼리별 `limit`은 1-20입니다. 호출 전체의 `extract_limit`은 abstract에서 기본 12, 최대 20이며 full에서 기본값과 최대값이 10입니다. `response_content`는 한 번의 응답 크기를 제한하기 위해 `summary`가 기본값입니다.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 여러 쿼리의 넓은 라이브 탐색과 읽기를 함께 수행하는 기본 도구입니다. 최대 4개 탭이 2-12개 쿼리를 처리하며, 웹페이지, PDF, 논문, GitHub 저장소를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. 로컬 PDF 도구는 로컬 파일이나 시각적 레이아웃 검토에만 사용하고, 저장소 clone은 편집, 빌드, 테스트, 전체 Git 이력이 필요할 때만 사용합니다. 쿼리별 `limit`은 1-20입니다. 호출 전체의 `extract_limit`은 abstract에서 기본 12, 최대 20이며 full에서 기본값과 최대값이 10입니다. `response_content`는 한 번의 응답 크기를 제한하기 위해 `summary`가 기본값입니다.
 - 통합 추출 결과는 `requested`, `applied`, `skipped`, `truncated`, `total_chars`를 반환합니다. `remaining_urls`는 검색을 반복하지 않고 `extract`에 바로 전달할 수 있습니다.
-- `extract(url, max_chars?, mode?, response_content?)` - URL 본문 읽기
+- `extract(url, max_chars?, mode?, response_content?)` - 신규 탐색 없이 정확한 공개 URL 하나를 읽는 차선 도구입니다. 출처를 찾아야 한다면 `search` 또는 `search_parallel`에 `extract_mode`를 지정합니다.
   - `mode="full"` (기본): research 저장용으로 최대 1000000자를 읽고 4000자 단위의 deterministic chunk로 저장합니다. `response_content="full"`은 최대 50000자, `summary`는 1500자 근거 발췌를 반환합니다.
   - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). research 모드에서는 문서 메타데이터도 요약과 함께 저장
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
   - 응답: 본문 필드와 확인 가능한 문서 메타데이터. 실패는 `{ error }` 반환, throw 안 함
-- `project_memory_search(query, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. 브라우저, Google, SearchApi를 호출하지 않고 exact, BM25, vector, graph 결과를 RRF와 로컬 리랭커로 결합합니다. 단일 프로젝트는 `project_id`, 선택 통합은 `include_project_ids`, 전체 통합은 `all_projects=true`를 사용합니다.
+- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 정확한 식별자와 따옴표 표현은 deterministic variant로 자동 추가합니다. 반복 terminal 호출 대신 이 도구를 한 번 사용하며 브라우저, Google, SearchApi는 호출하지 않습니다.
 - `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때 프로젝트 지식을 관리합니다.
   - `action="search"`: `project_memory_search`를 위한 호환 alias입니다.
   - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
@@ -284,6 +284,8 @@ Versioned ontology는 entity type과 relation의 변경 이력을 revision으로
 
 Graphology는 SurrealDB의 원본에서 typed graph projection을 만들고 PageRank, connected components와 Louvain community를 계산합니다. 검색할 때는 관련 node를 시작점으로 PPR 기반 multi-hop 검색을 수행합니다. Live web, exact, BM25, vector와 graph 결과는 결정형 RRF와 공통 리랭커로 결합합니다.
 
+로컬 multi-query 검색은 query embedding을 batch 처리하고 lexical·vector 후보를 먼저 통합한 뒤 graph 확장, 선택 chunk hydrate, 최종 rerank를 각각 한 번만 수행합니다. Graph-only 전체 프로젝트 검색은 query 시점에 모든 프로젝트 graph를 만들지 않고 가벼운 memory-node index와 검증된 identity alias로 최대 4개 graph scope를 선택합니다.
+
 ### 프로젝트 격리와 지식 재사용
 
 `project_id`는 새 검색 결과가 저장될 프로젝트를 지정합니다. `include_project_ids`는 저장 위치를 바꾸지 않고 함께 검색할 프로젝트만 추가합니다. 원본 record는 프로젝트별로 분리해 유지하고, 검증된 schema와 entity link를 통해 다른 프로젝트의 논문, 코드와 실험 결과를 재사용합니다.
@@ -363,14 +365,19 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 | `SURF_RETRIEVAL_MODE` | `hybrid` | 연구 검색 분기: `live` 또는 `hybrid`. `SURF_RESEARCH=true`일 때만 사용 |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB 데이터 디렉터리 |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | HNSW vector 검색과 최종 리랭킹에 쓰는 local 384차원 모델. 기본 model revision은 고정되며 `off`로 vector lane 비활성화 |
+| `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | ONNX CPU memory arena와 memory pattern을 비활성화. `false`는 최초 색인 속도를 높이는 대신 peak memory 증가 |
+| `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread 수. 1-16 범위 |
 | `SURF_RESEARCH_REPO_AUTO` | `true` | 검색 호출당 작고 관련성 높은 GitHub 저장소를 최대 하나 sparse-index |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | 자동 GitHub 색인의 검색 가능한 소스 텍스트 상한. asset은 제외 |
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | 자동 GitHub 색인의 검색 가능한 소스 파일 수 상한 |
+| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | 마지막 client 연결이 끝난 뒤 shared research broker를 유지하는 시간 |
+| `SURF_RESEARCH_READ_CONCURRENCY` | `4` | broker 동시 조회 상한. 동일한 진행 중 조회는 하나의 연산을 공유 |
+| `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `30000` | embedded SurrealDB query timeout. 1-600초 범위 |
 | `GITHUB_TOKEN` | 미설정 | 저장소 확인을 위한 GitHub API 한도를 높이는 선택 token |
 | `SURF_RESEARCH_CODE_WORKERS` | 자동, 최대 4 | 최초 코드 구조 색인에 사용하는 Tree-sitter worker 수 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |
 | `SURF_TZ` | 시스템 tz | 예: `America/New_York` |
-| `SURF_HEADLESS` | `true` | Playwright 추출, 호환성과 복구 경로에 적용. Native 검색 창은 최소화 상태로 유지하며 CAPTCHA 복구 창에는 적용하지 않음 |
+| `SURF_HEADLESS` | `true` | Playwright 추출, 호환성과 복구 경로에 적용. Native 검색은 일반 Chrome 창을 숨기고 CAPTCHA 복구 때만 표시 |
 | `SURF_REMOTE_DEBUG` | `false` | headless 서버 + 원격 DevTools 환경에서 `true`. CAPTCHA 발생 시 DevTools 포트 안내 후 throw, 별도 창 안 띄움. 로컬 머신에서 SSH 포트포워드 + `chrome://inspect`로 풀고 재시도. |
 | `SURF_CAPTCHA_TIMEOUT_MS` | `180000` | 백그라운드 CAPTCHA 해결 창 유지 시간. MCP 호출은 이 timeout을 기다리지 않고 즉시 반환 |
 | `SURF_IDLE_CLOSE_MS` | `30000` | sequential ctx와 pool을 idle 후 닫는 ms. `0`이면 비활성화. 낮으면 빠른 정리, 높으면 띄엄띄엄 호출에 캐시 유지. |
@@ -396,7 +403,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 
 ## Troubleshooting
 
-- Native 검색은 CAPTCHA가 나타나면 현재 세션을 유지한 채 Chrome을 최대화합니다. 해당 창에서 CAPTCHA를 푼 뒤 재시도하면 다음 호출이 해제 여부를 확인하고 Chrome을 다시 최소화한 뒤 같은 세션을 계속 사용합니다. `SURF_SEARCH_PROVIDER=fallback`, `SURF_SCHOLAR_PROVIDER=fallback`으로 SearchApi fallback도 사용할 수 있습니다.
+- Native 검색은 CAPTCHA가 나타나면 현재 세션을 유지한 채 Chrome을 표시합니다. 해당 창에서 CAPTCHA를 푼 뒤 재시도하면 다음 호출이 해제 여부를 확인하고 창을 다시 숨긴 뒤 같은 세션을 계속 사용합니다. `SURF_SEARCH_PROVIDER=fallback`, `SURF_SCHOLAR_PROVIDER=fallback`으로 SearchApi fallback도 사용할 수 있습니다.
 - Playwright CAPTCHA 복구 4모드 (env로 자동 결정):
   - 기본 (로컬 데스크탑): OS 알림 발송, headed Chrome을 연 뒤 호출 반환. 사람이 풀고 재시도
   - `SURF_HEADLESS=false`: 알림 없이 headed Chrome을 연 뒤 호출 반환. 사람이 풀고 재시도
@@ -405,7 +412,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 - **headed Chrome이 CAPTCHA 대신 그냥 검색창으로 열림**: 그냥 아무 검색어 입력하고 Enter 치면 됨. 이후 호출은 정상 동작
 - "Chrome not found": Chrome 설치 또는 `CHROME_PATH` 설정
 - 셀렉터 깨짐: 런타임 strategy 재배열 (`SURF_SELF_HEALING`, deterministic)과 수동 repair workflow로 대응 (`SURF_LLM_HEAL` 선택, 사람이 리뷰)
-- Playwright 검색이 예상보다 느리면 `health().pool.fallback` 확인. `true`면 워커 풀이 single-context를 사용 중입니다. Native 검색은 MCP 서버가 종료될 때까지 `search`, `search_parallel`, `scholar_search`에서 최소화된 Chrome 프로세스 하나와 재사용 탭을 최대 4개 유지합니다. 검색 시작 시각은 서로 겹치지 않게 조정합니다. CAPTCHA는 사용자 해결을 위해 같은 세션을 최대화하고, 브라우저 충돌은 다음 호출에서 새 세션을 시작합니다.
+- Playwright 검색이 예상보다 느리면 `health().pool.fallback` 확인. `true`면 워커 풀이 single-context를 사용 중입니다. Native 검색은 인증된 로컬 browser broker 하나를 여러 MCP 세션이 공유합니다. Broker는 숨겨진 Chrome 프로세스 하나와 재사용 탭을 최대 4개 유지하며 검색 시작 시각을 조정합니다. CAPTCHA는 사용자 해결을 위해 같은 세션을 표시하고 다음 호출에서 숨김 guard를 복구합니다. 브라우저 충돌은 다음 호출에서 새 세션을 시작합니다.
 - SSRF: `extract`는 기본적으로 `localhost`, 사설 IP, AWS metadata 차단. `SURF_ALLOW_PRIVATE=true`로 우회
 - 캐시 정리: `npm run cache:clear`는 search/extract cache와 내려받은 vector model cache만 지우며 research DB는 유지
 - local research DB는 application-level 암호화를 하지 않습니다. 장비나 backup의 at-rest 보호가 필요하면 OS 계정 권한과 BitLocker 또는 FileVault를 사용하세요.

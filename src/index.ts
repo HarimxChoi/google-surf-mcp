@@ -32,7 +32,7 @@ import {
 import type { StealthMode } from './cascade.js';
 import type { BrowserContext } from 'playwright';
 import { PKG_NAME, VERSION } from './version.js';
-import { NativeChromeBrowser } from './nativeBrowser.js';
+import { createSharedNativeBrowser, type SharedNativeBrowser } from './nativeBrowserBroker.js';
 import {
   DEFAULT_PARALLEL_EXTRACT_LIMIT, DEFAULT_SEARCH_EXTRACT_LIMIT,
   MAX_FULL_EXTRACT_LIMIT, MAX_PARALLEL_EXTRACT_LIMIT, MAX_SEARCH_EXTRACT_LIMIT,
@@ -250,15 +250,18 @@ async function shutdown() {
 
 // Cascade state is process-level so seq + pool share it.
 const baseDeps = initDeps();
-let nativeBrowser: NativeChromeBrowser | undefined;
+let nativeBrowser: SharedNativeBrowser | undefined;
 let nativeBrowserError: string | undefined;
 if (!baseDeps.config.cloudMode
   && !baseDeps.config.remoteDebug
   && baseDeps.config.browserEngine !== 'playwright') {
   try {
-    nativeBrowser = new NativeChromeBrowser({
+    nativeBrowser = createSharedNativeBrowser({
       executablePath: detectSystemChrome(),
       profileDir: PROFILE_NATIVE,
+      idleMs: IDLE_CLOSE_MS,
+      selfHealingEnabled: baseDeps.config.selfHealingEnabled,
+      selfHealingFile: baseDeps.config.selfHealingFile,
     });
   } catch (error) {
     nativeBrowserError = (error as Error).message;
@@ -271,9 +274,15 @@ const researchService = createSharedResearchService({
   enabled: baseDeps.config.researchEnabled,
   root: baseDeps.config.researchRoot,
   vectorModel: baseDeps.config.researchVectorModel,
+  vectorLowMemory: baseDeps.config.researchVectorLowMemory,
+  vectorThreads: baseDeps.config.researchVectorThreads,
   repositoryAuto: baseDeps.config.researchRepoAuto,
   repositoryMaxSourceBytes: baseDeps.config.researchRepoAutoMaxMb * 1024 * 1024,
   repositoryMaxSourceFiles: baseDeps.config.researchRepoAutoMaxFiles,
+  queryTimeoutMs: baseDeps.config.researchQueryTimeoutMs,
+}, {
+  idleMs: baseDeps.config.researchBrokerIdleMs,
+  readConcurrency: baseDeps.config.researchReadConcurrency,
 });
 
 async function ensureProfileReady(): Promise<{ ok: true } | { ok: false; message: string }> {
@@ -485,7 +494,7 @@ const ProjectCaptureInput = baseDeps.config.researchEnabled ? {
 } : {};
 
 const SearchExtractionModeField = z.enum(['none', 'abstract', 'full']).default('none').describe(
-  'Content depth in this search call. Use abstract or full during research instead of following search with separate extract calls. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
+  'Content depth in this search call. Use none only when titles and snippets are enough, abstract for relevance evidence, and full when the user asks to read originals, full text, document bodies, or code, or to compare source contents. Use abstract or full here instead of following search with separate extraction, PDF download, or repository clone. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
 );
 
 const SingleSearchExtractionFields = {
@@ -503,7 +512,7 @@ const SingleSearchExtractionFields = {
 
 const ParallelSearchExtractionFields = {
   extract_mode: z.enum(['none', 'abstract', 'full']).default('none').describe(
-    'Content depth in this search call. Use abstract or full during research instead of following search with separate extract calls. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
+    'Content depth in this search call. Use none only when titles and snippets are enough, abstract for relevance evidence, and full when the user asks to read originals, full text, document bodies, or code, or to compare source contents. Use abstract or full here instead of following search with separate extraction, PDF download, or repository clone. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
   ),
   extract_limit: parallelExtractLimitSchema().describe(
     `Call-wide maximum unique result URLs to extract. Integer ${MIN_SEARCH_EXTRACT_LIMIT}-${MAX_PARALLEL_EXTRACT_LIMIT}, default ${DEFAULT_PARALLEL_EXTRACT_LIMIT} for abstract; full defaults to and allows at most ${MAX_FULL_EXTRACT_LIMIT}.`,
@@ -693,6 +702,7 @@ const HealthOutput = {
   pool: MetaShape.optional(),
   telemetry: MetaShape.optional(),
   selfHealing: MetaShape.optional(),
+  nativeBrowser: MetaShape.optional(),
   research: MetaShape.optional(),
   config: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
@@ -734,6 +744,7 @@ const ProjectMemoryOutput = {
 
 const ProjectMemorySearchSchema = {
   query: z.string().min(1).max(400).describe('Natural-language query over indexed local project knowledge.'),
+  query_variants: z.array(z.string().min(1).max(400)).max(19).optional().describe('Optional retrieval variants executed inside this one broker request. Exact identifiers and quoted phrases are added deterministically, candidates are fused with RRF, and the primary query is reranked once. Do not make repeated terminal or tool calls for query variants.'),
   project_id: z.string().min(1).max(64).optional().describe('Primary project to search. Required unless all_projects=true.'),
   include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects searched with the primary project.'),
   all_projects: z.boolean().optional().describe('Search every active named project. Excludes Inbox and cannot be combined with project ids.'),
@@ -741,15 +752,18 @@ const ProjectMemorySearchSchema = {
 };
 
 server.registerTool('search', {
-  title: 'Google Search',
+  title: 'Web Search and Extract',
   description:
-    'ALWAYS PERFORMS LIVE WEB SEARCH. ' +
+    'PRIMARY SINGLE-QUERY LIVE DISCOVERY AND CONTENT INGESTION TOOL. ALWAYS PERFORMS LIVE WEB SEARCH. ' +
     SharedResearchBrokerDescription +
     'Use this tool only when new external information from Google, public websites, papers, or repositories is required. ' +
+    'When the task requires both finding and reading public web pages, PDFs, papers, or GitHub repositories, set extract_mode=abstract or full in this call. Do not download public PDFs, clone repositories, or invoke local parsers first. ' +
+    'Select extract_mode=full, not abstract, when the user asks to read originals, full text, document bodies, or code, or to compare source contents. ' +
+    'Use extract separately only when the exact public URL is already known and no new discovery is required. Use general repository tools only for editing, building, testing, or full Git history. ' +
     'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
     'limit accepts integers from 1 to 20. extract_limit accepts integers from 1 to 10, defaults to 5, and limits unique extracted URLs. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
-    'For research collection, set extract_mode=abstract or full in this call. Use extract separately only to revisit a known URL or request deeper text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'GitHub none mode reads the README; abstract and full can sparse-index eligible repositories with Tree-sitter. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
     'Captured search, source, session, and project provenance form data lineage; extracted bodies become evidence while unread hits remain metadata. ' +
@@ -827,18 +841,21 @@ server.registerTool('scholar_search', {
 });
 
 server.registerTool('search_parallel', {
-  title: 'Google Search Parallel',
+  title: 'Parallel Web Search and Extract',
   description:
-    'ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES. ' +
+    'PRIMARY MULTI-QUERY LIVE DISCOVERY AND CONTENT INGESTION TOOL. ALWAYS PERFORMS MULTIPLE LIVE WEB SEARCHES. ' +
     SharedResearchBrokerDescription +
     'Use this tool only when 2-12 new external queries are required. Providing project_id adds stored evidence but never makes the searches local-only. ' +
+    'When the task requires broad discovery plus reading public web pages, PDFs, papers, or GitHub repositories, set extract_mode=abstract or full in this call. Do not download public PDFs, clone repositories, or invoke local parsers first. ' +
+    'Select extract_mode=full, not abstract, when the user asks to read originals, full text, document bodies, or code, or to compare source contents. ' +
+    'Use extract separately only when the exact public URL is already known and no new discovery is required. Use general repository tools only for editing, building, testing, or full Git history. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
     'Each query limit accepts integers from 1 to 20. Call-wide extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
-    'Set extract_mode=abstract or full here so discovery and reading complete in one tool call; use extract separately only for a known URL or deeper text. GitHub none mode reads the README; eligible small repositories can be indexed. ' +
+    'GitHub none mode reads the README; abstract and full can sparse-index eligible repositories with Tree-sitter. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
     'Extracted bodies become evidence while unread hits remain metadata. ' +
-    'Native Chrome keeps one minimized process with up to four reusable tabs. Query starts are staggered and each tab continuously consumes the remaining queue until the MCP server stops. ' +
+    'Native Chrome uses one authenticated local broker across MCP sessions and keeps one hidden process with up to four reusable tabs. Query starts are staggered and each tab continuously consumes the remaining queue. ' +
     'SearchApi fallback replaces failed queries individually.',
   inputSchema: SearchParallelInput,
   outputSchema: SearchParallelOutput,
@@ -872,9 +889,11 @@ server.registerTool('search_parallel', {
 });
 
 server.registerTool('extract', {
-  title: 'Extract Article Content',
+  title: 'Known URL Extract',
   description:
-    'Use when the exact URL is already known. Fetch one public URL and return clean article text. ' +
+    'SECONDARY KNOWN-URL CONTENT EXTRACTION TOOL. Use only when the exact public URL is already known and no new web discovery is required. If sources still need to be found, use search or search_parallel with extract_mode instead. ' +
+    'For semantic reading of a public PDF or GitHub repository, use this tool before local download or parsing. Local PDF tools are for local files, forms, OCR recovery, or visual layout inspection; general repository tools are for editing, building, testing, or full Git history. ' +
+    'Fetch one public URL and return clean content. ' +
     SharedResearchBrokerDescription +
     'For GitHub repository URLs, metadata reads the README; abstract and full use the same bounded download gate and differ only in indexed source depth. ' +
     'HTML via Mozilla Readability; academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) auto-detected via Content-Type, %PDF magic, citation_pdf_url meta, and per-domain URL rules. ' +
@@ -944,13 +963,14 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search'
     'LOCAL PROJECT KNOWLEDGE SEARCH ONLY. ' +
     SharedResearchBrokerDescription +
     'Always use this tool when the user asks to find, recall, inspect, or search information already stored in project memory, indexed local roots, papers, codebases, plans, experiments, or decisions. ' +
-    'Uses exact, BM25, vector, and graph retrieval, followed by RRF and a local reranker. It never opens Google, a browser, or SearchApi. ' +
+    'Use query_variants for multiple retrieval angles in one call instead of opening terminals or calling this tool repeatedly. Query embeddings are batched, candidates are fused with RRF, graph expansion starts from retrieved evidence, and the primary query is reranked once. ' +
+    'Uses exact, BM25, vector, and graph retrieval. It never opens Google, a browser, or SearchApi. ' +
     'Use search or search_parallel only when new external information is required.',
   inputSchema: ProjectMemorySearchSchema,
   outputSchema: ProjectMemoryOutput,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-}, async (args: ProjectMemorySearchInput) => {
-  return await projectMemorySearchTool(args, researchService);
+}, async (args: ProjectMemorySearchInput, extra) => {
+  return await projectMemorySearchTool(args, researchService, extra.signal);
 });
 
 if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
@@ -972,6 +992,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects for one local search or integrated visualization export.'),
     all_projects: z.boolean().optional().describe('Search or export every active named project. Excludes Inbox and cannot be combined with project ids.'),
     query: z.string().min(1).max(400).optional().describe('Required for action=search. Searches stored local knowledge only and does not start live web discovery.'),
+    query_variants: z.array(z.string().min(1).max(400)).max(19).optional().describe('Optional local retrieval variants for action=search. They run inside one broker request and are fused before one rerank.'),
     limit: z.number().int().min(1).max(20).default(10).describe('Maximum local RAG results for action=search.'),
     export_format: z.enum(['dot', 'd3', 'html', 'neo4j']).default('d3').describe('Visualization file format. html writes one offline explorer with PKM, Lineage, Ontology, project selection, and current-view PNG or anonymized JSON download; d3 writes node-link JSON; dot writes Graphviz DOT; neo4j writes an import-ready CSV and Cypher bundle.'),
     export_view: z.enum(['graph', 'ontology', 'lineage']).default('graph').describe('Initial HTML tab or non-HTML export scope. graph is PKM; ontology shows types, shared schema, verified identity links, and typed instances; lineage shows aligned data and research lineage.'),
@@ -1014,8 +1035,8 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
   },
   outputSchema: ProjectMemoryOutput,
   annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
-}, async (args: ProjectMemoryInput) => {
-  return await projectMemoryTool(args, researchService);
+}, async (args: ProjectMemoryInput, extra) => {
+  return await projectMemoryTool(args, researchService, extra.signal);
 });
 
 server.registerTool('health', {
@@ -1042,6 +1063,7 @@ server.registerTool('health', {
   }
   return formatToolResponse({
     ...result.structuredContent,
+    ...(nativeBrowser ? { nativeBrowser: nativeBrowser.status() } : {}),
     research,
   });
 });

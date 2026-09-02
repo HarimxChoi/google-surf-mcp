@@ -28,12 +28,15 @@ interface PageRankIndex {
 }
 
 const pageRankIndexes = new WeakMap<GraphProjection, Map<boolean, PageRankIndex>>();
-const graphTexts = new WeakMap<GraphProjection, string[]>();
+const graphSourceIndexes = new WeakMap<GraphProjection, Map<string, string[]>>();
 
 const NON_RETRIEVAL_EDGES = new Set([
   'ALIGNS_TO_SCHEMA', 'USES_ONTOLOGY', 'INSTANCE_OF', 'USES_RELATION',
   'HAS_DOCUMENT', 'HAS_PLAN', 'HAS_EXPERIMENT', 'HAS_DECISION', 'HAS_SESSION',
-  'HAS_ENTITY', 'HAS_ASSERTION', 'HAS_SOURCE_SNAPSHOT',
+  'HAS_ENTITY', 'HAS_ASSERTION', 'HAS_SOURCE_SNAPSHOT', 'CONTAINS', 'CONTAINS_ENTRY',
+]);
+const RETRIEVABLE_NODE_KINDS = new Set([
+  'source', 'symbol', 'document', 'plan', 'experiment', 'decision', 'assertion',
 ]);
 
 export function isRetrievalGraphEdge(edge: GraphEdgeRecord): boolean {
@@ -123,20 +126,20 @@ function communityGraph(projection: GraphProjection): UndirectedGraph {
   return graph;
 }
 
-export function personalizedPageRank(
+function personalizedPageRankVector(
   projection: GraphProjection,
   seeds: string[],
   alpha = 0.85,
   iterations = 30,
   bidirectional = false,
-): Record<string, number> {
-  if (!projection.nodes.length || !seeds.length) return {};
+): { index: PageRankIndex; ranks: Float64Array } | undefined {
+  if (!projection.nodes.length || !seeds.length) return undefined;
   const index = pageRankIndex(projection, bidirectional);
   const validSeeds = [...new Set(seeds.flatMap((seed) => {
     const position = index.positions.get(seed);
     return position === undefined ? [] : [position];
   }))];
-  if (!validSeeds.length) return {};
+  if (!validSeeds.length) return undefined;
   const teleport = 1 / validSeeds.length;
   let ranks = new Float64Array(index.node_ids.length);
   for (const seed of validSeeds) ranks[seed] = teleport;
@@ -160,21 +163,91 @@ export function personalizedPageRank(
     }
     ranks = next;
   }
-  const output: Array<[string, number]> = index.node_ids
-    .map((node, position) => [node, ranks[position]]);
-  return Object.fromEntries(output.sort(([a], [b]) => a.localeCompare(b)));
+  return { index, ranks };
+}
+
+function localizedPageRankVector(
+  projection: GraphProjection,
+  seeds: string[],
+  alpha = 0.85,
+  iterations = 30,
+  maxHops = 8,
+  maxNodes = 5_000,
+): { index: PageRankIndex; ranks: Float64Array } | undefined {
+  if (!projection.nodes.length || !seeds.length) return undefined;
+  const index = pageRankIndex(projection, true);
+  const seedPositions = [...new Set(seeds.flatMap((seed) => {
+    const position = index.positions.get(seed);
+    return position === undefined ? [] : [position];
+  }))];
+  if (!seedPositions.length) return undefined;
+  const active = new Uint8Array(index.node_ids.length);
+  const positions = [...seedPositions];
+  let frontier = [...seedPositions];
+  for (const position of seedPositions) active[position] = 1;
+  for (let hop = 0; hop < maxHops && frontier.length && positions.length < maxNodes; hop++) {
+    const next: number[] = [];
+    for (const source of frontier) {
+      for (let edge = index.offsets[source]; edge < index.offsets[source + 1]; edge++) {
+        const target = index.targets[edge];
+        if (active[target]) continue;
+        active[target] = 1;
+        positions.push(target);
+        next.push(target);
+        if (positions.length >= maxNodes) break;
+      }
+      if (positions.length >= maxNodes) break;
+    }
+    frontier = next;
+  }
+  const teleport = 1 / seedPositions.length;
+  let ranks = new Float64Array(index.node_ids.length);
+  for (const seed of seedPositions) ranks[seed] = teleport;
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    const next = new Float64Array(index.node_ids.length);
+    for (const seed of seedPositions) next[seed] = (1 - alpha) * teleport;
+    let dangling = 0;
+    for (const source of positions) {
+      let localWeight = 0;
+      for (let edge = index.offsets[source]; edge < index.offsets[source + 1]; edge++) {
+        if (active[index.targets[edge]]) localWeight += index.weights[edge];
+      }
+      if (localWeight <= 0) {
+        dangling += ranks[source];
+        continue;
+      }
+      const contribution = alpha * ranks[source] / localWeight;
+      for (let edge = index.offsets[source]; edge < index.offsets[source + 1]; edge++) {
+        const target = index.targets[edge];
+        if (active[target]) next[target] += contribution * index.weights[edge];
+      }
+    }
+    for (const seed of seedPositions) next[seed] += alpha * dangling * teleport;
+    ranks = next;
+  }
+  return { index, ranks };
+}
+
+export function personalizedPageRank(
+  projection: GraphProjection,
+  seeds: string[],
+  alpha = 0.85,
+  iterations = 30,
+  bidirectional = false,
+): Record<string, number> {
+  const ranked = personalizedPageRankVector(projection, seeds, alpha, iterations, bidirectional);
+  if (!ranked) return {};
+  return Object.fromEntries(ranked.index.node_ids.map((node, position) => (
+    [node, ranked.ranks[position]]
+  )).sort(([a], [b]) => String(a).localeCompare(String(b))));
 }
 
 export function graphQuerySeeds(projection: GraphProjection, query: string, limit = 8): string[] {
   const terms = query.toLowerCase().split(/[^\p{L}\p{N}_-]+/u)
     .filter((term) => term.length > 1);
   if (!terms.length) return [];
-  const texts = graphTexts.get(projection) ?? projection.nodes.map((node) => (
-    `${node.label} ${node.text ?? ''} ${node.source_id ?? ''}`.toLowerCase()
-  ));
-  graphTexts.set(projection, texts);
   return projection.nodes.map((node, index) => {
-    const text = texts[index];
+    const text = `${node.label} ${node.text ?? ''} ${node.source_id ?? ''}`.toLowerCase();
     const score = terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0);
     return { node: node.node_id, score };
   }).filter((row) => row.score > 0)
@@ -183,23 +256,57 @@ export function graphQuerySeeds(projection: GraphProjection, query: string, limi
     .map((row) => row.node);
 }
 
+export function graphSeedNodes(projection: GraphProjection, values: string[]): string[] {
+  let index = graphSourceIndexes.get(projection);
+  if (!index) {
+    index = new Map<string, string[]>();
+    for (const node of projection.nodes) {
+      for (const value of [node.node_id, node.source_id, node.url]) {
+        if (!value) continue;
+        const matches = index.get(value) ?? [];
+        matches.push(node.node_id);
+        index.set(value, matches);
+      }
+    }
+    graphSourceIndexes.set(projection, index);
+  }
+  return [...new Set(values.flatMap((value) => index!.get(value) ?? []))].slice(0, 16);
+}
+
 export function rankGraphProjection(
   projection: GraphProjection,
   query: string,
   limit = 20,
+  preferredSeeds: string[] = [],
 ): GraphRankedNode[] {
-  const seeds = graphQuerySeeds(projection, query);
-  const scores = personalizedPageRank(projection, seeds, 0.85, 30, true);
-  const nodes = new Map(projection.nodes.map((node) => [node.node_id, node]));
-  return Object.entries(scores)
-    .filter(([, score]) => score > 0)
-    .map(([nodeId, score]) => ({ node: nodes.get(nodeId)!, score }))
-    .filter((row) => row.node && [
-      'source', 'symbol', 'document', 'plan', 'experiment', 'decision', 'assertion',
-    ]
-      .includes(row.node.kind))
-    .sort((a, b) => b.score - a.score || a.node.node_id.localeCompare(b.node.node_id))
-    .slice(0, limit);
+  const seeds = preferredSeeds.length
+    ? [...new Set(preferredSeeds)].slice(0, 16)
+    : graphQuerySeeds(projection, query, 16);
+  const ranked = localizedPageRankVector(projection, seeds);
+  if (!ranked) return [];
+  const cappedLimit = Math.max(1, limit);
+  const top: GraphRankedNode[] = [];
+  for (let position = 0; position < ranked.index.node_ids.length; position++) {
+    const score = ranked.ranks[position];
+    const node = projection.nodes[position];
+    if (score <= 0 || !node || !RETRIEVABLE_NODE_KINDS.has(node.kind)) continue;
+    const row = { node, score };
+    if (top.length < cappedLimit) {
+      top.push(row);
+      continue;
+    }
+    let worst = 0;
+    for (let index = 1; index < top.length; index++) {
+      if (top[index].score < top[worst].score
+        || (top[index].score === top[worst].score
+          && top[index].node.node_id > top[worst].node.node_id)) worst = index;
+    }
+    if (row.score > top[worst].score
+      || (row.score === top[worst].score && row.node.node_id < top[worst].node.node_id)) {
+      top[worst] = row;
+    }
+  }
+  return top.sort((a, b) => b.score - a.score || a.node.node_id.localeCompare(b.node.node_id));
 }
 
 export function analyzeGraphProjection(

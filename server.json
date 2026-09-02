@@ -6,12 +6,12 @@
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "1.0.1",
+  "version": "1.0.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "transport": {
         "type": "stdio"
       },
@@ -37,7 +37,7 @@
         },
         {
           "name": "SURF_BROWSER_ENGINE",
-          "description": "Browser engine: auto, native, or playwright. Auto uses native system Chrome on local desktops.",
+          "description": "Browser engine: auto, native, or playwright. Auto uses one hidden native Chrome broker shared across local MCP sessions.",
           "isRequired": false,
           "format": "string"
         },
@@ -78,6 +78,18 @@
           "format": "string"
         },
         {
+          "name": "SURF_RESEARCH_VECTOR_LOW_MEMORY",
+          "description": "Disable ONNX CPU memory arena and memory pattern. Defaults to true.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_VECTOR_THREADS",
+          "description": "ONNX intra-op thread count from 1 to 16. Defaults to 4.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
           "name": "SURF_RESEARCH_REPO_AUTO",
           "description": "Sparse-index at most one eligible small GitHub repository per search call. Defaults to true.",
           "isRequired": false,
@@ -92,6 +104,24 @@
         {
           "name": "SURF_RESEARCH_REPO_AUTO_MAX_FILES",
           "description": "Maximum repository source file count for automatic indexing. Defaults to 2000.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_BROKER_IDLE_MS",
+          "description": "Shared research broker idle lifetime in milliseconds. Defaults to 60000.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_READ_CONCURRENCY",
+          "description": "Maximum concurrent research broker reads. Defaults to 4.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_RESEARCH_QUERY_TIMEOUT_MS",
+          "description": "Embedded SurrealDB query timeout in milliseconds. Defaults to 30000.",
           "isRequired": false,
           "format": "string"
         },
@@ -116,7 +146,7 @@
         },
         {
           "name": "SURF_HEADLESS",
-          "description": "Controls Playwright extraction, compatibility, and recovery paths. Native search uses minimized system Chrome.",
+          "description": "Controls Playwright extraction, compatibility, and recovery paths. Native search hides normal system Chrome and shows it only for CAPTCHA recovery.",
           "isRequired": false,
           "format": "string"
         },

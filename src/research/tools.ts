@@ -9,6 +9,7 @@ export interface ProjectMemorySearchInput {
   include_project_ids?: string[];
   all_projects?: boolean;
   query?: string;
+  query_variants?: string[];
   limit?: number;
 }
 
@@ -65,9 +66,11 @@ function requireProject(input: ProjectMemoryInput): string {
 export async function projectMemorySearchTool(
   input: ProjectMemorySearchInput,
   service: ResearchService,
+  signal?: AbortSignal,
 ): Promise<CallToolResult> {
   try {
     if (!input.query) throw new Error('query required');
+    if ((input.query_variants?.length ?? 0) > 19) throw new Error('query_variants accepts at most 19 entries');
     if (input.all_projects && (input.project_id || input.include_project_ids?.length)) {
       throw new Error('all_projects cannot be combined with project_id or include_project_ids');
     }
@@ -84,7 +87,15 @@ export async function projectMemorySearchTool(
         .sort()];
     if (!scope.length) throw new Error('project_id or all_projects=true required');
     const started = Date.now();
-    const hits = await service.search(scope[0], input.query, input.limit ?? 10, scope.slice(1));
+    const searched = await service.searchBatch(
+      scope[0],
+      input.query,
+      input.query_variants ?? [],
+      input.limit ?? 10,
+      scope.slice(1),
+      signal,
+    );
+    const hits = searched.results;
     const results = hits.map((hit) => ({
       title: hit.title,
       url: hit.url,
@@ -112,8 +123,13 @@ export async function projectMemorySearchTool(
         browser_used: false,
         searchapi_used: false,
         captured: false,
+        query_count: searched.queries.length,
+        query_variants: searched.queries.slice(1),
+        query_execution: 'single_broker_request',
+        graph_project_count: searched.graph_project_count,
+        timings: searched.timings,
       },
-      memory: `Projects: ${scope.length} | Local RAG: ${results.length} results | Live web: no | Status: ready`,
+      memory: `Projects: ${scope.length} | Queries: ${searched.queries.length} | Local RAG: ${results.length} results | Live web: no | Status: ready`,
     });
   } catch (error) {
     return toolError(error);
@@ -123,6 +139,7 @@ export async function projectMemorySearchTool(
 export async function projectMemoryTool(
   input: ProjectMemoryInput,
   service: ResearchService,
+  signal?: AbortSignal,
 ): Promise<CallToolResult> {
   try {
     if (input.action === 'create') {
@@ -172,7 +189,7 @@ export async function projectMemoryTool(
     }
 
     if (input.action === 'search') {
-      return await projectMemorySearchTool(input, service);
+      return await projectMemorySearchTool(input, service, signal);
     }
 
     if (input.action === 'export') {

@@ -18,7 +18,9 @@ import { runCodeStructureBatchStream, type CodeSourceInput } from './codeStructu
 import { cosineSimilarity, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
 import { aliasId, entityId, normalizeEntityName, rankEntityCandidates } from './entities.js';
 import { buildGraphProjection, type ProjectGraphSource } from './graphProjection.js';
-import { isRetrievalGraphEdge, rankGraphProjection, runGraphSidecar } from './graphSidecar.js';
+import {
+  graphSeedNodes, isRetrievalGraphEdge, rankGraphProjection, runGraphSidecar,
+} from './graphSidecar.js';
 import { exportInteractiveGraphVisualization } from './interactiveVisualization.js';
 import { searchableByPolicy } from './inventory.js';
 import {
@@ -37,11 +39,14 @@ export interface ResearchServiceOptions {
   root: string;
   endpoint?: string;
   vectorModel?: string;
+  vectorLowMemory?: boolean;
+  vectorThreads?: number;
   embeddingProvider?: EmbeddingProvider;
   repositoryAuto?: boolean;
   repositoryMaxSourceBytes?: number;
   repositoryMaxSourceFiles?: number;
   repositoryClient?: RepositoryClient;
+  queryTimeoutMs?: number;
 }
 
 interface CaptureInput {
@@ -145,7 +150,7 @@ interface KnowledgeJobInput {
   affected_source_ids?: string[];
 }
 
-const GRAPH_ALGORITHM_VERSION = 'graphology-v9-typed-retrieval-louvain';
+const GRAPH_ALGORITHM_VERSION = 'graphology-v10-local-ppr-no-containment';
 const CODE_ALGORITHM_VERSION = 'tree-sitter-v8-query-global-linking';
 const RETRIEVAL_ALGORITHM_VERSION = 'exact-bm25-e5-hnsw-v1';
 
@@ -173,6 +178,10 @@ function cleanText(value: string, name: string, max: number): string {
   if (!text) throw new Error(`${name} required`);
   if (text.length > max) throw new Error(`${name} exceeds ${max} characters`);
   return text;
+}
+
+function ensureNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('research search cancelled');
 }
 
 function cleanTime(value: string | undefined, name: string): string | undefined {
@@ -279,9 +288,45 @@ function querySimilarity(left: string, right: string): number {
   return overlap / Math.max(leftTerms.size, rightTerms.size);
 }
 
+export function tuneLocalQueries(primary: string, variants: string[] = []): string[] {
+  const query = cleanText(primary, 'query', 400);
+  const discovered = [
+    ...[...query.matchAll(/"([^"\r\n]{2,200})"/g)].map((match) => match[1]),
+    ...(query.match(/\b(?:10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+|https?:\/\/\S+|[A-Za-z][A-Za-z0-9]*(?:[_./:-][A-Za-z0-9]+)+|[A-Za-z]+[A-Z][A-Za-z0-9]*|[A-Z]{2,}[A-Za-z0-9-]*)\b/g) ?? []),
+  ].map((value) => value.replace(/[),.;]+$/, ''));
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  for (const value of [query, ...variants, ...discovered]) {
+    const cleaned = cleanText(value, 'query_variants', 400);
+    const key = normalizeEntityName(cleaned);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    selected.push(cleaned);
+    if (selected.length >= 20) break;
+  }
+  return selected;
+}
+
 function eventQueries(event: SearchEventRecord): string[] {
   return [...new Set([event.query, ...(event.queries ?? [])]
     .filter((query): query is string => !!query?.trim()))];
+}
+
+async function mapConcurrent<T, R>(
+  values: T[],
+  concurrency: number,
+  worker: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const output = new Array<R>(values.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= values.length) return;
+      output[index] = await worker(values[index], index);
+    }
+  }));
+  return output;
 }
 
 function fuseRankedGroups(
@@ -453,32 +498,39 @@ export class ResearchService {
   private state: 'disabled' | 'idle' | 'ready' | 'unavailable';
 
   constructor(private readonly options: ResearchServiceOptions) {
-    this.store = new ResearchStore(options.root, options.endpoint);
-    this.embeddings = options.embeddingProvider ?? new LocalEmbeddingModel(options.vectorModel);
+    this.store = new ResearchStore(options.root, options.endpoint, options.queryTimeoutMs);
+    this.embeddings = options.embeddingProvider ?? new LocalEmbeddingModel(
+      options.vectorModel,
+      undefined,
+      undefined,
+      { lowMemory: options.vectorLowMemory, threads: options.vectorThreads },
+    );
     this.repositoryClient = options.repositoryClient ?? new GitHubClient();
     this.state = options.enabled ? 'idle' : 'disabled';
   }
 
   private rememberGraphProjection(key: string, projection: GraphProjection): GraphProjection {
-    this.graphCache.delete(key);
-    this.graphCache.set(key, projection);
-    while (this.graphCache.size > 4) {
-      const oldest = this.graphCache.keys().next().value;
-      if (oldest === undefined) break;
-      this.graphCache.delete(oldest);
+    const shared = this.graphArtifacts.get(projection.projection_id)?.projection ?? projection;
+    this.graphCache.clear();
+    this.graphCache.set(key, shared);
+    for (const projectionId of this.graphArtifacts.keys()) {
+      if (projectionId !== shared.projection_id) this.graphArtifacts.delete(projectionId);
     }
-    return projection;
+    return shared;
   }
 
   private rememberGraphArtifact(projectionId: string, artifact: GraphArtifact): GraphArtifact {
-    this.graphArtifacts.delete(projectionId);
-    this.graphArtifacts.set(projectionId, artifact);
-    while (this.graphArtifacts.size > 3) {
-      const oldest = this.graphArtifacts.keys().next().value;
-      if (oldest === undefined) break;
-      this.graphArtifacts.delete(oldest);
+    const cached = [...this.graphCache.values()]
+      .find((projection) => projection.projection_id === projectionId);
+    const shared = cached && cached !== artifact.projection
+      ? { ...artifact, projection: cached }
+      : artifact;
+    this.graphArtifacts.clear();
+    this.graphArtifacts.set(projectionId, shared);
+    for (const [key, projection] of this.graphCache) {
+      if (projection.projection_id !== projectionId) this.graphCache.delete(key);
     }
-    return artifact;
+    return shared;
   }
 
   status(): {
@@ -2523,19 +2575,24 @@ export class ResearchService {
     project: ProjectRecord,
     query: string,
     limit: number,
+    seedHits: LocalSearchHit[] = [],
   ): Promise<LocalSearchHit[]> {
     const current = await this.store.currentGraph(project.project_id);
     if (!current.current || !current.projection_id) return [];
     const artifact = this.graphArtifacts.get(current.projection_id)
       ?? await this.store.loadGraphArtifact(current.projection_id);
     if (!artifact) return [];
-    this.rememberGraphArtifact(current.projection_id, artifact);
+    const remembered = this.rememberGraphArtifact(current.projection_id, artifact);
+    const seeds = graphSeedNodes(remembered.projection, seedHits.flatMap((hit) => (
+      [hit.document_id, hit.url]
+    )));
     return this.graphSearchHits(
-      artifact.projection,
+      remembered.projection,
       query,
       limit,
       new Set([project.project_id]),
-      artifact.analysis.pagerank,
+      remembered.analysis.pagerank,
+      seeds,
     );
   }
 
@@ -2545,8 +2602,9 @@ export class ResearchService {
     limit: number,
     projectIds: Set<string>,
     pagerank: Record<string, number> = {},
+    seeds: string[] = [],
   ): LocalSearchHit[] {
-    return rankGraphProjection(projection, query, limit * 5)
+    return rankGraphProjection(projection, query, limit * 5, seeds)
       .filter(({ node }) => projectIds.has(node.project_id))
       .slice(0, limit)
       .map(({ node, score }) => ({
@@ -2568,10 +2626,12 @@ export class ResearchService {
     projects: ProjectRecord[],
     query: string,
     limit: number,
+    seedHits: LocalSearchHit[] = [],
   ): Promise<LocalSearchHit[]> {
     const projectIds = projects.map((project) => project.project_id);
     const projection = await this.exportGraphProjection(projectIds);
-    return this.graphSearchHits(projection, query, limit, new Set(projectIds));
+    const seeds = graphSeedNodes(projection, seedHits.flatMap((hit) => [hit.document_id, hit.url]));
+    return this.graphSearchHits(projection, query, limit, new Set(projectIds), {}, seeds);
   }
 
   async searchFamilies(
@@ -2579,12 +2639,16 @@ export class ResearchService {
     query: string,
     limit: number,
     includeProjectIds: string[] = [],
+    preparedQueryVector?: number[],
+    includeGraph = true,
+    signal?: AbortSignal,
   ): Promise<LocalSearchFamilies> {
+    ensureNotAborted(signal);
     const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
     const projects = await Promise.all(projectIds.map((projectId) => this.ensureProject(projectId)));
     const cleanedQuery = cleanText(query, 'query', 400);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
-    const [exactGroups, bm25Groups, graphGroups, queryVector] = await Promise.all([
+    const [exactGroups, bm25Groups, queryVector] = await Promise.all([
       Promise.all(projects.map((project) => this.store.searchProjectExact(
         project.project_id,
         normalizeEntityName(cleanedQuery),
@@ -2593,12 +2657,9 @@ export class ResearchService {
       Promise.all(projects.map((project) => (
         this.store.searchProjectBm25(project.project_id, cleanedQuery, cappedLimit)
       ))),
-      projects.length > 1
-        ? this.searchCombinedGraph(projects, cleanedQuery, cappedLimit).then((rows) => [rows])
-        : Promise.all(projects.map((project) => (
-          this.searchMaterializedGraph(project, cleanedQuery, cappedLimit)
-        ))),
-      this.embeddings.enabled()
+      preparedQueryVector
+        ? Promise.resolve(preparedQueryVector)
+        : this.embeddings.enabled()
         ? this.embeddings.embedQuery(cleanedQuery).catch(() => undefined)
         : Promise.resolve(undefined),
     ]);
@@ -2611,6 +2672,23 @@ export class ResearchService {
         cappedLimit,
       ).catch(() => [])))
       : [];
+    ensureNotAborted(signal);
+    const seedGroups = projects.map((_project, index) => fuseRankedGroups([
+      exactGroups[index] ?? [],
+      bm25Groups[index] ?? [],
+      vectorGroups[index] ?? [],
+    ], cappedLimit));
+    const graphGroups = !includeGraph ? [] : projects.length > 1
+      ? [await this.searchCombinedGraph(
+        projects,
+        cleanedQuery,
+        cappedLimit,
+        seedGroups.flat(),
+      )]
+      : await Promise.all(projects.map((project, index) => (
+        this.searchMaterializedGraph(project, cleanedQuery, cappedLimit, seedGroups[index])
+      )));
+    ensureNotAborted(signal);
     return {
       exact: fuseRankedGroups(exactGroups, cappedLimit, 'exact'),
       bm25: fuseRankedGroups(bm25Groups, cappedLimit, 'bm25'),
@@ -2624,18 +2702,106 @@ export class ResearchService {
     query: string,
     limit: number,
     includeProjectIds: string[] = [],
+    signal?: AbortSignal,
   ): Promise<LocalSearchHit[]> {
+    return (await this.searchBatch(
+      projectIdValue,
+      query,
+      [],
+      limit,
+      includeProjectIds,
+      signal,
+    )).results;
+  }
+
+  async searchBatch(
+    projectIdValue: string,
+    query: string,
+    queryVariants: string[],
+    limit: number,
+    includeProjectIds: string[] = [],
+    signal?: AbortSignal,
+  ): Promise<{
+    queries: string[];
+    results: LocalSearchHit[];
+    graph_project_count: number;
+    timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
+  }> {
+    const started = performance.now();
+    ensureNotAborted(signal);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const candidateLimit = Math.min(40, cappedLimit * 3);
-    const cleanedQuery = cleanText(query, 'query', 400);
-    const families = await this.searchFamilies(
-      projectIdValue,
-      cleanedQuery,
-      candidateLimit,
-      includeProjectIds,
+    const queries = tuneLocalQueries(query, queryVariants);
+    let vectors: Array<number[] | undefined> = queries.map(() => undefined);
+    if (this.embeddings.enabled()) {
+      try {
+        const generated = this.embeddings.embedQueries
+          ? await this.embeddings.embedQueries(queries)
+          : await Promise.all(queries.map(async (value) => await this.embeddings.embedQuery(value)));
+        vectors = generated;
+      } catch {}
+    }
+    ensureNotAborted(signal);
+    const embedded = performance.now();
+    const queryGroups = await mapConcurrent(queries, 4, async (value, index) => {
+      const families = await this.searchFamilies(
+        projectIdValue,
+        value,
+        candidateLimit,
+        includeProjectIds,
+        vectors[index],
+        false,
+        signal,
+      );
+      return fuseRankedGroups(Object.values(families), candidateLimit);
+    });
+    const baseFused = fuseRankedGroups(queryGroups, candidateLimit);
+    ensureNotAborted(signal);
+    const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
+    const seededProjects = new Set(baseFused.flatMap((row) => row.project_ids));
+    if (!seededProjects.size) {
+      await this.store.ensureGraphSearchIndexes(projectIds);
+      const graphSeeds = await this.store.searchGraphSeeds(projectIds, queries, candidateLimit);
+      for (const seed of graphSeeds) {
+        seededProjects.add(seed.project_id);
+        if (seededProjects.size >= 4) break;
+      }
+      if (!seededProjects.size) {
+        for (const projectId of await this.store.searchMemorySeedProjects(projectIds, queries, 4)) {
+          seededProjects.add(projectId);
+        }
+      }
+    }
+    const selectedProjects = projectIds.filter((projectId) => seededProjects.has(projectId)).slice(0, 4);
+    const linkedProjects = await this.store.linkedProjectIds(
+      selectedProjects,
+      projectIds,
+      Math.max(0, 4 - selectedProjects.length),
     );
-    const fused = fuseRankedGroups(Object.values(families), candidateLimit);
-    return await this.rerankCandidates(cleanedQuery, fused, cappedLimit);
+    const graphProjectIds = [...selectedProjects, ...linkedProjects].slice(0, 4);
+    const projects = await Promise.all(graphProjectIds.map((projectId) => this.ensureProject(projectId)));
+    const graph = !projects.length ? [] : projects.length > 1
+      ? await this.searchCombinedGraph(projects, query, candidateLimit, baseFused)
+      : await this.searchMaterializedGraph(projects[0], query, candidateLimit, baseFused);
+    ensureNotAborted(signal);
+    const baseKeys = new Set(baseFused.map((row) => row.url || row.document_id));
+    const graphCandidates = !this.embeddings.enabled() && baseKeys.size
+      ? graph.filter((row) => baseKeys.has(row.url || row.document_id))
+      : graph;
+    const fused = fuseRankedGroups([...queryGroups, graphCandidates], candidateLimit);
+    const retrieved = performance.now();
+    const results = await this.rerankCandidates(query, fused, cappedLimit, vectors[0], signal);
+    const reranked = performance.now();
+    return {
+      queries,
+      results,
+      graph_project_count: projects.length,
+      timings: {
+        embedding_ms: embedded - started,
+        retrieval_ms: retrieved - embedded,
+        rerank_ms: reranked - retrieved,
+      },
+    };
   }
 
   async researchSearchContext(
@@ -2686,7 +2852,14 @@ export class ResearchService {
     fresh_web?: boolean;
     score?: number;
     _rrf_score?: number;
-  }>(query: string, rows: T[], limit: number): Promise<T[]> {
+  }>(
+    query: string,
+    rows: T[],
+    limit: number,
+    preparedQueryVector?: number[],
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    ensureNotAborted(signal);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const visible = (selected: T[]): T[] => selected.map((entry) => {
       const { _rrf_score: _score, ...row } = entry;
@@ -2703,11 +2876,14 @@ export class ResearchService {
         freshCount++;
       }
       const [queryVector, passageVectors] = await Promise.all([
-        this.embeddings.embedQuery(query),
+        preparedQueryVector
+          ? Promise.resolve(preparedQueryVector)
+          : this.embeddings.embedQuery(query),
         this.embeddings.embedPassages(working.map((row) => (
           `${row.title}\n${row.description ?? ''}\n${row.content?.slice(0, 1_200) ?? ''}`
         ))),
       ]);
+      ensureNotAborted(signal);
       const semantic = working.map((row, index) => ({
         row,
         index,

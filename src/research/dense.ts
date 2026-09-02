@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_RESEARCH_VECTOR_MODEL = 'Xenova/multilingual-e5-small';
@@ -16,8 +17,14 @@ export interface EmbeddingProvider {
   modelId(): string | undefined;
   dimensions(): number;
   embedQuery(text: string): Promise<number[]>;
+  embedQueries?(texts: string[]): Promise<number[][]>;
   embedPassages(texts: string[]): Promise<number[][]>;
   dispose?(): Promise<void>;
+}
+
+export interface EmbeddingRuntimeOptions {
+  lowMemory?: boolean;
+  threads?: number;
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {
@@ -42,6 +49,7 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
     private readonly model?: string,
     private readonly extractorFactory?: () => Promise<FeatureExtractor>,
     revision?: string,
+    private readonly runtimeOptions: EmbeddingRuntimeOptions = {},
   ) {
     this.revision = revision
       ?? (model === DEFAULT_RESEARCH_VECTOR_MODEL ? DEFAULT_RESEARCH_VECTOR_REVISION : undefined);
@@ -66,11 +74,29 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
       new URL('../../../vendor/transformers.node.min.mjs', import.meta.url),
     ].find((candidate) => existsSync(fileURLToPath(candidate)));
     if (!runtimeUrl) throw new Error('vendored Transformers.js runtime missing');
+    const configuredThreads = this.runtimeOptions.threads
+      ?? Number(process.env.SURF_RESEARCH_VECTOR_THREADS);
+    const threads = Number.isFinite(configuredThreads) && configuredThreads > 0
+      ? Math.min(16, Math.floor(configuredThreads))
+      : Math.min(4, availableParallelism());
+    const lowMemory = this.runtimeOptions.lowMemory
+      ?? process.env.SURF_RESEARCH_VECTOR_LOW_MEMORY !== 'false';
     this.extractor ??= this.extractorFactory?.() ?? import(runtimeUrl.href)
       .then(async ({ pipeline }) => await pipeline(
         'feature-extraction',
         this.model!,
-        { dtype: 'q8', ...(this.revision ? { revision: this.revision } : {}) },
+        {
+          dtype: 'q8',
+          ...(this.revision ? { revision: this.revision } : {}),
+          session_options: {
+            executionMode: 'sequential',
+            intraOpNumThreads: threads,
+            interOpNumThreads: 1,
+            enableCpuMemArena: !lowMemory,
+            enableMemPattern: !lowMemory,
+            graphOptimizationLevel: 'all',
+          },
+        },
       ) as unknown as FeatureExtractor);
     return await this.extractor;
   }
@@ -117,6 +143,10 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
 
   async embedQuery(text: string): Promise<number[]> {
     return (await this.embed([this.prefix('query', text)]))[0];
+  }
+
+  async embedQueries(texts: string[]): Promise<number[][]> {
+    return await this.embed(texts.map((text) => this.prefix('query', text)));
   }
 
   async embedPassages(texts: string[]): Promise<number[][]> {

@@ -76,8 +76,16 @@ function parseConfig(): ResearchBrokerConfig {
   delete process.env.SURF_RESEARCH_BROKER_CONFIG;
   if (!encoded) throw new Error('SURF_RESEARCH_BROKER_CONFIG required');
   const value = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as ResearchBrokerConfig;
-  if (!value.enabled || !value.root || !Number.isFinite(value.idleMs)) throw new Error('invalid research broker config');
-  return { ...value, root: resolve(value.root), idleMs: Math.max(100, value.idleMs) };
+  if (!value.enabled || !value.root || !Number.isFinite(value.idleMs)
+    || !Number.isFinite(value.readConcurrency)
+    || !Number.isFinite(value.queryTimeoutMs)) throw new Error('invalid research broker config');
+  return {
+    ...value,
+    root: resolve(value.root),
+    idleMs: Math.max(100, value.idleMs),
+    readConcurrency: Math.min(16, Math.max(1, Math.floor(value.readConcurrency))),
+    queryTimeoutMs: Math.min(10 * 60_000, Math.max(1_000, Math.floor(value.queryTimeoutMs))),
+  };
 }
 
 const config = parseConfig();
@@ -90,8 +98,15 @@ const configHash = researchBrokerConfigHash(config);
 const service = new ResearchService(config);
 const endpoint = researchBrokerEndpoint(config.root);
 const clients = new Set<Socket>();
+const coalescedReads = new Set([
+  'getAssertion', 'getEntity', 'getProject', 'linkEntity', 'listProjects', 'probe',
+]);
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let writeTail: Promise<unknown> = Promise.resolve();
+let activeReads = 0;
+const readWaiters: Array<() => void> = [];
+const readInflight = new Map<string, Promise<unknown>>();
+const requestControllers = new Map<string, { controller: AbortController; socket: Socket }>();
 let stopping = false;
 let activeRequests = 0;
 
@@ -103,11 +118,57 @@ function response(socket: Socket, value: Record<string, unknown>): void {
   socket.write(`${JSON.stringify(value)}\n`);
 }
 
-async function invoke(request: BrokerRequest): Promise<unknown> {
+function invocationArgs(request: BrokerRequest, signal: AbortSignal): unknown[] {
+  const args = [...request.args];
+  if (request.method === 'search') {
+    while (args.length < 4) args.push(undefined);
+    return [...args, signal];
+  }
+  if (request.method === 'searchBatch') {
+    while (args.length < 5) args.push(undefined);
+    return [...args, signal];
+  }
+  if (request.method === 'searchFamilies') {
+    while (args.length < 5) args.push(undefined);
+    if (args.length < 6) args.push(true);
+    return [...args, signal];
+  }
+  if (request.method === 'rerankCandidates') {
+    while (args.length < 4) args.push(undefined);
+    return [...args, signal];
+  }
+  return args;
+}
+
+async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unknown> {
   const method = (service as unknown as Record<string, (...args: unknown[]) => unknown>)[request.method];
   if (typeof method !== 'function') throw new Error(`unsupported research broker method: ${request.method}`);
-  const operation = async () => await method.apply(service, request.args);
-  if (RESEARCH_BROKER_READ_METHODS.has(request.method)) return await operation();
+  const operation = async () => await method.apply(service, invocationArgs(request, signal));
+  if (RESEARCH_BROKER_READ_METHODS.has(request.method)) {
+    const key = coalescedReads.has(request.method)
+      ? `${request.method}\0${JSON.stringify(request.args)}`
+      : request.id;
+    const existing = readInflight.get(key);
+    if (existing) return await existing;
+    const current = (async () => {
+      if (activeReads >= config.readConcurrency) {
+        await new Promise<void>((resolveSlot) => readWaiters.push(resolveSlot));
+      }
+      activeReads++;
+      try {
+        return await operation();
+      } finally {
+        activeReads--;
+        readWaiters.shift()?.();
+      }
+    })();
+    readInflight.set(key, current);
+    try {
+      return await current;
+    } finally {
+      if (readInflight.get(key) === current) readInflight.delete(key);
+    }
+  }
   const current = writeTail.then(operation, operation);
   writeTail = current.then(() => undefined, () => undefined);
   return await current;
@@ -115,16 +176,26 @@ async function invoke(request: BrokerRequest): Promise<unknown> {
 
 async function handle(socket: Socket, line: string): Promise<void> {
   let request: BrokerRequest | undefined;
+  let controller: AbortController | undefined;
   activeRequests++;
   try {
     request = JSON.parse(line) as BrokerRequest;
     if (request.protocol !== RESEARCH_BROKER_PROTOCOL) throw new Error('research broker protocol mismatch');
     if (request.configHash !== configHash) throw new Error('research broker configuration mismatch');
     if (request.token !== token) throw new Error('research broker authentication failed');
-    if (!request.id || !RESEARCH_BROKER_METHODS.has(request.method) || !Array.isArray(request.args)) {
+    if (!request.id || !Array.isArray(request.args)) {
       throw new Error('invalid research broker request');
     }
-    const result = await invoke(request);
+    if (request.method === '$cancel') {
+      const target = typeof request.args[0] === 'string' ? request.args[0] : '';
+      requestControllers.get(target)?.controller.abort();
+      response(socket, { id: request.id, ok: true });
+      return;
+    }
+    if (!RESEARCH_BROKER_METHODS.has(request.method)) throw new Error('invalid research broker request');
+    controller = new AbortController();
+    requestControllers.set(request.id, { controller, socket });
+    const result = await invoke(request, controller.signal);
     response(socket, { id: request.id, ok: true, result, status: service.status() });
   } catch (error) {
     response(socket, {
@@ -134,6 +205,7 @@ async function handle(socket: Socket, line: string): Promise<void> {
       status: service.status(),
     });
   } finally {
+    if (request?.id && controller) requestControllers.delete(request.id);
     activeRequests--;
     scheduleIdle();
   }
@@ -176,6 +248,9 @@ const server = createServer((socket) => {
     }
   });
   socket.on('close', () => {
+    for (const pending of requestControllers.values()) {
+      if (pending.socket === socket) pending.controller.abort();
+    }
     clients.delete(socket);
     scheduleIdle();
   });

@@ -25,14 +25,14 @@ public static class SurfNativeWindowState {
   private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
   [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
   public static void SetState(int processId, int command) {
     EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
       uint owner;
       GetWindowThreadProcessId(hWnd, out owner);
-      if (owner == (uint)processId && IsWindowVisible(hWnd)) {
+      if (owner == (uint)processId && GetWindowTextLength(hWnd) > 0) {
         ShowWindowAsync(hWnd, command);
         if (command == 3) SetForegroundWindow(hWnd);
       }
@@ -52,14 +52,13 @@ public static class SurfNativeWindow {
   [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
-  [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
-  public static void Minimize(int processId) {
+  public static void Hide(int processId) {
     EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
       uint owner;
       GetWindowThreadProcessId(hWnd, out owner);
       if (owner == (uint)processId && IsWindowVisible(hWnd)) {
-        ShowWindowAsync(hWnd, GetForegroundWindow() == hWnd ? 6 : 7);
+        ShowWindowAsync(hWnd, 0);
       }
       return true;
     }, IntPtr.Zero);
@@ -70,11 +69,10 @@ public static class SurfNativeWindow {
 $line = [Console]::In.ReadLine()
 $targetProcessId = 0
 if (-not [int]::TryParse($line, [ref]$targetProcessId)) { exit 0 }
-$deadline = [DateTime]::UtcNow.AddSeconds(30)
-while ([DateTime]::UtcNow -lt $deadline) {
+while ($true) {
   try { [System.Diagnostics.Process]::GetProcessById($targetProcessId) | Out-Null } catch { break }
-  [SurfNativeWindow]::Minimize($targetProcessId)
-  Start-Sleep -Milliseconds 15
+  [SurfNativeWindow]::Hide($targetProcessId)
+  Start-Sleep -Milliseconds 25
 }
 `;
 
@@ -93,6 +91,8 @@ export interface NativeChromeOptions {
   executablePath: string;
   profileDir: string;
   settleMs?: number;
+  startWindowGuard?: () => Promise<ChildProcess | undefined>;
+  setWindowState?: (pid: number, command: 0 | 3) => Promise<void>;
 }
 
 interface NativeSession {
@@ -132,6 +132,8 @@ export function buildNativeChromeArgs(
   }
   return [
     '--start-minimized',
+    '--window-position=-32000,-32000',
+    '--window-size=1366,768',
     '--no-first-run',
     '--no-default-browser-check',
     `--user-data-dir=${profileDir}`,
@@ -175,7 +177,7 @@ async function startWindowsWindowGuard(): Promise<ChildProcess | undefined> {
       if (!chunk.toString().includes('ready')) return;
       finish(true);
     };
-    const timer = setTimeout(failed, 3_000);
+    const timer = setTimeout(failed, 10_000);
     child.once('error', failed);
     child.once('exit', failed);
     child.stdout?.on('data', onData);
@@ -185,7 +187,7 @@ async function startWindowsWindowGuard(): Promise<ChildProcess | undefined> {
   return undefined;
 }
 
-async function setWindowsWindowState(pid: number, command: 3 | 7): Promise<void> {
+async function setWindowsWindowState(pid: number, command: 0 | 3): Promise<void> {
   if (process.platform !== 'win32') return;
   const systemRoot = process.env.SystemRoot || 'C:\\Windows';
   const script = WINDOWS_SET_WINDOW_STATE
@@ -200,7 +202,7 @@ async function setWindowsWindowState(pid: number, command: 3 | 7): Promise<void>
     const timer = setTimeout(() => {
       child.kill();
       resolve();
-    }, 3_000);
+    }, 10_000);
     child.once('error', () => {
       clearTimeout(timer);
       resolve();
@@ -245,6 +247,8 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
   private readonly executablePath: string;
   private readonly profileDir: string;
   private readonly settleMs: number;
+  private readonly startWindowGuard: () => Promise<ChildProcess | undefined>;
+  private readonly setWindowState: (pid: number, command: 0 | 3) => Promise<void>;
   private queue: Promise<void> = Promise.resolve();
   private navigationQueue: Promise<void> = Promise.resolve();
   private nextNavigationAt = 0;
@@ -256,6 +260,8 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     this.executablePath = options.executablePath;
     this.profileDir = options.profileDir;
     this.settleMs = options.settleMs ?? 2_500;
+    this.startWindowGuard = options.startWindowGuard ?? startWindowsWindowGuard;
+    this.setWindowState = options.setWindowState ?? setWindowsWindowState;
   }
 
   async search(query: string, limit: number, opts: SearchOptions = {}): Promise<SearchOutcome> {
@@ -398,7 +404,7 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     session.captchaPage = page;
     session.windowGuard?.kill();
     session.windowGuard = undefined;
-    if (session.child.pid) await setWindowsWindowState(session.child.pid, 3);
+    if (session.child.pid) await this.setWindowState(session.child.pid, 3);
   }
 
   private async prepareForSearch(): Promise<void> {
@@ -413,7 +419,22 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
       }
     }
     session.captchaPage = undefined;
-    if (session.child.pid) await setWindowsWindowState(session.child.pid, 7);
+    await this.restoreBackgroundWindow(session);
+  }
+
+  private async restoreBackgroundWindow(session: NativeSession): Promise<void> {
+    const pid = session.child.pid;
+    if (!pid) return;
+    session.windowGuard?.kill();
+    const guard = await this.startWindowGuard();
+    session.windowGuard = guard;
+    if (process.platform === 'win32' && !guard) {
+      await this.setWindowState(pid, 0);
+      await this.disposeSession(session);
+      throw new Error('native Chrome window guard failed to restart');
+    }
+    guard?.stdin?.end(`${pid}\n`);
+    await this.setWindowState(pid, 0);
   }
 
   private async ensureSession(
@@ -443,14 +464,17 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     killZombieChromium(this.profileDir);
     await clearProfileLocks(this.profileDir);
     const port = await reservePort();
-    const windowGuard = await startWindowsWindowGuard();
+    const windowGuard = await this.startWindowGuard();
+    if (process.platform === 'win32' && !windowGuard) {
+      throw new Error('native Chrome window guard failed to start');
+    }
     await this.waitForNavigationSlot();
     const child = spawn(
       this.executablePath,
       buildNativeChromeArgs(this.profileDir, port, targetUrl),
-      { stdio: 'ignore', windowsHide: false },
+      { stdio: 'ignore', windowsHide: true },
     );
-    if (child.pid) windowGuard?.stdin?.end(String(child.pid));
+    if (child.pid) windowGuard?.stdin?.end(`${child.pid}\n`);
     this.active.add(child);
     let browser: Browser | undefined;
     try {

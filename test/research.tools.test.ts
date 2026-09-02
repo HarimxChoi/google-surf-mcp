@@ -109,6 +109,7 @@ describe('project_memory tool', () => {
       project_id: 'memory-a',
       include_project_ids: ['memory-b'],
       query: 'localmemoryneedle',
+      query_variants: ['Shared local evidence', 'localmemoryneedle'],
       limit: 5,
     }, service);
     const after = await service.getProject('memory-a');
@@ -123,6 +124,10 @@ describe('project_memory tool', () => {
     });
     expect(rows[0].retrieval_families).toEqual(expect.arrayContaining(['bm25', 'graph']));
     expect(rows[0].content.length).toBeLessThanOrEqual(1_500);
+    expect(result.structuredContent?.meta).toMatchObject({
+      query_count: 2,
+      query_execution: 'single_broker_request',
+    });
     expect(result.structuredContent?.meta).toMatchObject({
       provider: 'local',
       project_ids: ['memory-a', 'memory-b'],
@@ -141,6 +146,7 @@ describe('project_memory tool', () => {
       project_id: 'memory-a',
       include_project_ids: ['memory-b'],
       query: 'localmemoryneedle',
+      query_variants: ['Shared local evidence', 'localmemoryneedle'],
       limit: 5,
     }, service);
     expect(alias.structuredContent?.results).toEqual(result.structuredContent?.results);

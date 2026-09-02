@@ -6,7 +6,7 @@ import {
   cosineSimilarity, DEFAULT_RESEARCH_VECTOR_MODEL, DEFAULT_RESEARCH_VECTOR_REVISION,
   LocalEmbeddingModel, type EmbeddingProvider,
 } from '../src/research/dense.js';
-import { ResearchService } from '../src/research/service.js';
+import { ResearchService, tuneLocalQueries } from '../src/research/service.js';
 
 function vector(first: number, second: number): number[] {
   return [first, second, ...new Array(382).fill(0)];
@@ -39,9 +39,14 @@ describe('vector retrieval', () => {
     });
 
     await model.embedQuery('question');
+    await model.embedQueries(['first', 'second']);
     await model.embedPassages(['evidence']);
 
-    expect(seen).toEqual([['query: question'], ['passage: evidence']]);
+    expect(seen).toEqual([
+      ['query: question'],
+      ['query: first', 'query: second'],
+      ['passage: evidence'],
+    ]);
     expect(cosineSimilarity(vector(1, 0), vector(1, 0))).toBe(1);
     expect(cosineSimilarity(vector(1, 0), vector(0, 1))).toBe(0);
   });
@@ -53,6 +58,18 @@ describe('vector retrieval', () => {
     expect(model.modelId()).toBe(
       `${DEFAULT_RESEARCH_VECTOR_MODEL}@${DEFAULT_RESEARCH_VECTOR_REVISION}`,
     );
+  });
+
+  it('adds only deterministic query variants and removes duplicates', () => {
+    expect(tuneLocalQueries(
+      'Find "Exact Model" in WarpQuant_v2',
+      ['Exact Model', 'WarpQuant_v2', 'additional evidence'],
+    )).toEqual([
+      'Find "Exact Model" in WarpQuant_v2',
+      'Exact Model',
+      'WarpQuant_v2',
+      'additional evidence',
+    ]);
   });
 
   it('runs exact, BM25, and HNSW vector retrieval as independent families', async () => {
@@ -118,6 +135,71 @@ describe('vector retrieval', () => {
 
       expect(ranked.map((row) => row.title)).toEqual(['Consensus result', 'Semantic result']);
       expect(ranked[0]).not.toHaveProperty('_rrf_score');
+    } finally {
+      await service.close();
+    }
+  });
+
+  it('batches query variants and reuses the primary query vector', async () => {
+    class CountingEmbeddings extends FakeEmbeddings {
+      queryCalls = 0;
+      queryBatches = 0;
+
+      override async embedQuery(text: string): Promise<number[]> {
+        this.queryCalls++;
+        return await super.embedQuery(text);
+      }
+
+      async embedQueries(texts: string[]): Promise<number[][]> {
+        this.queryBatches++;
+        return await Promise.all(texts.map(async (text) => await super.embedQuery(text)));
+      }
+    }
+
+    const root = mkdtempSync(join(tmpdir(), 'surf-query-batch-'));
+    roots.push(root);
+    const embeddings = new CountingEmbeddings();
+    const service = new ResearchService({
+      enabled: true,
+      root,
+      endpoint: 'mem://',
+      embeddingProvider: embeddings,
+    });
+    try {
+      await service.createProject('Query batch', 'query-batch');
+      await service.capture({
+        tool: 'extract',
+        project_id: 'query-batch',
+        payload: {
+          title: 'Batch evidence',
+          url: 'https://example.com/batch',
+          content: 'conceptual query lexicalneedle semantic target',
+          extraction_quality: 'full_text',
+        },
+      });
+      await service.waitForIdle();
+
+      const result = await service.searchBatch(
+        'query-batch',
+        'conceptual query',
+        ['lexicalneedle', 'conceptual query'],
+        10,
+      );
+
+      expect(result.queries).toEqual(['conceptual query', 'lexicalneedle']);
+      expect(result.results.map((row) => row.title)).toContain('Batch evidence');
+      expect(embeddings.queryBatches).toBe(1);
+      expect(embeddings.queryCalls).toBe(0);
+      const controller = new AbortController();
+      controller.abort();
+      await expect(service.searchBatch(
+        'query-batch',
+        'cancelled query',
+        [],
+        10,
+        [],
+        controller.signal,
+      )).rejects.toThrow('research search cancelled');
     } finally {
       await service.close();
     }

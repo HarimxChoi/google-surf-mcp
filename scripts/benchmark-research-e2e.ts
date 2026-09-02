@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -38,6 +39,9 @@ async function directoryBytes(path: string): Promise<number> {
 const roots = values('--root').map(parseRoot);
 if (!roots.length) throw new Error('at least one --root label=path is required');
 const projectId = value('--project') ?? 'e2e-benchmark';
+const queries = values('--query');
+const vectorModelValue = value('--vector-model');
+const vectorModel = vectorModelValue && vectorModelValue !== 'off' ? vectorModelValue : undefined;
 const workerRoot = value('--worker-root');
 if (!workerRoot) {
   const root = await mkdtemp(join(tmpdir(), 'surf-e2e-'));
@@ -57,11 +61,15 @@ if (!workerRoot) {
 }
 
 const root = resolve(workerRoot);
-const service = new ResearchService({ enabled: true, root });
+const service = new ResearchService({ enabled: true, root, vectorModel });
 const rssStart = process.memoryUsage().rss;
 let peakRss = rssStart;
+let queryPeakRss = 0;
+let querySampling = false;
 const sampler = setInterval(() => {
-  peakRss = Math.max(peakRss, process.memoryUsage().rss);
+  const rss = process.memoryUsage().rss;
+  peakRss = Math.max(peakRss, rss);
+  if (querySampling) queryPeakRss = Math.max(queryPeakRss, rss);
 }, 25);
 let closed = false;
 try {
@@ -74,6 +82,41 @@ try {
   const derivedReady = performance.now();
   console.error(JSON.stringify({ phase: 'derived_ready', elapsed_ms: derivedReady - started }));
   const derived = await service.rebuildDerivedState(projectId);
+  let queryBenchmark: Record<string, unknown> | undefined;
+  if (queries.length) {
+    const queryRssStart = process.memoryUsage().rss;
+    queryPeakRss = queryRssStart;
+    querySampling = true;
+    const sequentialStarted = performance.now();
+    const sequential = [];
+    for (const query of queries) sequential.push(await service.search(projectId, query, 10));
+    const sequentialMs = performance.now() - sequentialStarted;
+    const batchStarted = performance.now();
+    const batch = await service.searchBatch(projectId, queries[0], queries.slice(1), 10);
+    const batchMs = performance.now() - batchStarted;
+    querySampling = false;
+    const sequentialIds = new Set(sequential.flatMap((rows) => rows.map((row) => row.document_id)));
+    const primaryIds = new Set(sequential[0]?.map((row) => row.document_id) ?? []);
+    const batchIds = batch.results.map((row) => row.document_id);
+    queryBenchmark = {
+      queries: queries.length,
+      sequential_ms: sequentialMs,
+      batch_ms: batchMs,
+      speedup: sequentialMs / batchMs,
+      batch_timings: batch.timings,
+      sequential_result_digest: createHash('sha256').update(JSON.stringify(
+        sequential.map((rows) => rows.map((row) => row.document_id)),
+      )).digest('hex'),
+      batch_result_digest: createHash('sha256').update(JSON.stringify(
+        batch.results.map((row) => row.document_id),
+      )).digest('hex'),
+      batch_results: batch.results.length,
+      sequential_unique_results: sequentialIds.size,
+      batch_union_overlap: batchIds.filter((id) => sequentialIds.has(id)).length,
+      batch_primary_overlap: batchIds.filter((id) => primaryIds.has(id)).length,
+      peak_rss_increase_mib: (queryPeakRss - queryRssStart) / 1024 / 1024,
+    };
+  }
   const status = await service.getProject(projectId);
   clearInterval(sampler);
   const report = {
@@ -87,6 +130,7 @@ try {
     disk_mib: await directoryBytes(root) / 1024 / 1024,
     index: indexed,
     derived,
+    ...(queryBenchmark ? { query_benchmark: queryBenchmark } : {}),
     status,
   };
   const output = value('--output');

@@ -144,13 +144,13 @@ Browser search remains the default. [SearchApi](https://www.searchapi.io/?utm_so
 
 | value | behavior |
 |---|---|
-| `browser` | Default. Uses system Chrome with a dedicated logged-out profile, keeps native search windows minimized, and does not require `SEARCH_API`. |
+| `browser` | Default. Uses system Chrome with a dedicated logged-out profile, keeps native search windows hidden, and does not require `SEARCH_API`. Multiple MCP sessions share one local browser broker. |
 | `searchapi` | Uses SearchApi as the primary provider and does not initialize Chrome for that tool. |
 | `fallback` | Tries the current browser tier once, then uses SearchApi on browser errors, CAPTCHA/rate limits, profile failure, or parser degradation. It does not wait for human CAPTCHA recovery. Successful and normal empty browser responses are not repeated. |
 
 `SURF_SEARCH_PROVIDER` controls `search` and `search_parallel`. `SURF_SCHOLAR_PROVIDER` controls `scholar_search`. SearchApi modes require your own SearchApi account, key, and available credits.
 
-`SURF_BROWSER_ENGINE=auto` selects native Chrome on a local desktop and the Playwright compatibility path in cloud or remote-debug mode. Set `native` or `playwright` to pin the engine.
+`SURF_BROWSER_ENGINE=auto` selects native Chrome on a local desktop and the Playwright compatibility path in cloud or remote-debug mode. Native mode uses a normal hidden Chrome window, not headless Chrome. Set `native` or `playwright` to pin the engine.
 
 ```json
 {
@@ -182,17 +182,17 @@ Local clone variant:
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - always performs live web search. Use it only when new external information is required. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. For research, set `extract_mode` in this call instead of making separate extract calls. `limit` is 1-20. Extraction defaults to `none`; `extract_limit` is 1-10 with default 5. `response_content` defaults to `full`.
+- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - primary single-query tool for live discovery and reading. When new sources must be found and read, set `extract_mode` in this call instead of downloading PDFs, cloning repositories, or calling `extract` separately. Use `extract` only when the exact public URL is already known and no discovery is needed. With `project_id`, stored project knowledge is fused with live results, but the call never becomes local-only. `limit` is 1-20. Extraction defaults to `none`; `extract_limit` is 1-10 with default 5. `response_content` defaults to `full`.
 - `scholar_search(query, limit?)` - Google Scholar metadata search, max 10 papers. Supports browser, SearchApi primary, and fallback modes.
-- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - always performs 2-12 live web searches through a continuous four-tab queue. Query starts are staggered. Use it only for new external information and set `extract_mode` in the same call when results must be read. `limit` is 1-20 per query. The call-wide `extract_limit` defaults to 12 and allows up to 20 for abstract; full defaults to and allows 10. `response_content` defaults to `summary` to bound one-call output.
+- `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - primary multi-query tool for broad live discovery and reading through a continuous four-tab queue. Set `extract_mode` in the same call when public web pages, PDFs, papers, or GitHub repositories must be read. Use local PDF tools only for local files or visual layout work, and clone repositories only for editing, building, testing, or full Git history. `limit` is 1-20 per query. The call-wide `extract_limit` defaults to 12 and allows up to 20 for abstract; full defaults to and allows 10. `response_content` defaults to `summary` to bound one-call output.
 - Integrated search extraction reports `requested`, `applied`, `skipped`, `truncated`, and `total_chars`. `remaining_urls` can be passed to `extract` without repeating the search.
-- `extract(url, max_chars?, mode?, response_content?)` - fetch a URL.
+- `extract(url, max_chars?, mode?, response_content?)` - secondary extraction tool for an exact public URL when no new discovery is required. If sources still need to be found, use `search` or `search_parallel` with `extract_mode` instead.
   - `mode="full"` (default): reads up to 1000000 characters for research capture. Research mode stores deterministic 4000-character chunks; `response_content="full"` returns up to 50000 characters and `summary` returns a 1500-character evidence excerpt.
   - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when research mode is enabled.
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.
   - Response: content fields plus available document metadata. Failures return `{ error }`, never throw.
-- `project_memory_search(query, project_id?, include_project_ids?, all_projects?, limit?)` - searches stored local knowledge only. It combines exact, BM25, vector, and graph retrieval with RRF and a local reranker without opening a browser or calling Google or SearchApi. Use `project_id` for one project, `include_project_ids` for selected cross-project retrieval, or `all_projects=true` for every named project.
+- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - searches stored local knowledge only. Up to 19 optional variants run inside one broker request with batched query embeddings, RRF fusion, evidence-seeded graph expansion, and one final rerank against `query`. Exact identifiers and quoted phrases are added deterministically. Use this instead of repeated terminal calls. It never opens a browser or calls Google or SearchApi.
 - `project_memory(action, ...)` - manages durable project knowledge when `SURF_RESEARCH=true`.
   - `action="search"`: compatibility alias for `project_memory_search`.
   - `action="export"`: writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`.
@@ -314,6 +314,8 @@ This preserves the evidence behind claims and decisions while retaining correcte
 
 Graphology builds a typed graph projection from SurrealDB and computes PageRank, connected components, and Louvain communities. At retrieval time, related nodes seed PPR-based multi-hop search. Live web, exact, BM25, vector, and graph candidates are combined through deterministic RRF and one shared reranker.
 
+Local multi-query retrieval batches query embeddings, fuses lexical and vector candidates first, expands the graph once, hydrates selected chunks once, and reranks once. Graph-only all-project searches use a lightweight memory-node index and verified identity aliases to select at most four graph scopes instead of constructing every project graph at query time.
+
 ### Project isolation and knowledge reuse
 
 `project_id` selects where new results are stored. `include_project_ids` expands the read scope without changing the write target. Original records remain isolated by project, while verified schema and entity links allow papers, code, and experiment results to be reused across selected projects.
@@ -393,14 +395,19 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 | `SURF_RETRIEVAL_MODE` | `hybrid` | research search route: `live` or `hybrid`; used only when `SURF_RESEARCH=true` |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB data directory |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | local 384-dimensional model used by HNSW vector retrieval and final reranking. The default model revision is pinned; `off` disables the vector lane. |
+| `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | disables the ONNX CPU memory arena and memory pattern; set `false` to trade higher peak memory for faster initial indexing |
+| `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread count, clamped to 1-16 |
 | `SURF_RESEARCH_REPO_AUTO` | `true` | automatically sparse-index at most one small, relevant GitHub repository per search call |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | maximum searchable source-text size for automatic GitHub indexing; assets are excluded |
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | maximum searchable source file count for automatic GitHub indexing |
+| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | how long the shared research broker remains available after the last client disconnects |
+| `SURF_RESEARCH_READ_CONCURRENCY` | `4` | maximum concurrent broker reads; identical in-flight reads share one operation |
+| `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `30000` | embedded SurrealDB query timeout, clamped to 1-600 seconds |
 | `GITHUB_TOKEN` | unset | optional GitHub token that raises API limits for repository inspection |
 | `SURF_RESEARCH_CODE_WORKERS` | auto, max 4 | Tree-sitter worker count for initial code structure indexing |
 | `SURF_LOCALE` | `en-US` | browser locale |
 | `SURF_TZ` | system tz | e.g. `America/New_York` |
-| `SURF_HEADLESS` | `true` | Controls Playwright extraction, compatibility, and recovery paths. Native search keeps its system Chrome window minimized without changing CAPTCHA recovery windows. |
+| `SURF_HEADLESS` | `true` | Controls Playwright extraction, compatibility, and recovery paths. Native search keeps a normal system Chrome window hidden and shows it only for CAPTCHA recovery. |
 | `SURF_REMOTE_DEBUG` | `false` | set `true` on a headless server with remote DevTools. CAPTCHA path emits the DevTools port and throws instead of spawning a window; attach `chrome://inspect` from a local machine over SSH port-forward to solve. |
 | `SURF_CAPTCHA_TIMEOUT_MS` | `180000` | lifetime of the background human-recovery window. MCP calls return immediately and do not wait for this timeout. |
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
@@ -426,7 +433,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 
 ## Troubleshooting
 
-- Native search keeps the current session open and maximizes Chrome when a CAPTCHA appears. Solve it in that window and retry; the next call verifies the page, minimizes Chrome, and continues with the same session. SearchApi fallback remains available through `SURF_SEARCH_PROVIDER=fallback` and `SURF_SCHOLAR_PROVIDER=fallback`.
+- Native search keeps the current session open and shows Chrome when a CAPTCHA appears. Solve it in that window and retry; the next call verifies the page, restores the hidden window guard, and continues with the same session. SearchApi fallback remains available through `SURF_SEARCH_PROVIDER=fallback` and `SURF_SCHOLAR_PROVIDER=fallback`.
 - Playwright CAPTCHA recovery has 4 modes (picked automatically from env):
   - default (local desktop): OS notification fires, headed Chrome opens, and the call returns; solve it and retry
   - `SURF_HEADLESS=false`: headed Chrome opens without a notification; solve it and retry
@@ -435,7 +442,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 - **Headed Chrome opens to a plain search box instead of CAPTCHA**: just type any query in the box and press Enter. Subsequent calls work.
 - "Chrome not found": install Chrome or set `CHROME_PATH`.
 - Stale selectors: runtime per-strategy reorder (`SURF_SELF_HEALING`, deterministic) plus a manually dispatched repair workflow (`SURF_LLM_HEAL` optional, human review required, never auto-merged).
-- Playwright searches feel slower than expected: check `health().pool.fallback`. `true` means the worker pool is using a single context. Native search keeps one minimized Chrome process with up to four reusable tabs for `search`, `search_parallel`, and `scholar_search` until the MCP server stops. Query starts are staggered. A CAPTCHA maximizes and preserves that session for user recovery; a browser crash starts a new session on the next call.
+- Playwright searches feel slower than expected: check `health().pool.fallback`. `true` means the worker pool is using a single context. Native search uses one authenticated local browser broker across MCP sessions. The broker keeps one hidden Chrome process with up to four reusable tabs for `search`, `search_parallel`, and `scholar_search`. Query starts are staggered. A CAPTCHA shows and preserves that session for user recovery, then the window guard is restored on the next call. A browser crash starts a new session on the next call.
 - SSRF: `extract` blocks `localhost`, private IPs, AWS metadata by default. Set `SURF_ALLOW_PRIVATE=true` to allow them.
 - Cache cleanup: `npm run cache:clear` removes search/extract and downloaded vector-model caches. It does not remove the research DB.
 - The local research DB is not application-encrypted. Use OS account permissions and disk encryption such as BitLocker or FileVault when the machine or backups need at-rest protection.

@@ -18,9 +18,14 @@ describe('loadConfig', () => {
     expect(c.researchRetrievalMode).toBe('hybrid');
     expect(c.researchRoot).toContain('.google-surf-mcp');
     expect(c.researchVectorModel).toBe('Xenova/multilingual-e5-small');
+    expect(c.researchVectorLowMemory).toBe(true);
+    expect(c.researchVectorThreads).toBe(4);
     expect(c.researchRepoAuto).toBe(true);
     expect(c.researchRepoAutoMaxMb).toBe(20);
     expect(c.researchRepoAutoMaxFiles).toBe(2_000);
+    expect(c.researchBrokerIdleMs).toBe(60_000);
+    expect(c.researchReadConcurrency).toBe(4);
+    expect(c.researchQueryTimeoutMs).toBe(30_000);
     expect(c.timezone).toBeTypeOf('string');
     expect(c.timezone.length).toBeGreaterThan(0);
   });
@@ -107,6 +112,21 @@ describe('loadConfig', () => {
   it('extractOcr: default off, env opt-in', () => {
     expect(loadConfig({}).extractOcr).toBe(false);
     expect(loadConfig({ SURF_EXTRACT_OCR: 'true' }).extractOcr).toBe(true);
+  });
+
+  it('bounds research broker lifetime and read concurrency', () => {
+    expect(loadConfig({ SURF_RESEARCH_BROKER_IDLE_MS: '50' }).researchBrokerIdleMs).toBe(100);
+    expect(loadConfig({ SURF_RESEARCH_BROKER_IDLE_MS: '120000' }).researchBrokerIdleMs).toBe(120_000);
+    expect(loadConfig({ SURF_RESEARCH_READ_CONCURRENCY: '0' }).researchReadConcurrency).toBe(1);
+    expect(loadConfig({ SURF_RESEARCH_READ_CONCURRENCY: '99' }).researchReadConcurrency).toBe(16);
+    expect(loadConfig({ SURF_RESEARCH_QUERY_TIMEOUT_MS: '10' }).researchQueryTimeoutMs).toBe(1_000);
+    expect(loadConfig({ SURF_RESEARCH_QUERY_TIMEOUT_MS: '45000' }).researchQueryTimeoutMs).toBe(45_000);
+  });
+
+  it('configures local vector memory and threads', () => {
+    expect(loadConfig({ SURF_RESEARCH_VECTOR_LOW_MEMORY: 'false' }).researchVectorLowMemory).toBe(false);
+    expect(loadConfig({ SURF_RESEARCH_VECTOR_THREADS: '0' }).researchVectorThreads).toBe(1);
+    expect(loadConfig({ SURF_RESEARCH_VECTOR_THREADS: '99' }).researchVectorThreads).toBe(16);
   });
 
   it('enables local research by default and supports an explicit opt-out', () => {
