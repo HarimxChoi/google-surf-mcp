@@ -12,7 +12,11 @@ describe('repairWithLLM opt-in gate', () => {
 
   beforeEach(() => {
     delete process.env.SURF_LLM_HEAL;
+    delete process.env.SURF_LLM_PROVIDER;
+    delete process.env.SURF_LLM_MODEL;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ORCAROUTER_API_KEY;
+    delete process.env.ORCA_KEY;
   });
 
   afterEach(() => {
@@ -43,5 +47,11 @@ describe('repairWithLLM opt-in gate', () => {
     const out = await repairWithLLM({ ...input, candidates: [] });
     expect(out.selector).toBe('[data-ved] h3');
     expect(out.decision).toBe('propose_new');
+  });
+
+  it('rejects an unsupported provider only after opt-in', async () => {
+    process.env.SURF_LLM_HEAL = 'true';
+    process.env.SURF_LLM_PROVIDER = 'unknown';
+    await expect(repairWithLLM(input)).rejects.toThrow('unsupported SURF_LLM_PROVIDER');
   });
 });

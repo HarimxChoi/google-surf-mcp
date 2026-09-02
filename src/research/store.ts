@@ -2,8 +2,8 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, sep } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { RecordId, Table, type Surreal } from 'surrealdb';
-import { isTransactionConflict } from './errors.js';
+import { RecordId, Table, type Surreal, type SurrealTransaction } from 'surrealdb';
+import { isRetryableTransactionError, isTransactionConflict } from './errors.js';
 import type {
   AssertionCorrectionRecord, AssertionRecord, CodeRelationRecord, CodeSymbolRecord,
   DecisionRecord, EvidenceRecord,
@@ -243,6 +243,27 @@ export class ResearchStore {
     const db = this.db;
     this.db = undefined;
     if (db) await db.close();
+  }
+
+  private async transaction<T>(
+    db: Surreal,
+    operation: (tx: SurrealTransaction) => Promise<T>,
+  ): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const tx = await db.beginTransaction();
+      try {
+        const result = await operation(tx);
+        await tx.commit();
+        return result;
+      } catch (error) {
+        lastError = error;
+        await tx.cancel().catch(() => {});
+        if (!isRetryableTransactionError(error) || attempt === 4) throw error;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * (attempt + 1)));
+      }
+    }
+    throw lastError;
   }
 
   async getProject(projectId: string): Promise<ProjectRecord | undefined> {
@@ -496,8 +517,7 @@ export class ResearchStore {
     operation: EntityOperationRecord;
   }): Promise<EntityOperationRecord> {
     const db = await this.open();
-    const tx = await db.beginTransaction();
-    try {
+    await this.transaction(db, async (tx) => {
       for (const entity of input.entities) {
         await tx.upsert(new RecordId('entity', entity.entity_id))
           .content(entity as unknown as Record<string, unknown>);
@@ -512,12 +532,8 @@ export class ResearchStore {
       }
       await tx.create(new RecordId('entity_operation', input.operation.operation_id))
         .content(input.operation as unknown as Record<string, unknown>);
-      await tx.commit();
-      return input.operation;
-    } catch (error) {
-      await tx.cancel();
-      throw error;
-    }
+    });
+    return input.operation;
   }
 
   async entityCounts(projectId: string): Promise<{ entities: number; operations: number }> {
@@ -894,8 +910,7 @@ export class ResearchStore {
       created_at: new Date().toISOString(),
     });
     const activatedAt = new Date().toISOString();
-    const tx = await db.beginTransaction();
-    try {
+    await this.transaction(db, async (tx) => {
       await tx.update(projectionId).merge({
         status: 'active',
         activated_at: activatedAt,
@@ -910,11 +925,7 @@ export class ResearchStore {
           active_graph_dirty_at: projection.source_versions[projectId],
         });
       }
-      await tx.commit();
-    } catch (error) {
-      await tx.cancel();
-      throw error;
-    }
+    });
     await this.replaceGraphSearchNodes(db, projection);
     await this.reconcileGraphProjectionStatuses(db);
     await this.pruneGraphProjections(db);
@@ -1435,8 +1446,7 @@ export class ResearchStore {
       active_source_snapshot_id: input.snapshot.snapshot_id,
       updated_at: activatedAt,
     };
-    const tx = await db.beginTransaction();
-    try {
+    await this.transaction(db, async (tx) => {
       for (let index = 0; index < added.length; index += 200) {
         const batch = added.slice(index, index + 200).map((entry) => ({
           id: new RecordId('project_source_entry', `${input.project.project_id}_${entry.entry_id}`),
@@ -1485,11 +1495,7 @@ export class ResearchStore {
       }
       await tx.update(snapshotId).merge({ status: 'active', activated_at: activatedAt });
       await tx.upsert(new RecordId('project', input.project.project_id)).content(project);
-      await tx.commit();
-    } catch (error) {
-      await tx.cancel();
-      throw error;
-    }
+    });
     return { reused: false, added: added.length, modified: modified.length, removed: removed.length };
   }
 

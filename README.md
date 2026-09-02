@@ -66,6 +66,10 @@ Browser search needs no API key. SearchApi can be configured as an optional prim
 - CAPTCHA detection and environment-specific recovery
 - Parser self-healing and context fallback
 
+## Supported AI providers and gateways
+
+- [OrcaRouter](https://www.orcarouter.ai/ref/ref_7fd137d6c7b30793af2f) (free models available)
+
 ## Numbers
 
 | | result |
@@ -428,8 +432,21 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 | `SURF_TELEMETRY_ROOT` | `<profile>/telemetry` | directory for jsonl telemetry files. UTC-dated one file per day (`YYYY-MM-DD.jsonl`). |
 | `SURF_SELF_HEALING` | `true` | per-strategy outcome tracking + persisted reordering. Healing must win by 3 outcomes before reorder kicks in, so single-call flapping is impossible. Set `false` to pin the default strategy order. |
 | `SURF_SELF_HEALING_FILE` | `<profile>/.heal/strategy-order.json` | persistence path for healing state. Atomic tmp+rename writes; debounced 5s. |
-| `SURF_LLM_HEAL` | `false` | opt-in for LLM-assisted selector repair in the workflow-only `repairWithLLM` helper. Off by default → no third-party LLM request ever fires. When `true`, requires `ANTHROPIC_API_KEY` (your own); the package never ships a maintainer key. |
-| `ANTHROPIC_API_KEY` | unset | your Anthropic key. Read only when `SURF_LLM_HEAL=true`. The runtime self-healing in `SURF_SELF_HEALING` is deterministic and never reads this variable. |
+| `SURF_LLM_HEAL` | `false` | opt-in for LLM-assisted selector repair in the workflow-only `repairWithLLM` helper. Off by default, so no third-party LLM request fires. |
+| `SURF_LLM_PROVIDER` | `anthropic` | LLM repair provider: `anthropic` or `orcarouter`. |
+| `SURF_LLM_MODEL` | provider default | model for LLM-assisted repair. Defaults to `claude-sonnet-4-6` for Anthropic and `orcarouter/auto` for OrcaRouter. |
+| `ANTHROPIC_API_KEY` | unset | Anthropic key used only when LLM repair is enabled with the Anthropic provider. |
+| `ORCAROUTER_API_KEY` | unset | OrcaRouter key used only when LLM repair is enabled with the OrcaRouter provider. |
+| `ORCA_KEY` | unset | Alias for `ORCAROUTER_API_KEY`. |
+
+### OrcaRouter
+
+```env
+SURF_LLM_HEAL=true
+SURF_LLM_PROVIDER=orcarouter
+ORCAROUTER_API_KEY=...
+SURF_LLM_MODEL=orcarouter/auto
+```
 
 ## Troubleshooting
 

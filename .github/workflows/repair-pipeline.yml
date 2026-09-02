@@ -15,7 +15,10 @@ jobs:
       issues: write
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ORCAROUTER_API_KEY: ${{ secrets.ORCAROUTER_API_KEY }}
       SURF_LLM_HEAL: 'true'
+      SURF_LLM_PROVIDER: ${{ vars.SURF_LLM_PROVIDER || 'anthropic' }}
+      SURF_LLM_MODEL: ${{ vars.SURF_LLM_MODEL }}
 
     steps:
       - uses: actions/checkout@v4

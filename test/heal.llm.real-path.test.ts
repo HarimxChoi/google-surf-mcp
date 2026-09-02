@@ -22,7 +22,11 @@ describe('repairWithLLM real-path (SDK mocked, tool_use forced)', () => {
 
   beforeEach(() => {
     delete process.env.SURF_LLM_HEAL;
+    delete process.env.SURF_LLM_PROVIDER;
+    delete process.env.SURF_LLM_MODEL;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ORCAROUTER_API_KEY;
+    delete process.env.ORCA_KEY;
     messagesCreate.mockReset();
   });
 

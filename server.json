@@ -6,12 +6,12 @@
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "1.0.3",
+  "version": "1.0.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "transport": {
         "type": "stdio"
       },
@@ -160,6 +160,38 @@
           "name": "SURF_ALLOW_PRIVATE",
           "description": "Set to 'true' to allow extract on private/loopback addresses (localhost, 10.x, 192.168.x, 169.254.x, etc). Default blocks them as an SSRF guard.",
           "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_LLM_HEAL",
+          "description": "Enable the optional workflow-only LLM selector repair path. Defaults to false.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_LLM_PROVIDER",
+          "description": "LLM selector repair provider: anthropic or orcarouter. Defaults to anthropic.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SURF_LLM_MODEL",
+          "description": "Optional model override. OrcaRouter defaults to orcarouter/auto.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Anthropic API key for optional LLM-assisted selector repair.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "ORCAROUTER_API_KEY",
+          "description": "OrcaRouter API key for optional LLM-assisted selector repair.",
+          "isRequired": false,
+          "isSecret": true,
           "format": "string"
         }
       ]

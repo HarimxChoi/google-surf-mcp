@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Research mode is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
   "author": {
@@ -40,7 +40,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@1.0.3"
+        "google-surf-mcp@1.0.4"
       ],
       "env": {
         "SEARCH_API": "${user_config.search_api_key}",
@@ -69,7 +69,12 @@
         "SURF_CLOUD_MODE": "${user_config.cloud_mode}",
         "SURF_ALLOW_PRIVATE": "${user_config.allow_private}",
         "SURF_TELEMETRY": "${user_config.telemetry}",
-        "SURF_TELEMETRY_ROOT": "${user_config.telemetry_root}"
+        "SURF_TELEMETRY_ROOT": "${user_config.telemetry_root}",
+        "SURF_LLM_HEAL": "${user_config.llm_heal}",
+        "SURF_LLM_PROVIDER": "${user_config.llm_provider}",
+        "SURF_LLM_MODEL": "${user_config.llm_model}",
+        "ANTHROPIC_API_KEY": "${user_config.anthropic_api_key}",
+        "ORCAROUTER_API_KEY": "${user_config.orcarouter_api_key}"
       }
     }
   },
@@ -287,6 +292,40 @@
       "type": "directory",
       "title": "Telemetry directory",
       "description": "Directory for jsonl telemetry files. UTC-dated one file per day (YYYY-MM-DD.jsonl). Defaults to <profileRoot>/telemetry.",
+      "required": false
+    },
+    "llm_heal": {
+      "type": "boolean",
+      "title": "LLM-assisted repair",
+      "description": "Enable the optional workflow-only LLM selector repair path.",
+      "default": false,
+      "required": false
+    },
+    "llm_provider": {
+      "type": "string",
+      "title": "LLM repair provider",
+      "description": "anthropic or orcarouter.",
+      "default": "anthropic",
+      "required": false
+    },
+    "llm_model": {
+      "type": "string",
+      "title": "LLM repair model",
+      "description": "Optional model override. OrcaRouter defaults to orcarouter/auto.",
+      "required": false
+    },
+    "anthropic_api_key": {
+      "type": "string",
+      "title": "Anthropic API key",
+      "description": "Used only by the optional Anthropic repair provider.",
+      "sensitive": true,
+      "required": false
+    },
+    "orcarouter_api_key": {
+      "type": "string",
+      "title": "OrcaRouter API key",
+      "description": "Used only by the optional OrcaRouter repair provider.",
+      "sensitive": true,
       "required": false
     }
   },

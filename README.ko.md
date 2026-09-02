@@ -64,6 +64,10 @@ Research 모드와 자동 저장은 기본으로 활성화됩니다. 검색과 �
 - CAPTCHA 감지와 환경별 복구
 - Parser self-healing과 context fallback
 
+## Supported AI providers and gateways
+
+- [OrcaRouter](https://www.orcarouter.ai/ref/ref_7fd137d6c7b30793af2f) (free models available)
+
 ## Numbers
 
 | | 결과 |
@@ -398,8 +402,21 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 | `SURF_TELEMETRY_ROOT` | `<profile>/telemetry` | jsonl 파일 디렉토리. UTC 기준 날짜별 파일 1개 (`YYYY-MM-DD.jsonl`). |
 | `SURF_SELF_HEALING` | `true` | strategy별 성공/실패 추적 + 영속 재배열. leader가 runner-up보다 3승 차이 이상일 때만 재배열 발동. `false`로 끄면 기본 strategy 순서 고정 |
 | `SURF_SELF_HEALING_FILE` | `<profile>/.heal/strategy-order.json` | self-healing 상태 영속 경로. atomic tmp+rename 쓰기, 5초 디바운스 |
-| `SURF_LLM_HEAL` | `false` | workflow 전용 `repairWithLLM`의 LLM 호출 opt-in. 기본 OFF → 외부 LLM 요청 절대 안 나감. `true`로 켜면 `ANTHROPIC_API_KEY` (본인 키) 필요. 패키지는 유지보수자 키를 절대 포함하지 않음 |
-| `ANTHROPIC_API_KEY` | 미설정 | 본인 Anthropic 키. `SURF_LLM_HEAL=true`일 때만 읽음. 런타임 self-healing (`SURF_SELF_HEALING`)은 deterministic이라 이 변수 안 읽음 |
+| `SURF_LLM_HEAL` | `false` | workflow 전용 `repairWithLLM`의 LLM 호출 opt-in. 기본값에서는 외부 LLM을 호출하지 않음 |
+| `SURF_LLM_PROVIDER` | `anthropic` | LLM repair provider: `anthropic`, `orcarouter` |
+| `SURF_LLM_MODEL` | provider 기본값 | LLM repair 모델. Anthropic은 `claude-sonnet-4-6`, OrcaRouter는 `orcarouter/auto`가 기본값 |
+| `ANTHROPIC_API_KEY` | 미설정 | Anthropic provider를 선택했을 때만 사용하는 본인 API 키 |
+| `ORCAROUTER_API_KEY` | 미설정 | OrcaRouter provider를 선택했을 때만 사용하는 본인 API 키 |
+| `ORCA_KEY` | 미설정 | `ORCAROUTER_API_KEY` 별칭 |
+
+### OrcaRouter
+
+```env
+SURF_LLM_HEAL=true
+SURF_LLM_PROVIDER=orcarouter
+ORCAROUTER_API_KEY=...
+SURF_LLM_MODEL=orcarouter/auto
+```
 
 ## Troubleshooting
 
