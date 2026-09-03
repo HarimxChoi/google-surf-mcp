@@ -169,6 +169,7 @@ function localFamilies(local: LocalInput): LocalSearchFamilies {
     bm25: local.filter((row) => !row.retrieval_family || row.retrieval_family === 'bm25'),
     vector: local.filter((row) => row.retrieval_family === 'vector'),
     graph: local.filter((row) => row.retrieval_family === 'graph'),
+    degraded_lanes: [],
   };
 }
 

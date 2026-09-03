@@ -13,6 +13,10 @@ import {
   type ResearchBrokerConfig,
 } from './broker.js';
 import { ResearchService } from './service.js';
+import {
+  MAX_RESEARCH_QUERY_TIMEOUT_MS,
+  MIN_RESEARCH_QUERY_TIMEOUT_MS,
+} from './limits.js';
 
 interface BrokerRequest {
   protocol: number;
@@ -92,7 +96,10 @@ function parseConfig(): ResearchBrokerConfig {
     root: resolve(value.root),
     idleMs: Math.max(100, value.idleMs),
     readConcurrency: Math.min(16, Math.max(1, Math.floor(value.readConcurrency))),
-    queryTimeoutMs: Math.min(10 * 60_000, Math.max(1_000, Math.floor(value.queryTimeoutMs))),
+    queryTimeoutMs: Math.min(
+      MAX_RESEARCH_QUERY_TIMEOUT_MS,
+      Math.max(MIN_RESEARCH_QUERY_TIMEOUT_MS, Math.floor(value.queryTimeoutMs)),
+    ),
   };
 }
 

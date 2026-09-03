@@ -15,6 +15,7 @@ import type {
   ProjectSourceEntryRecord, ProjectSourceSnapshot,
   RetrievalIndexItem, SearchEventRecord,
 } from './contracts.js';
+import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
 
 const SCHEMA = `
 DEFINE TABLE IF NOT EXISTS project SCHEMALESS;
@@ -184,7 +185,7 @@ export class ResearchStore {
   constructor(
     private readonly root: string,
     private readonly endpoint = rocksDbEndpoint(resolve(root, 'surreal', 'rocksdb')),
-    private readonly queryTimeoutMs = 30_000,
+    private readonly queryTimeoutMs = DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,
   ) {}
 
   async open(): Promise<Surreal> {

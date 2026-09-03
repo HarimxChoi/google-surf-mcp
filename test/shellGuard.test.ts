@@ -57,21 +57,26 @@ describe('Codex shell guard', () => {
     expect(await guardShellInput(input(`${second} perplexity terminal_result final`), { state_root: root })).toBeUndefined();
   });
 
-  it('enforces the per-turn command budget', async () => {
+  it('allows distinct commands throughout a long turn', async () => {
     const root = stateRoot();
-    for (let index = 0; index < 12; index++) {
+    for (let index = 0; index < 30; index++) {
       expect(await guardShellInput(input(`Write-Output value-${index}`), { state_root: root })).toBeUndefined();
     }
-    expect(await guardShellInput(input('Write-Output overflow'), { state_root: root })).toContain('12 commands');
   });
 
-  it('enforces the smaller per-turn remote command budget', async () => {
+  it('allows distinct remote inspections throughout a long turn', async () => {
     const root = stateRoot();
-    for (let index = 0; index < 6; index++) {
+    for (let index = 0; index < 20; index++) {
       expect(await guardShellInput(input(`ssh host-${index} status`), { state_root: root })).toBeUndefined();
     }
-    expect(await guardShellInput(input('ssh host-overflow status'), { state_root: root }))
-      .toContain('6 commands');
+  });
+
+  it('allows repeated status checks that are not content searches', async () => {
+    const root = stateRoot();
+    for (let index = 0; index < 10; index++) {
+      expect(await guardShellInput(input('ssh training-host test -f full.done'), { state_root: root }))
+        .toBeUndefined();
+    }
   });
 
   it('blocks explicit foreground polling loops', () => {

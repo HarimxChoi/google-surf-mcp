@@ -130,9 +130,11 @@ export async function projectMemorySearchTool(
         query_variants: searched.queries.slice(1),
         query_execution: 'single_broker_request',
         graph_project_count: searched.graph_project_count,
+        degraded_lanes: searched.degraded_lanes,
+        partial: searched.degraded_lanes.length > 0,
         timings: searched.timings,
       },
-      memory: `Projects: ${scope.length} | Queries: ${searched.queries.length} | Local RAG: ${results.length} results | Live web: no | Status: ready`,
+      memory: `Projects: ${scope.length} | Queries: ${searched.queries.length} | Local RAG: ${results.length} results | Live web: no | Status: ${searched.degraded_lanes.length ? `partial (${searched.degraded_lanes.join(', ')})` : 'ready'}`,
     });
   } catch (error) {
     return toolError(error);

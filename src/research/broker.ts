@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ResearchService, type ResearchServiceOptions } from './service.js';
+import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
 
 export const RESEARCH_BROKER_PROTOCOL = 1;
 export const RESEARCH_BROKER_METHODS = new Set([
@@ -416,7 +417,7 @@ export function createSharedResearchService(
     repositoryAuto: options.repositoryAuto,
     repositoryMaxSourceBytes: options.repositoryMaxSourceBytes,
     repositoryMaxSourceFiles: options.repositoryMaxSourceFiles,
-    queryTimeoutMs: options.queryTimeoutMs ?? 30_000,
+    queryTimeoutMs: options.queryTimeoutMs ?? DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,
     idleMs: clientOptions.idleMs ?? 60_000,
     readConcurrency: clientOptions.readConcurrency ?? 4,
   });

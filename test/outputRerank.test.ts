@@ -22,6 +22,9 @@ describe('stateless output reranking', () => {
     expect(result.returned_blocks).toBeLessThanOrEqual(4);
     expect(result.returned_chars).toBeLessThanOrEqual(1_000);
     expect(result.results[0].text).toContain('complete');
+    const rendered = formatRerankedOutput(result);
+    expect(rendered).toContain('[previous line repeated 99 more times]');
+    expect(rendered.match(/still running/g)).toHaveLength(1);
   });
 
   it('redacts credentials from selected output', () => {

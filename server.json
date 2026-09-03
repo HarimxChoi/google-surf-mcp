@@ -6,12 +6,12 @@
     "url": "https://github.com/HarimxChoi/google-surf-mcp",
     "source": "github"
   },
-  "version": "1.0.8",
+  "version": "1.0.9",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "google-surf-mcp",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "transport": {
         "type": "stdio"
       },
@@ -121,7 +121,7 @@
         },
         {
           "name": "SURF_RESEARCH_QUERY_TIMEOUT_MS",
-          "description": "Embedded SurrealDB query timeout in milliseconds. Defaults to 30000.",
+          "description": "Timeout per embedded SurrealDB query in milliseconds. Defaults to 120000; timed-out retrieval lanes are reported as partial.",
           "isRequired": false,
           "format": "string"
         },

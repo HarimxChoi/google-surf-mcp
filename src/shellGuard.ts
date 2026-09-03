@@ -17,8 +17,6 @@ type SearchGroup = {
 };
 
 type GuardState = {
-  count: number;
-  remote_count: number;
   commands: Record<string, number>;
   search_groups: SearchGroup[];
   updated_at: number;
@@ -26,8 +24,6 @@ type GuardState = {
 
 export type ShellGuardOptions = {
   state_root?: string;
-  max_commands?: number;
-  max_remote_commands?: number;
   max_duplicates?: number;
   similarity?: number;
   fingerprint_salt?: string;
@@ -69,10 +65,6 @@ export function isSearchCommand(command: string): boolean {
     || /\bSelect-String\b/i.test(command)
     || /\bgit\s+(?:grep|log|show|diff)\b/i.test(command)
     || (/\bGet-ChildItem\b/i.test(command) && /\b(?:Where-Object|Select-String|-Recurse)\b/i.test(command));
-}
-
-export function isRemoteCommand(command: string): boolean {
-  return /(?:^|[;&|]\s*|\s)(?:ssh|scp|sftp)(?:\.exe)?\b/i.test(command);
 }
 
 export function isForegroundPolling(command: string): boolean {
@@ -145,7 +137,7 @@ async function atomicJson(path: string, value: GuardState): Promise<void> {
 }
 
 function defaultState(): GuardState {
-  return { count: 0, remote_count: 0, commands: {}, search_groups: [], updated_at: 0 };
+  return { commands: {}, search_groups: [], updated_at: 0 };
 }
 
 export async function guardShellInput(
@@ -159,10 +151,6 @@ export async function guardShellInput(
     return 'Long-running foreground polling is blocked. Use a host-managed background job and inspect one bounded final result.';
   }
 
-  const maxCommands = options.max_commands
-    ?? positiveInteger(process.env.SURF_HOST_MAX_COMMANDS, 12);
-  const maxRemoteCommands = options.max_remote_commands
-    ?? positiveInteger(process.env.SURF_HOST_MAX_REMOTE_COMMANDS, 6);
   const maxDuplicates = options.max_duplicates
     ?? positiveInteger(process.env.SURF_HOST_MAX_DUPLICATES, 2);
   const similarity = options.similarity
@@ -183,20 +171,14 @@ export async function guardShellInput(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    const remote = isRemoteCommand(command);
+    const searchCommand = isSearchCommand(command);
     const exactKey = commandKey(command, fingerprintSalt);
     const duplicateCount = Number(state.commands[exactKey] ?? 0);
-    if (state.count >= maxCommands) {
-      return `Shell budget reached ${maxCommands} commands in this turn. Reuse existing results or continue in a later user turn.`;
-    }
-    if (remote && state.remote_count >= maxRemoteCommands) {
-      return `Remote shell budget reached ${maxRemoteCommands} commands in this turn. Combine the remaining inspection into one bounded command.`;
-    }
-    if (duplicateCount >= maxDuplicates) {
+    if (searchCommand && duplicateCount >= maxDuplicates) {
       return `The same shell command already ran ${maxDuplicates} times in this turn. Reuse its result or change the retrieval strategy.`;
     }
 
-    const tokens = isSearchCommand(command) ? searchTerms(command) : [];
+    const tokens = searchCommand ? searchTerms(command) : [];
     const signature = minHashSignature(tokens, 16, fingerprintSalt);
     let matchedGroup: SearchGroup | undefined;
     if (signature.length) {
@@ -210,9 +192,7 @@ export async function guardShellInput(
       if (materiallyRefined) matchedGroup = undefined;
     }
 
-    state.count += 1;
-    state.remote_count += remote ? 1 : 0;
-    state.commands[exactKey] = duplicateCount + 1;
+    if (searchCommand) state.commands[exactKey] = duplicateCount + 1;
     if (signature.length) {
       if (matchedGroup) {
         matchedGroup.count += 1;

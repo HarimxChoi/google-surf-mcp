@@ -25,7 +25,7 @@ describe('loadConfig', () => {
     expect(c.researchRepoAutoMaxFiles).toBe(2_000);
     expect(c.researchBrokerIdleMs).toBe(60_000);
     expect(c.researchReadConcurrency).toBe(4);
-    expect(c.researchQueryTimeoutMs).toBe(30_000);
+    expect(c.researchQueryTimeoutMs).toBe(120_000);
     expect(c.timezone).toBeTypeOf('string');
     expect(c.timezone.length).toBeGreaterThan(0);
   });

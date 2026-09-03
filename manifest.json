@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "google-surf-mcp",
   "display_name": "Google Surf",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Research mode is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
   "author": {
@@ -40,7 +40,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "google-surf-mcp@1.0.8"
+        "google-surf-mcp@1.0.9"
       ],
       "env": {
         "SEARCH_API": "${user_config.search_api_key}",

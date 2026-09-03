@@ -138,7 +138,7 @@ Google Surf는 큰 Bash 출력이 모델에 도달하기 전에 재랭킹하는 
 npx -y google-surf-mcp@latest hooks install --host codex
 ```
 
-Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. 기본값은 재랭킹 결과 6,000자, 턴당 Shell 출력 12,000자와 신규 Bash 호출 12회, 동일하거나 유사한 검색 2회입니다. 명시적인 foreground polling loop도 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
+Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. Shell 출력은 결과별로 6,000자를 넘으면 재랭킹해 제한하며, 턴 전체의 명령 수나 출력량에는 누적 제한을 두지 않습니다. 동일하거나 유사한 검색 2회와 명시적인 foreground polling loop는 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -403,7 +403,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | 자동 GitHub 색인의 검색 가능한 소스 파일 수 상한 |
 | `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | 마지막 client 연결이 끝난 뒤 shared research broker를 유지하는 시간 |
 | `SURF_RESEARCH_READ_CONCURRENCY` | `4` | broker 동시 조회 상한. 동일한 진행 중 조회는 하나의 연산을 공유 |
-| `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `30000` | embedded SurrealDB query timeout. 1-600초 범위 |
+| `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | embedded SurrealDB 쿼리별 timeout. 1-600초 범위이며 한 검색 lane이 timeout이면 partial로 표시하고 나머지 결과는 반환 |
 | `GITHUB_TOKEN` | 미설정 | 저장소 확인을 위한 GitHub API 한도를 높이는 선택 token |
 | `SURF_RESEARCH_CODE_WORKERS` | 자동, 최대 4 | 최초 코드 구조 색인에 사용하는 Tree-sitter worker 수 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |

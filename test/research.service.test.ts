@@ -708,6 +708,41 @@ describe('research project memory', () => {
     })).rejects.toThrow('invalid job transition');
   });
 
+  it('returns partial search results when one retrieval lane times out', async () => {
+    await service.createProject('Timeout fallback', 'timeout-fallback');
+    await service.capture({
+      tool: 'extract',
+      project_id: 'timeout-fallback',
+      payload: {
+        title: 'QWEN-HIST-SUCCESS',
+        url: 'https://example.com/qwen-history',
+        content: 'Historical Qwen integer assignment evidence.',
+        extraction_quality: 'full_text',
+      },
+    });
+    const store = Reflect.get(service, 'store') as {
+      searchProjectBm25: typeof service.search;
+    };
+    const original = store.searchProjectBm25;
+    store.searchProjectBm25 = async () => {
+      throw new Error('The query was not executed because it exceeded the timeout: 30s');
+    };
+
+    try {
+      const result = await service.searchBatch(
+        'timeout-fallback',
+        'QWEN-HIST-SUCCESS',
+        [],
+        10,
+      );
+
+      expect(result.degraded_lanes).toContain('bm25');
+      expect(result.results.some((row) => row.title === 'QWEN-HIST-SUCCESS')).toBe(true);
+    } finally {
+      store.searchProjectBm25 = original;
+    }
+  });
+
   it('links aliases and preserves merge and split operations', async () => {
     await service.createProject('Entity history', 'entity-history');
     const target = await service.recordEntity({

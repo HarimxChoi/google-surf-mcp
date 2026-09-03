@@ -329,6 +329,27 @@ async function mapConcurrent<T, R>(
   return output;
 }
 
+type RetrievalLane = NonNullable<LocalSearchHit['retrieval_family']>;
+
+function isResearchQueryTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:query|transaction).*?(?:exceeded the timeout|timed out|timeout)/i.test(message);
+}
+
+async function runRetrievalLane<T>(
+  lane: RetrievalLane,
+  degradedLanes: Set<RetrievalLane>,
+  operation: () => Promise<T[]>,
+): Promise<T[]> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isResearchQueryTimeout(error)) throw error;
+    degradedLanes.add(lane);
+    return [];
+  }
+}
+
 function fuseRankedGroups(
   groups: LocalSearchHit[][],
   limit: number,
@@ -2684,19 +2705,26 @@ export class ResearchService {
     signal?: AbortSignal,
   ): Promise<LocalSearchFamilies> {
     ensureNotAborted(signal);
+    const degradedLanes = new Set<RetrievalLane>();
     const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
     const projects = await Promise.all(projectIds.map((projectId) => this.ensureProject(projectId)));
     const cleanedQuery = cleanText(query, 'query', 400);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const [exactGroups, bm25Groups, queryVector] = await Promise.all([
-      Promise.all(projects.map((project) => this.store.searchProjectExact(
-        project.project_id,
-        normalizeEntityName(cleanedQuery),
-        cappedLimit,
-      ))),
-      Promise.all(projects.map((project) => (
-        this.store.searchProjectBm25(project.project_id, cleanedQuery, cappedLimit)
-      ))),
+      mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
+        'exact',
+        degradedLanes,
+        async () => await this.store.searchProjectExact(
+          project.project_id,
+          normalizeEntityName(cleanedQuery),
+          cappedLimit,
+        ),
+      )),
+      mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
+        'bm25',
+        degradedLanes,
+        async () => await this.store.searchProjectBm25(project.project_id, cleanedQuery, cappedLimit),
+      )),
       preparedQueryVector
         ? Promise.resolve(preparedQueryVector)
         : this.embeddings.enabled()
@@ -2705,12 +2733,19 @@ export class ResearchService {
     ]);
     const model = this.embeddings.modelId();
     const vectorGroups = queryVector && model
-      ? await Promise.all(projects.map((project) => this.store.searchProjectVector(
-        project.project_id,
-        model,
-        queryVector,
-        cappedLimit,
-      ).catch(() => [])))
+      ? await mapConcurrent(projects, 1, async (project) => {
+        try {
+          return await this.store.searchProjectVector(
+            project.project_id,
+            model,
+            queryVector,
+            cappedLimit,
+          );
+        } catch {
+          degradedLanes.add('vector');
+          return [];
+        }
+      })
       : [];
     ensureNotAborted(signal);
     const seedGroups = projects.map((_project, index) => fuseRankedGroups([
@@ -2719,21 +2754,33 @@ export class ResearchService {
       vectorGroups[index] ?? [],
     ], cappedLimit));
     const graphGroups = !includeGraph ? [] : projects.length > 1
-      ? [await this.searchCombinedGraph(
-        projects,
-        cleanedQuery,
-        cappedLimit,
-        seedGroups.flat(),
+      ? [await runRetrievalLane(
+        'graph',
+        degradedLanes,
+        async () => await this.searchCombinedGraph(
+          projects,
+          cleanedQuery,
+          cappedLimit,
+          seedGroups.flat(),
+        ),
       )]
-      : await Promise.all(projects.map((project, index) => (
-        this.searchMaterializedGraph(project, cleanedQuery, cappedLimit, seedGroups[index])
-      )));
+      : await mapConcurrent(projects, 1, async (project, index) => await runRetrievalLane(
+        'graph',
+        degradedLanes,
+        async () => await this.searchMaterializedGraph(
+          project,
+          cleanedQuery,
+          cappedLimit,
+          seedGroups[index],
+        ),
+      ));
     ensureNotAborted(signal);
     return {
       exact: fuseRankedGroups(exactGroups, cappedLimit, 'exact'),
       bm25: fuseRankedGroups(bm25Groups, cappedLimit, 'bm25'),
       vector: fuseRankedGroups(vectorGroups, cappedLimit, 'vector'),
       graph: fuseRankedGroups(graphGroups, cappedLimit, 'graph'),
+      degraded_lanes: [...degradedLanes].sort(),
     };
   }
 
@@ -2765,10 +2812,12 @@ export class ResearchService {
     queries: string[];
     results: LocalSearchHit[];
     graph_project_count: number;
+    degraded_lanes: RetrievalLane[];
     timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
   }> {
     const started = performance.now();
     ensureNotAborted(signal);
+    const degradedLanes = new Set<RetrievalLane>();
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const candidateLimit = Math.min(40, cappedLimit * 3);
     const queries = tuneLocalQueries(query, queryVariants);
@@ -2783,7 +2832,7 @@ export class ResearchService {
     }
     ensureNotAborted(signal);
     const embedded = performance.now();
-    const queryGroups = await mapConcurrent(queries, 4, async (value, index) => {
+    const queryGroups = await mapConcurrent(queries, 2, async (value, index) => {
       const families = await this.searchFamilies(
         projectIdValue,
         value,
@@ -2793,36 +2842,49 @@ export class ResearchService {
         false,
         signal,
       );
-      return fuseRankedGroups(Object.values(families), candidateLimit);
+      for (const lane of families.degraded_lanes) degradedLanes.add(lane);
+      return fuseRankedGroups([
+        families.exact,
+        families.bm25,
+        families.vector,
+        families.graph,
+      ], candidateLimit);
     });
     const baseFused = fuseRankedGroups(queryGroups, candidateLimit);
     ensureNotAborted(signal);
     const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
-    const seededProjects = new Set(baseFused.flatMap((row) => row.project_ids));
-    if (!seededProjects.size) {
-      await this.store.ensureGraphSearchIndexes(projectIds);
-      const graphSeeds = await this.store.searchGraphSeeds(projectIds, queries, candidateLimit);
-      for (const seed of graphSeeds) {
-        seededProjects.add(seed.project_id);
-        if (seededProjects.size >= 4) break;
-      }
+    let projects: ProjectRecord[] = [];
+    let graph: LocalSearchHit[] = [];
+    try {
+      const seededProjects = new Set(baseFused.flatMap((row) => row.project_ids));
       if (!seededProjects.size) {
-        for (const projectId of await this.store.searchMemorySeedProjects(projectIds, queries, 4)) {
-          seededProjects.add(projectId);
+        await this.store.ensureGraphSearchIndexes(projectIds);
+        const graphSeeds = await this.store.searchGraphSeeds(projectIds, queries, candidateLimit);
+        for (const seed of graphSeeds) {
+          seededProjects.add(seed.project_id);
+          if (seededProjects.size >= 4) break;
+        }
+        if (!seededProjects.size) {
+          for (const projectId of await this.store.searchMemorySeedProjects(projectIds, queries, 4)) {
+            seededProjects.add(projectId);
+          }
         }
       }
+      const selectedProjects = projectIds.filter((projectId) => seededProjects.has(projectId)).slice(0, 4);
+      const linkedProjects = await this.store.linkedProjectIds(
+        selectedProjects,
+        projectIds,
+        Math.max(0, 4 - selectedProjects.length),
+      );
+      const graphProjectIds = [...selectedProjects, ...linkedProjects].slice(0, 4);
+      projects = await Promise.all(graphProjectIds.map((projectId) => this.ensureProject(projectId)));
+      graph = !projects.length ? [] : projects.length > 1
+        ? await this.searchCombinedGraph(projects, query, candidateLimit, baseFused)
+        : await this.searchMaterializedGraph(projects[0], query, candidateLimit, baseFused);
+    } catch (error) {
+      if (!isResearchQueryTimeout(error)) throw error;
+      degradedLanes.add('graph');
     }
-    const selectedProjects = projectIds.filter((projectId) => seededProjects.has(projectId)).slice(0, 4);
-    const linkedProjects = await this.store.linkedProjectIds(
-      selectedProjects,
-      projectIds,
-      Math.max(0, 4 - selectedProjects.length),
-    );
-    const graphProjectIds = [...selectedProjects, ...linkedProjects].slice(0, 4);
-    const projects = await Promise.all(graphProjectIds.map((projectId) => this.ensureProject(projectId)));
-    const graph = !projects.length ? [] : projects.length > 1
-      ? await this.searchCombinedGraph(projects, query, candidateLimit, baseFused)
-      : await this.searchMaterializedGraph(projects[0], query, candidateLimit, baseFused);
     ensureNotAborted(signal);
     const baseKeys = new Set(baseFused.map((row) => row.url || row.document_id));
     const graphCandidates = !this.embeddings.enabled() && baseKeys.size
@@ -2836,6 +2898,7 @@ export class ResearchService {
       queries,
       results,
       graph_project_count: projects.length,
+      degraded_lanes: [...degradedLanes].sort(),
       timings: {
         embedding_ms: embedded - started,
         retrieval_ms: retrieved - embedded,
@@ -2960,7 +3023,12 @@ export class ResearchService {
     includeProjectIds: string[] = [],
   ): Promise<LocalSearchHit[]> {
     const families = await this.searchFamilies(projectIdValue, query, limit, includeProjectIds);
-    return fuseRankedGroups(Object.values(families), Math.min(Math.max(limit, 1), 20));
+    return fuseRankedGroups([
+      families.exact,
+      families.bm25,
+      families.vector,
+      families.graph,
+    ], Math.min(Math.max(limit, 1), 20));
   }
 
   async searchLexicalBaseline(

@@ -2,6 +2,11 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { cascadeStatePath } from './cascadeStore.js';
 import { DEFAULT_RESEARCH_VECTOR_MODEL } from './research/dense.js';
+import {
+  DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,
+  MAX_RESEARCH_QUERY_TIMEOUT_MS,
+  MIN_RESEARCH_QUERY_TIMEOUT_MS,
+} from './research/limits.js';
 
 export { detectChrome as detectChromePath } from './browser.js';
 
@@ -158,7 +163,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     researchRepoAutoMaxFiles: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_FILES, 2_000, 10, 20_000),
     researchBrokerIdleMs: parseInt0(env.SURF_RESEARCH_BROKER_IDLE_MS, 60_000, 100, 60 * 60_000),
     researchReadConcurrency: parseInt0(env.SURF_RESEARCH_READ_CONCURRENCY, 4, 1, 16),
-    researchQueryTimeoutMs: parseInt0(env.SURF_RESEARCH_QUERY_TIMEOUT_MS, 30_000, 1_000, 10 * 60_000),
+    researchQueryTimeoutMs: parseInt0(
+      env.SURF_RESEARCH_QUERY_TIMEOUT_MS,
+      DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,
+      MIN_RESEARCH_QUERY_TIMEOUT_MS,
+      MAX_RESEARCH_QUERY_TIMEOUT_MS,
+    ),
 
     cloudMode,
     remoteDebug: parseBool(env.SURF_REMOTE_DEBUG, false),

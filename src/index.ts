@@ -972,6 +972,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search'
     SharedResearchBrokerDescription +
     'Always use this tool when the user asks to find, recall, inspect, or search information already stored in project memory, indexed local roots, papers, codebases, plans, experiments, or decisions. ' +
     'Use query_variants for multiple retrieval angles in one call instead of opening terminals or calling this tool repeatedly. Query embeddings are batched, candidates are fused with RRF, graph expansion starts from retrieved evidence, and the primary query is reranked once. Only bounded query-focused summaries from that final ranking are returned; stored bodies never bypass this response gate. ' +
+    'If one retrieval lane times out, the other lanes still return and meta.degraded_lanes identifies the partial lane; do not repeat the same query automatically. ' +
     'Uses exact, BM25, vector, and graph retrieval. It never opens Google, a browser, or SearchApi. ' +
     'Use search or search_parallel only when new external information is required.',
   inputSchema: ProjectMemorySearchSchema,

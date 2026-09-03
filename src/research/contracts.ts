@@ -412,6 +412,7 @@ export interface LocalSearchFamilies {
   bm25: LocalSearchHit[];
   vector: LocalSearchHit[];
   graph: LocalSearchHit[];
+  degraded_lanes: Array<NonNullable<LocalSearchHit['retrieval_family']>>;
 }
 
 export interface RetrievalIndexItem {

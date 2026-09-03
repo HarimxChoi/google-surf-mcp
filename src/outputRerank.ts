@@ -53,6 +53,38 @@ function splitLong(value: string): string[] {
   return output;
 }
 
+function compactRepeatedLines(text: string): string {
+  const output: string[] = [];
+  let repeatedLine: string | undefined;
+  let repeatedCount = 0;
+  let pendingBlank = false;
+
+  const flush = () => {
+    if (repeatedLine === undefined) return;
+    output.push(repeatedLine);
+    if (repeatedCount > 1) output.push(`[previous line repeated ${repeatedCount - 1} more times]`);
+    if (pendingBlank) output.push('');
+  };
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) {
+      pendingBlank = true;
+      continue;
+    }
+    if (line === repeatedLine) {
+      repeatedCount += 1;
+      continue;
+    }
+    flush();
+    repeatedLine = line;
+    repeatedCount = 1;
+    pendingBlank = false;
+  }
+  flush();
+  return output.join('\n').trim();
+}
+
 function jsonBlocks(value: unknown, prefix = ''): string[] {
   if (Array.isArray(value)) {
     return value.flatMap((item, index) => {
@@ -80,7 +112,7 @@ function jsonBlocks(value: unknown, prefix = ''): string[] {
 function plainBlocks(text: string): string[] {
   const output: string[] = [];
   let current = '';
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of compactRepeatedLines(text).split(/\r?\n/)) {
     const boundary = !line.trim() || /^\s*(?:={3,}|-{3,}|#{1,6}\s)/.test(line);
     if ((boundary && current.trim()) || current.length + line.length + 1 > BLOCK_CHARS) {
       output.push(...splitLong(current.trim()));

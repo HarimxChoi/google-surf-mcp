@@ -100,7 +100,7 @@ function hookBlock(nodePath: string, prePath: string, postPath: string): string 
     `command = ${tomlString(preCommand)}`,
     `command_windows = ${tomlString(preWindowsCommand)}`,
     'timeout = 3',
-    'statusMessage = "Checking Google Surf shell budget"',
+    'statusMessage = "Checking repeated Google Surf shell work"',
     '',
     '[[hooks.PostToolUse]]',
     'matcher = "^Bash$"',

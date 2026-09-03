@@ -139,7 +139,7 @@ Google Surf can install an opt-in [Codex hook](https://developers.openai.com/cod
 npx -y google-surf-mcp@latest hooks install --host codex
 ```
 
-Restart Codex, then open `/hooks` to review and trust the definitions. Defaults are 6,000 characters per ranked result, 12,000 shell-output characters and 12 new Bash calls per turn, and two identical or near-duplicate searches. Explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
+Restart Codex, then open `/hooks` to review and trust the definitions. Shell output larger than 6,000 characters is reranked and capped per result, without a cumulative per-turn command or output limit. Two identical or near-duplicate searches and explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -432,7 +432,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | maximum searchable source file count for automatic GitHub indexing |
 | `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | how long the shared research broker remains available after the last client disconnects |
 | `SURF_RESEARCH_READ_CONCURRENCY` | `4` | maximum concurrent broker reads; identical in-flight reads share one operation |
-| `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `30000` | embedded SurrealDB query timeout, clamped to 1-600 seconds |
+| `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | timeout per embedded SurrealDB query, clamped to 1-600 seconds; a timed-out retrieval lane is reported as partial while other lanes still return |
 | `GITHUB_TOKEN` | unset | optional GitHub token that raises API limits for repository inspection |
 | `SURF_RESEARCH_CODE_WORKERS` | auto, max 4 | Tree-sitter worker count for initial code structure indexing |
 | `SURF_LOCALE` | `en-US` | browser locale |
