@@ -68,23 +68,21 @@ Browser search needs no API key. SearchApi can be configured as an optional prim
 - CAPTCHA detection and environment-specific recovery
 - Parser self-healing and context fallback
 
-### Live reranker check
-
-| 32 held-out queries | nDCG@5 | MRR | Precision@5 |
-|---|---:|---:|---:|
-| Provider order | 0.8949 | 0.8203 | 0.6375 |
-| BM25 + RRF | **0.8971** | **0.8203** | **0.6500** |
-
-## Supported AI providers and gateways
-
-- [OrcaRouter](https://www.orcarouter.ai/ref/ref_7fd137d6c7b30793af2f) (free models available)
-
 ## Numbers
+
+###Search speed
 
 | | result |
 |---|---|
 | search | 4.0-5.1s/query |
 | scholar_search | 3.8-5.6s/query |
+
+###Live reranker check
+
+| 32 held-out queries | nDCG@5 | MRR | Precision@5 |
+|---|---:|---:|---:|
+| Provider order | 0.8949 | 0.8203 | 0.6375 |
+| BM25 + RRF | **0.8971** | **0.8203** | **0.6500** |
 
 Measured across three uncached queries per provider on a workstation with a 1Gb/s connection. Network and Google response time vary.
 
