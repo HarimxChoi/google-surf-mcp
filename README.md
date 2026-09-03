@@ -43,6 +43,8 @@ Seven tools are available by default: `search` / `search_parallel` / `extract` /
 
 Research mode and automatic capture are enabled by default. Set `SURF_RESEARCH=false` to use search and extraction without opening the database or graph sidecar; the project memory tools are not registered in that mode.
 
+With research mode disabled, live `search` and `search_parallel` results still use a lightweight in-memory reranker. It fuses the provider order with query BM25 rank through RRF without loading the vector model or opening local storage.
+
 Browser search needs no API key. SearchApi can be configured as an optional primary provider or fallback.
 
 ## Core features
@@ -65,6 +67,13 @@ Browser search needs no API key. SearchApi can be configured as an optional prim
 - Sponsored block and knowledge panel removal
 - CAPTCHA detection and environment-specific recovery
 - Parser self-healing and context fallback
+
+### Live reranker check
+
+| 32 held-out queries | nDCG@5 | MRR | Precision@5 |
+|---|---:|---:|---:|
+| Provider order | 0.8949 | 0.8203 | 0.6375 |
+| BM25 + RRF | **0.8971** | **0.8203** | **0.6500** |
 
 ## Supported AI providers and gateways
 
@@ -196,10 +205,10 @@ Local clone variant:
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.
   - Response: content fields plus available document metadata. Failures return `{ error }`, never throw.
-- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - searches stored local knowledge only. Up to 19 optional variants run inside one broker request with batched query embeddings, RRF fusion, evidence-seeded graph expansion, and one final rerank against `query`. Exact identifiers and quoted phrases are added deterministically. Use this instead of repeated terminal calls. It never opens a browser or calls Google or SearchApi.
+- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - searches stored local knowledge only. Up to 19 optional variants run inside one broker request with batched query embeddings, RRF fusion, evidence-seeded graph expansion, and one final rerank against `query`. The response contains only bounded query-focused summaries from the final ranking; stored bodies stay in the database. Exact identifiers and quoted phrases are added deterministically. Use this instead of repeated terminal calls. It never opens a browser or calls Google or SearchApi.
 - `project_memory(action, ...)` - manages durable project knowledge when `SURF_RESEARCH=true`.
   - `action="search"`: compatibility alias for `project_memory_search`.
-  - `action="show"`: returns counts and active record IDs by default. Use `detail_level="full"` only when every durable record body is required, or `target_id` for one assertion or entity.
+  - `action="show"`: always returns a bounded summary with counts and active record IDs. `detail_level="full"` is accepted for compatibility but never dumps every record body. Use `project_memory_search` for relevant bodies or `target_id` for one assertion or entity.
   - `action="record"`: stores the submitted body and returns only its ID, revision, and status.
   - `action="export"`: writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`.
 - `health()` - server status, including the local research runtime.

@@ -16,11 +16,13 @@ import { captchaModeFromConfig } from './captchaMode.js';
 import { autoBootstrap } from './bootstrap-auto.js';
 import { withTimeout } from './timeout.js';
 import {
-  applyParallelSearchExtraction, applySearchExtraction, shapeExtractionResponse, searchTool, scholarSearchTool,
+  applyParallelSearchExtraction, applySearchExtraction, shapeExtractionResponse, shapeScholarResponse,
+  searchTool, scholarSearchTool,
   searchParallelTool, extractTool, healthTool, initDeps, type Deps, type PoolHandle,
   type SearchExtractionInput,
 } from './agent.js';
 import { formatToolResponse } from './response.js';
+import { rerankLiveResponse } from './liveRerank.js';
 import {
   captureOnly, runParallelWithResearch, runSearchWithResearch,
 } from './research/orchestrator.js';
@@ -765,9 +767,10 @@ server.registerTool('search', {
     'Use extract separately only when the exact public URL is already known and no new discovery is required. Use general repository tools only for editing, building, testing, or full Git history. ' +
     'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'limit accepts integers from 1 to 20. extract_limit accepts integers from 1 to 10, defaults to 5, and limits unique extracted URLs. Extracted bodies return 1500-character summaries by default; set response_content=full only when the response must contain longer text. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
+    'limit accepts integers from 1 to 20. extract_limit accepts integers from 1 to 10, defaults to 5, and limits unique extracted URLs. Final results use one bounded response budget after ranking; full captured bodies remain local. Use extract on one selected URL when longer response text is explicitly required. The response includes applied, skipped, truncated, total_chars, and a bounded remaining_urls list. ' +
     'GitHub none mode reads the README; abstract and full can sparse-index eligible repositories with Tree-sitter. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
+    'With research disabled, provider order and query BM25 rank are fused by a lightweight in-memory RRF reranker without opening local storage or loading the vector model. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
     'Captured search, source, session, and project provenance form data lineage; extracted bodies become evidence while unread hits remain metadata. ' +
     'include_project_ids adds read-only cross-project retrieval through versioned ontology and verified schema/entity links without merging records. ' +
@@ -808,7 +811,7 @@ server.registerTool('search', {
       ...args,
       retrieval_mode: baseDeps.config.researchRetrievalMode,
     }, researchService, runLive)
-    : await runLive();
+    : rerankLiveResponse(await runLive());
   return shapeExtractionResponse(result, args, 'summary');
 });
 
@@ -838,9 +841,10 @@ server.registerTool('scholar_search', {
     });
   }
   const result = await scholarSearchTool(args, buildDeps(), provider);
-  return baseDeps.config.researchEnabled
+  const captured = baseDeps.config.researchEnabled
     ? await captureOnly(researchService, 'scholar_search', args, result)
     : result;
+  return shapeScholarResponse(captured);
 });
 
 server.registerTool('search_parallel', {
@@ -853,9 +857,10 @@ server.registerTool('search_parallel', {
     'Select extract_mode=full, not abstract, when the user asks to read originals, full text, document bodies, or code, or to compare source contents. ' +
     'Use extract separately only when the exact public URL is already known and no new discovery is required. Use general repository tools only for editing, building, testing, or full Git history. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'Each query limit accepts integers from 1 to 20. Call-wide extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full. Extracted bodies return 1500-character summaries by default; set response_content=full only when the response must contain longer text. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
+    'Each query limit accepts integers from 1 to 20. Call-wide extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full. Final results use one call-wide bounded response budget after ranking; at most 36 ranked rows are returned across query groups and full captured bodies remain local. Use extract on one selected URL when longer response text is explicitly required. The response includes applied, skipped, truncated, total_chars, and a bounded remaining_urls list. ' +
     'GitHub none mode reads the README; abstract and full can sparse-index eligible repositories with Tree-sitter. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
+    'With research disabled, each query independently fuses provider order and query BM25 rank through a lightweight in-memory RRF reranker without opening local storage or loading the vector model. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
     'Extracted bodies become evidence while unread hits remain metadata. ' +
     'Native Chrome uses one authenticated local broker across MCP sessions and keeps one hidden process with up to four reusable tabs. Query starts are staggered and each tab continuously consumes the remaining queue. ' +
@@ -887,7 +892,7 @@ server.registerTool('search_parallel', {
       ...args,
       retrieval_mode: baseDeps.config.researchRetrievalMode,
     }, researchService, runLive)
-    : await runLive();
+    : rerankLiveResponse(await runLive(), true);
   return shapeExtractionResponse(result, args, 'summary');
 });
 
@@ -966,7 +971,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search'
     'LOCAL PROJECT KNOWLEDGE SEARCH ONLY. ' +
     SharedResearchBrokerDescription +
     'Always use this tool when the user asks to find, recall, inspect, or search information already stored in project memory, indexed local roots, papers, codebases, plans, experiments, or decisions. ' +
-    'Use query_variants for multiple retrieval angles in one call instead of opening terminals or calling this tool repeatedly. Query embeddings are batched, candidates are fused with RRF, graph expansion starts from retrieved evidence, and the primary query is reranked once. ' +
+    'Use query_variants for multiple retrieval angles in one call instead of opening terminals or calling this tool repeatedly. Query embeddings are batched, candidates are fused with RRF, graph expansion starts from retrieved evidence, and the primary query is reranked once. Only bounded query-focused summaries from that final ranking are returned; stored bodies never bypass this response gate. ' +
     'Uses exact, BM25, vector, and graph retrieval. It never opens Google, a browser, or SearchApi. ' +
     'Use search or search_parallel only when new external information is required.',
   inputSchema: ProjectMemorySearchSchema,
@@ -981,7 +986,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
   description:
     'PROJECT MEMORY MANAGEMENT. ' +
     SharedResearchBrokerDescription +
-    'Use create to create a project; show to inspect known projects or durable records; record to store session intent, immutable plan revisions, experiments, decisions, versioned ontology terms, or corrections; rebuild to index approved local roots; export to write graph or lineage views; and forget for reversible deletion. show returns a compact summary unless detail_level=full is explicitly requested. record returns only a compact receipt and never echoes submitted bodies. ' +
+    'Use create to create a project; show to inspect known projects or durable records; record to store session intent, immutable plan revisions, experiments, decisions, versioned ontology terms, or corrections; rebuild to index approved local roots; export to write graph or lineage views; and forget for reversible deletion. show always returns a bounded summary; detail_level=full is accepted for compatibility but never dumps every durable record body. Use project_memory_search for relevant bodies or target_id for one assertion or entity. record returns only a compact receipt and never echoes submitted bodies. ' +
     'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
     'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
@@ -992,7 +997,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
       'create: project_id and name required. show: inspect a known project, assertion, entity, or durable record. search: compatibility alias for project_memory_search. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
     ),
     project_id: z.string().min(1).max(64).optional().describe('Stable project id. For search, this is the write-isolated primary scope. Omit to list projects or use all_projects.'),
-    detail_level: z.enum(['summary', 'full']).default('summary').describe('For show with project_id and no target_id, summary returns counts and active ids without durable record bodies. Use full only when every plan, experiment, and decision is explicitly required.'),
+    detail_level: z.enum(['summary', 'full']).default('summary').describe('For show with project_id and no target_id, both values return a bounded summary. full is retained only for compatibility and never returns every durable record body.'),
     include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects for one local search or integrated visualization export.'),
     all_projects: z.boolean().optional().describe('Search or export every active named project. Excludes Inbox and cannot be combined with project ids.'),
     query: z.string().min(1).max(400).optional().describe('Required for action=search. Searches stored local knowledge only and does not start live web discovery.'),

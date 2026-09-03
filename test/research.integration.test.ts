@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { formatToolResponse } from '../src/response.js';
 import {
-  attachReceipt, attachRetrievalMode, fuseSearchResponse, localSearchResponse,
+  attachReceipt, attachRetrievalMode, compactRankedResults, fuseSearchResponse, localSearchResponse,
 } from '../src/research/integration.js';
 import {
   runParallelWithResearch, runSearchWithResearch,
@@ -12,6 +12,24 @@ import {
 import { ResearchService } from '../src/research/service.js';
 
 describe('research search integration', () => {
+  it('compacts the legacy 12-result memory payload without losing ranked metadata', () => {
+    const rows = Array.from({ length: 12 }, (_, index) => ({
+      title: `WarpQuant result ${index}`,
+      url: `https://example.com/warpquant/${index}`,
+      description: `VPTQ Llama result ${index} ${'description '.repeat(80)}`,
+      content: `terminal experiment evidence ${index} ${'full body '.repeat(2_000)}`,
+      document_id: `document-${index}`,
+      retrieval_families: ['bm25', 'vector', 'graph'],
+      score: 1 / (index + 1),
+    }));
+    const compact = compactRankedResults('WarpQuant VPTQ Llama terminal experiment', rows);
+
+    expect(compact).toHaveLength(12);
+    expect(compact.every((row) => row.content === undefined)).toBe(true);
+    expect(compact.map((row) => row.document_id)).toEqual(rows.map((row) => row.document_id));
+    expect(JSON.stringify(compact).length).toBeLessThan(20_000);
+  });
+
   it('caps duplicate cross-family votes and keeps unique live results', () => {
     const live = formatToolResponse({
       query: 'graph',
@@ -58,6 +76,30 @@ describe('research search integration', () => {
     const result = attachRetrievalMode(localSearchResponse('q', []), 'hybrid');
 
     expect(result.structuredContent?.meta).toMatchObject({ retrieval_mode: 'hybrid' });
+  });
+
+  it('returns only bounded summaries after research reranking', async () => {
+    const service = new ResearchService({ enabled: false, root: 'unused', endpoint: 'mem://' });
+    vi.spyOn(service, 'rerankCandidates').mockImplementation(async (_query, rows) => rows);
+    const result = await runSearchWithResearch({
+      query: 'needle result',
+      limit: 10,
+      retrieval_mode: 'hybrid',
+    }, service, async () => formatToolResponse({
+      query: 'needle result',
+      results: [{
+        title: 'Result',
+        url: 'https://example.com/result',
+        description: 'needle summary',
+        content: `needle body ${'large payload '.repeat(2_000)}`,
+      }],
+    }));
+    const row = (result.structuredContent?.results as Array<Record<string, unknown>>)[0];
+
+    expect(row.description).toContain('needle');
+    expect(String(row.description).length).toBeLessThanOrEqual(1_200);
+    expect(row.content).toBeUndefined();
+    expect(result.structuredContent?.meta).toMatchObject({ response_format: 'ranked_summaries' });
   });
 
   it('returns local evidence with a receipt when live search fails', async () => {

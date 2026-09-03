@@ -1,5 +1,8 @@
 import type { CallToolResult } from '../response.js';
 import { formatToolResponse } from '../response.js';
+import {
+  RANKED_SUMMARY_MAX_CHARS, RANKED_SUMMARY_MIN_CHARS, SEARCH_RESPONSE_TEXT_BUDGET,
+} from '../responseLimits.js';
 import type { SearchResult } from '../types.js';
 import type {
   LocalSearchFamilies, LocalSearchHit, ResearchReceipt, RetrievalMode,
@@ -13,7 +16,80 @@ type SearchRow = SearchResult & {
   _rrf_score?: number;
 };
 
+type RankedCandidate = {
+  title: string;
+  url: string;
+  description?: string;
+  content?: string;
+  excerpt?: string;
+  _rrf_score?: number;
+  [key: string]: unknown;
+};
+
 type LocalInput = LocalSearchHit[] | LocalSearchFamilies;
+
+function normalizedSegments(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  return value
+    .replace(/--- (?:BEGIN|END) UNTRUSTED CONTENT ---/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .split(/\r?\n+|(?<=[.!?])\s+/u)
+    .map((segment) => segment.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function queryTerms(query: string): string[] {
+  return [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) ?? [])]
+    .sort((a, b) => b.length - a.length);
+}
+
+function rankedSummary(query: string, row: RankedCandidate, maxChars: number): string {
+  const seen = new Set<string>();
+  const segments = [row.description, row.content, row.excerpt]
+    .flatMap(normalizedSegments)
+    .filter((segment) => {
+      const key = segment.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  const terms = queryTerms(query);
+  const ranked = segments
+    .map((segment, index) => ({
+      segment,
+      index,
+      score: terms.reduce((score, term) => score + (segment.toLocaleLowerCase().includes(term) ? 1 : 0), 0),
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const selected: string[] = [];
+  let length = 0;
+  for (const candidate of ranked) {
+    const separator = selected.length ? 3 : 0;
+    if (selected.length && length + separator + candidate.segment.length > maxChars) continue;
+    selected.push(candidate.segment);
+    length += separator + candidate.segment.length;
+    if (selected.length >= 3 || length >= maxChars * 0.8) break;
+  }
+  const summary = selected.join(' | ') || String(row.title ?? '');
+  return summary.slice(0, maxChars);
+}
+
+export function compactRankedResults(
+  query: string,
+  rows: RankedCandidate[],
+): RankedCandidate[] {
+  const summaryLimit = Math.min(
+    RANKED_SUMMARY_MAX_CHARS,
+    Math.max(RANKED_SUMMARY_MIN_CHARS, Math.floor(SEARCH_RESPONSE_TEXT_BUDGET / Math.max(rows.length, 1))),
+  );
+  return rows.map((row) => {
+    const { content: _content, excerpt: _excerpt, _rrf_score: _rrfScore, ...metadata } = row;
+    return {
+      ...metadata,
+      description: rankedSummary(query, row, summaryLimit),
+    };
+  });
+}
 
 function familyRows(families: LocalSearchFamilies): LocalSearchHit[][] {
   return [families.exact, families.bm25, families.vector, families.graph];
@@ -54,8 +130,9 @@ export function localSearchResponse(
   query: string,
   hits: LocalSearchHit[],
   includeContent = false,
+  compact = false,
 ): CallToolResult {
-  const results = hits.map((hit) => ({
+  const rawResults = hits.map((hit) => ({
     title: hit.title,
     url: hit.url,
     description: hit.description,
@@ -63,6 +140,7 @@ export function localSearchResponse(
     source_family: hit.source_family,
     ...(includeContent ? { content: hit.content } : {}),
   }));
+  const results = compact ? compactRankedResults(query, rawResults) : rawResults;
   return formatToolResponse({ query, results, elapsed_ms: 0, meta: { provider: 'local', fusion: 'family_rrf' } });
 }
 

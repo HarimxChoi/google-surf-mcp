@@ -1,5 +1,6 @@
 import type { CallToolResult } from '../response.js';
 import { formatToolResponse } from '../response.js';
+import { compactRankedResults } from './integration.js';
 import type { AssertionValue, ExperimentStatus } from './contracts.js';
 import { isTransactionConflict } from './errors.js';
 import { ResearchService } from './service.js';
@@ -97,18 +98,18 @@ export async function projectMemorySearchTool(
       signal,
     );
     const hits = searched.results;
-    const results = hits.map((hit) => ({
+    const results = compactRankedResults(input.query, hits.map((hit) => ({
       title: hit.title,
       url: hit.url,
       description: hit.description,
-      content: hit.content.slice(0, 1_500),
+      content: hit.content,
       document_id: hit.document_id,
       project_ids: hit.project_ids,
       source_family: hit.source_family,
       retrieval_families: hit.retrieval_families
         ?? (hit.retrieval_family ? [hit.retrieval_family] : []),
       score: hit.score,
-    }));
+    })));
     const vectorEnabled = service.status().vector === 'on';
     return formatToolResponse({
       query: input.query,
@@ -120,6 +121,7 @@ export async function projectMemorySearchTool(
         retrieval_lanes: ['exact', 'bm25', ...(vectorEnabled ? ['vector'] : []), 'graph'],
         fusion: 'rrf',
         reranker: vectorEnabled ? 'local_vector' : 'rrf_only',
+        response_format: 'ranked_summaries',
         live_web_used: false,
         browser_used: false,
         searchapi_used: false,
@@ -167,7 +169,10 @@ export async function projectMemoryTool(
             assertion,
             memory: `Project: ${input.project_id} | Record: assertion ${assertion.status} | Status: ready`,
           });
-        } catch {
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== 'assertion not found in project') {
+            throw error;
+          }
           const entity = await service.getEntity(input.project_id, input.target_id);
           return formatToolResponse({
             entity,
@@ -182,17 +187,14 @@ export async function projectMemoryTool(
           memory: `Project: ${input.project_id} | Entity candidates: ${entities.length} | Status: ready`,
         });
       }
-      const detail = input.detail_level === 'full'
-        ? await service.getProject(input.project_id)
-        : await service.getProjectSummary(input.project_id);
-      const planCount = 'plans' in detail ? detail.plans.length : detail.plan_count;
-      const experimentCount = 'experiments' in detail
-        ? detail.experiments.length
-        : detail.experiment_count;
-      const decisionCount = 'decisions' in detail ? detail.decisions.length : detail.decision_count;
+      const detail = await service.getProjectSummary(input.project_id);
       return formatToolResponse({
         ...detail,
-        memory: `Project: ${detail.project.name} | Sources: ${detail.document_count + detail.source_entry_count} | Records: plans ${planCount}, experiments ${experimentCount}, decisions ${decisionCount}, assertions ${detail.assertion_count}, entities ${detail.entity_count} | Sessions: ${detail.session_count} | Status: ready`,
+        ...(input.detail_level === 'full' ? {
+          full_detail_omitted: true,
+          next: 'Use project_memory_search for relevant record bodies or target_id for one assertion or entity.',
+        } : {}),
+        memory: `Project: ${detail.project.name} | Sources: ${detail.document_count + detail.source_entry_count} | Records: plans ${detail.plan_count}, experiments ${detail.experiment_count}, decisions ${detail.decision_count}, assertions ${detail.assertion_count}, entities ${detail.entity_count} | Sessions: ${detail.session_count} | Status: ready`,
       });
     }
 
@@ -304,14 +306,14 @@ export async function projectMemoryTool(
 
     if (input.record_type === 'plan') {
       if (!input.title || !input.body) throw new Error('title and body required');
-      const detail = await service.getProject(projectId);
+      const detail = await service.getProjectSummary(projectId);
       const plan = await service.createPlan({
         project_id: projectId,
         title: input.title,
         body: input.body,
         change_reason: input.change_reason,
         based_on_experiment_id: input.based_on_experiment_id,
-      }, detail.plans.length > 0);
+      }, detail.plan_count > 0);
       return formatToolResponse({
         record: {
           record_type: 'plan',

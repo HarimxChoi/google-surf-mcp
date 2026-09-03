@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ResearchService } from '../src/research/service.js';
 import { projectMemorySearchTool, projectMemoryTool } from '../src/research/tools.js';
 
@@ -52,6 +52,21 @@ describe('project_memory tool', () => {
       value: 12,
       status: 'confirmed',
     });
+  });
+
+  it('does not mask assertion lookup failures as entity misses', async () => {
+    await service.createProject('Lookup failure', 'lookup-failure');
+    vi.spyOn(service, 'getAssertion').mockRejectedValueOnce(new Error('database unavailable'));
+    const entity = vi.spyOn(service, 'getEntity');
+    const result = await projectMemoryTool({
+      action: 'show',
+      project_id: 'lookup-failure',
+      target_id: 'record-id',
+    }, service);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatchObject({ message: 'database unavailable' });
+    expect(entity).not.toHaveBeenCalled();
   });
 
   it('records a project ontology revision through project_memory', async () => {
@@ -131,7 +146,14 @@ describe('project_memory tool', () => {
     });
     expect(summary.structuredContent?.plans).toBeUndefined();
     expect(JSON.stringify(summary.structuredContent)).not.toContain('plan-body-marker');
-    expect(full.structuredContent?.plans?.[0]?.body).toContain('plan-body-marker');
+    expect(full.structuredContent).toMatchObject({
+      plan_count: 1,
+      decision_count: 1,
+      full_detail_omitted: true,
+    });
+    expect(full.structuredContent?.plans).toBeUndefined();
+    expect(JSON.stringify(full.structuredContent)).not.toContain('plan-body-marker');
+    expect(JSON.stringify(full.structuredContent).length).toBeLessThan(5_000);
   });
 
   it('searches stored project knowledge without creating a live search event', async () => {
@@ -169,10 +191,13 @@ describe('project_memory tool', () => {
       source_family: 'document',
     });
     expect(rows[0].retrieval_families).toEqual(expect.arrayContaining(['bm25', 'graph']));
-    expect(rows[0].content.length).toBeLessThanOrEqual(1_500);
+    expect(rows[0].description).toContain('localmemoryneedle');
+    expect(rows[0].description.length).toBeLessThanOrEqual(1_200);
+    expect(rows[0].content).toBeUndefined();
     expect(result.structuredContent?.meta).toMatchObject({
       query_count: 2,
       query_execution: 'single_broker_request',
+      response_format: 'ranked_summaries',
     });
     expect(result.structuredContent?.meta).toMatchObject({
       provider: 'local',

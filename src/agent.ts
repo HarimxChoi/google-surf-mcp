@@ -14,6 +14,9 @@ import {
 } from './searchApi.js';
 import { formatToolResponse, toErrorInfo } from './response.js';
 import {
+  MAX_PARALLEL_RESPONSE_RESULTS, MAX_REMAINING_URLS, SEARCH_RESPONSE_TEXT_BUDGET,
+} from './responseLimits.js';
+import {
   createCascadeState, executeWithCascade, type CascadeState, type StealthMode,
 } from './cascade.js';
 import { loadCascadeMode, saveCascadeMode } from './cascadeStore.js';
@@ -960,6 +963,57 @@ function shapeRowContent(row: Record<string, unknown>, maxChars: number): {
   };
 }
 
+function shapeSearchResultRow(
+  value: unknown,
+  contentMaxChars: number,
+  rowTextBudget: number,
+): { row: Record<string, unknown>; truncated: boolean } {
+  const row = asObject(value);
+  const description = typeof row.description === 'string' ? row.description : '';
+  const content = typeof row.content === 'string' ? row.content : '';
+  const descriptionLimit = content
+    ? Math.min(240, Math.max(80, Math.floor(rowTextBudget / 4)))
+    : rowTextBudget;
+  const nextDescription = description.slice(0, descriptionLimit);
+  const contentLimit = Math.min(contentMaxChars, Math.max(0, rowTextBudget - nextDescription.length));
+  const nextContent = content.slice(0, contentLimit);
+  const truncated = nextDescription.length < description.length || nextContent.length < content.length;
+  return {
+    row: {
+      ...row,
+      title: typeof row.title === 'string' ? row.title.slice(0, 300) : row.title,
+      url: typeof row.url === 'string' ? row.url.slice(0, 2_048) : row.url,
+      description: nextDescription,
+      ...(content ? { content: nextContent, excerpt: nextContent.slice(0, 200) } : {}),
+      ...(truncated ? { truncated: true } : {}),
+    },
+    truncated,
+  };
+}
+
+function boundedParallelGroups(groups: Array<Record<string, unknown>>): {
+  groups: Array<Record<string, unknown>>;
+  originalCount: number;
+  returnedCount: number;
+} {
+  const originalCount = groups.reduce(
+    (count, group) => count + (Array.isArray(group.results) ? group.results.length : 0),
+    0,
+  );
+  const base = groups.length ? Math.floor(MAX_PARALLEL_RESPONSE_RESULTS / groups.length) : 0;
+  let extras = groups.length ? MAX_PARALLEL_RESPONSE_RESULTS % groups.length : 0;
+  const bounded = groups.map((group) => {
+    const rows = Array.isArray(group.results) ? group.results : [];
+    const quota = Math.max(1, base + (extras-- > 0 ? 1 : 0));
+    return { ...group, results: rows.slice(0, quota) };
+  });
+  const returnedCount = bounded.reduce(
+    (count, group) => count + (Array.isArray(group.results) ? group.results.length : 0),
+    0,
+  );
+  return { groups: bounded, originalCount, returnedCount };
+}
+
 export function shapeExtractionResponse(
   result: CallToolResult,
   input: Pick<SearchExtractionInput, 'max_chars' | 'response_content'>,
@@ -979,17 +1033,41 @@ export function shapeExtractionResponse(
   let shapedData: Record<string, unknown>;
   if (Array.isArray(data.results)) {
     const parallel = data.results.some((entry) => Array.isArray(asObject(entry).results));
+    const sourceGroups = parallel
+      ? boundedParallelGroups(data.results.map(asObject))
+      : undefined;
+    const resultCount = parallel
+      ? sourceGroups!.returnedCount
+      : data.results.length;
+    const originalCount = parallel
+      ? sourceGroups!.originalCount
+      : data.results.length;
+    const rowTextBudget = Math.max(200, Math.floor(SEARCH_RESPONSE_TEXT_BUDGET / Math.max(resultCount, 1)));
+    const shapeResult = (row: unknown): Record<string, unknown> => {
+      const shaped = shapeSearchResultRow(row, responseMax, rowTextBudget);
+      responseTruncated ||= shaped.truncated;
+      return shaped.row;
+    };
     shapedData = {
       ...data,
       results: parallel
-        ? data.results.map((group) => {
+        ? sourceGroups!.groups.map((group) => {
           const value = asObject(group);
           return {
             ...value,
-            results: Array.isArray(value.results) ? value.results.map(shape) : [],
+            results: Array.isArray(value.results) ? value.results.map(shapeResult) : [],
           };
         })
-        : data.results.map(shape),
+        : data.results.map(shapeResult),
+      meta: {
+        ...asObject(data.meta),
+        response: {
+          format: 'bounded_ranked_results',
+          returned_results: resultCount,
+          omitted_results: originalCount - resultCount,
+          text_budget_chars: SEARCH_RESPONSE_TEXT_BUDGET,
+        },
+      },
     };
   } else {
     shapedData = shape(data);
@@ -1003,10 +1081,45 @@ export function shapeExtractionResponse(
       ...(Object.keys(extraction).length ? {
         extraction: {
           ...extraction,
+          ...(Array.isArray(extraction.remaining_urls) ? {
+            remaining_url_count: extraction.remaining_urls.length,
+            remaining_urls: extraction.remaining_urls.slice(0, MAX_REMAINING_URLS),
+          } : {}),
           response_content: responseContent,
           truncated: extraction.truncated === true || responseTruncated,
         },
       } : {}),
+    },
+  });
+}
+
+export function shapeScholarResponse(result: CallToolResult): CallToolResult {
+  if (result.isError || !result.structuredContent || !Array.isArray(result.structuredContent.results)) {
+    return result;
+  }
+  const rows = result.structuredContent.results.slice(0, 10).map((value) => {
+    const row = asObject(value);
+    return {
+      ...row,
+      title: String(row.title ?? '').slice(0, 300),
+      url: typeof row.url === 'string' ? row.url.slice(0, 2_048) : row.url,
+      authors: typeof row.authors === 'string' ? row.authors.slice(0, 500) : row.authors,
+      publication: typeof row.publication === 'string' ? row.publication.slice(0, 500) : row.publication,
+      snippet: String(row.snippet ?? '').slice(0, 700),
+      metadata: String(row.metadata ?? '').slice(0, 400),
+    };
+  });
+  const meta = asObject(result.structuredContent.meta);
+  return formatToolResponse({
+    ...result.structuredContent,
+    results: rows,
+    meta: {
+      ...meta,
+      response: {
+        format: 'bounded_ranked_results',
+        returned_results: rows.length,
+        omitted_results: result.structuredContent.results.length - rows.length,
+      },
     },
   });
 }

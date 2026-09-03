@@ -239,4 +239,28 @@ describe('integrated search extraction', () => {
       extraction: { total_chars: 2_000, response_content: 'summary', truncated: true },
     });
   });
+
+  it('enforces one aggregate response budget across parallel groups', () => {
+    const groups = Array.from({ length: 12 }, (_, group) => ({
+      query: `query-${group}`,
+      results: Array.from({ length: 20 }, (_, rank) => ({
+        title: `result-${group}-${rank}`,
+        url: `https://example.com/${group}/${rank}`,
+        description: 'large description '.repeat(200),
+      })),
+    }));
+    const shaped = shapeExtractionResponse(formatToolResponse({ results: groups }), {}, 'summary');
+    const returned = (shaped.structuredContent?.results as Array<Record<string, any>>)
+      .reduce((count, group) => count + group.results.length, 0);
+
+    expect(returned).toBe(36);
+    expect(JSON.stringify(shaped.structuredContent).length).toBeLessThan(30_000);
+    expect(shaped.structuredContent?.meta).toMatchObject({
+      response: {
+        format: 'bounded_ranked_results',
+        returned_results: 36,
+        omitted_results: 204,
+      },
+    });
+  });
 });

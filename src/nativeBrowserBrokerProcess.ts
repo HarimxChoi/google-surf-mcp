@@ -49,15 +49,23 @@ async function acquireOwner(profileDir: string): Promise<{
       pid: process.pid,
       started_at: new Date().toISOString(),
     };
+    const candidate = `${directory}.candidate-${owner.owner_id}`;
     try {
-      await mkdir(directory);
-      await writeFile(resolve(directory, 'owner.json'), JSON.stringify(owner), {
+      await mkdir(candidate);
+      await writeFile(resolve(candidate, 'owner.json'), JSON.stringify(owner), {
         encoding: 'utf8',
         mode: 0o600,
       });
-      return { owner, directory };
+      try {
+        await rename(candidate, directory);
+        return { owner, directory };
+      } catch (error) {
+        if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    } finally {
+      await rm(candidate, { recursive: true, force: true }).catch(() => {});
     }
     try {
       const current = JSON.parse(await readFile(resolve(directory, 'owner.json'), 'utf8')) as OwnerRecord;

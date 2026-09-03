@@ -4,8 +4,8 @@ import type {
   LocalSearchFamilies, LocalSearchHit, ResearchReceipt, ResearchSearchContext, RetrievalMode,
 } from './contracts.js';
 import {
-  attachReceipt, attachRetrievalMode, fuseLocalFamilies, fuseParallelResponse, fuseSearchResponse,
-  localSearchResponse,
+  attachReceipt, attachRetrievalMode, compactRankedResults, fuseLocalFamilies, fuseParallelResponse,
+  fuseSearchResponse, localSearchResponse,
 } from './integration.js';
 import { ResearchService } from './service.js';
 
@@ -112,8 +112,8 @@ async function rerankResponse(
     : {};
   return formatToolResponse({
     ...result.structuredContent,
-    results: ranked,
-    meta: { ...meta, reranker: 'rrf_vector_tiebreak' },
+    results: compactRankedResults(query, ranked),
+    meta: { ...meta, reranker: 'rrf_vector_tiebreak', response_format: 'ranked_summaries' },
   });
 }
 
@@ -150,7 +150,7 @@ async function finishLocalSearch(
 ): Promise<CallToolResult> {
   const ranked = await service.rerankCandidates(args.query, hits, args.limit);
   const includeContent = args.extract_mode === 'abstract' || args.extract_mode === 'full';
-  const visible = localSearchResponse(args.query, ranked, includeContent);
+  const visible = localSearchResponse(args.query, ranked, includeContent, true);
   const captureSource = localSearchResponse(args.query, ranked, true);
   const receipt = await captureReceipt(service, 'search', args, captureSource);
   return attachRetrievalMode(receipt ? attachReceipt(visible, receipt) : visible, args.retrieval_mode);
@@ -216,6 +216,7 @@ function parallelLocalResponse(
   args: ParallelArgs,
   local: Map<string, LocalSearchHit[]>,
   includeContent: boolean,
+  compact = false,
 ): CallToolResult {
   const results = args.queries.map((query) => ({
     query,
@@ -223,6 +224,7 @@ function parallelLocalResponse(
       query,
       local.get(query) ?? [],
       includeContent,
+      compact,
     )
       .structuredContent?.results ?? [],
     provider: 'local',
@@ -244,7 +246,7 @@ async function finishLocalParallel(
     await service.rerankCandidates(query, fuseLocalFamilies(families, args.limit), args.limit),
   ] as const)));
   const includeContent = args.extract_mode === 'abstract' || args.extract_mode === 'full';
-  const visible = parallelLocalResponse(args, ranked, includeContent);
+  const visible = parallelLocalResponse(args, ranked, includeContent, true);
   const receipt = await captureReceipt(
     service,
     'search_parallel',
@@ -329,13 +331,19 @@ export async function runParallelWithResearch(
       .map(async (group) => {
         const query = String(group.query ?? '');
         const candidates = Array.isArray(group.results) ? group.results as RankedCandidate[] : [];
-        return { ...group, results: await service.rerankCandidates(query, candidates, args.limit) };
+        const ranked = await service.rerankCandidates(query, candidates, args.limit);
+        return { ...group, results: compactRankedResults(query, ranked) };
       }));
     const meta = result.structuredContent.meta as Record<string, unknown> | undefined;
     result = formatToolResponse({
       ...result.structuredContent,
       results: groups,
-      meta: { ...meta, reranker: 'rrf_vector_tiebreak', research_rounds: expand ? 2 : 1 },
+      meta: {
+        ...meta,
+        reranker: 'rrf_vector_tiebreak',
+        research_rounds: expand ? 2 : 1,
+        response_format: 'ranked_summaries',
+      },
     });
   }
   const receipt = await captureReceipt(service, 'search_parallel', args, live);

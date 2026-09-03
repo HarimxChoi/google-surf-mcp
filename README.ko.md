@@ -41,6 +41,8 @@ Exact + BM25 + Vector + Code graph + Graph PPR
 
 Research 모드와 자동 저장은 기본으로 활성화됩니다. 검색과 추출만 사용하려면 `SURF_RESEARCH=false`로 설정합니다. 이때 DB와 graph sidecar를 열지 않고 프로젝트 메모리 도구도 등록하지 않습니다.
 
+Research 모드를 꺼도 live `search`와 `search_parallel` 결과에는 경량 인메모리 리랭커가 적용됩니다. Provider 원본 순위와 쿼리 BM25 순위를 RRF로 결합하며 vector 모델이나 로컬 저장소는 열지 않습니다.
+
 기본 브라우저 검색은 API 키가 필요 없습니다. SearchApi는 선택적으로 기본 provider 또는 fallback으로 사용할 수 있습니다.
 
 ## 핵심 기능
@@ -63,6 +65,13 @@ Research 모드와 자동 저장은 기본으로 활성화됩니다. 검색과 �
 - 광고와 지식 패널 제거
 - CAPTCHA 감지와 환경별 복구
 - Parser self-healing과 context fallback
+
+### Live 리랭커 검증
+
+| 홀드아웃 32개 | nDCG@5 | MRR | Precision@5 |
+|---|---:|---:|---:|
+| 기존 Provider 순위 | 0.8949 | 0.8203 | 0.6375 |
+| BM25 + RRF | **0.8971** | **0.8203** | **0.6500** |
 
 ## Supported AI providers and gateways
 
@@ -166,10 +175,10 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
   - 응답: 본문 필드와 확인 가능한 문서 메타데이터. 실패는 `{ error }` 반환, throw 안 함
-- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 정확한 식별자와 따옴표 표현은 deterministic variant로 자동 추가합니다. 반복 terminal 호출 대신 이 도구를 한 번 사용하며 브라우저, Google, SearchApi는 호출하지 않습니다.
+- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 응답에는 최종 순위의 query-focused 요약만 제한된 길이로 포함하고 원문은 DB에 남깁니다. 정확한 식별자와 따옴표 표현은 deterministic variant로 자동 추가합니다. 반복 terminal 호출 대신 이 도구를 한 번 사용하며 브라우저, Google, SearchApi는 호출하지 않습니다.
 - `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때 프로젝트 지식을 관리합니다.
   - `action="search"`: `project_memory_search`를 위한 호환 alias입니다.
-  - `action="show"`: 기본적으로 count와 활성 record ID만 반환합니다. 전체 record 본문이 필요할 때만 `detail_level="full"`, 단일 assertion이나 entity는 `target_id`를 사용합니다.
+  - `action="show"`: 항상 count와 활성 record ID만 포함한 제한된 요약을 반환합니다. `detail_level="full"`은 호환성을 위해 허용하지만 전체 record 본문을 덤프하지 않습니다. 관련 본문은 `project_memory_search`, 단일 assertion이나 entity는 `target_id`를 사용합니다.
   - `action="record"`: 전달한 본문을 저장하고 ID, revision, status만 반환합니다.
   - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
 - `health()` - 검색과 로컬 research runtime 상태
