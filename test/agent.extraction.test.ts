@@ -230,7 +230,7 @@ describe('integrated search extraction', () => {
     const extracted = await applySearchExtraction(input, {
       extract_mode: 'full', extract_limit: 1,
     }, deps);
-    const shaped = shapeExtractionResponse(extracted, { response_content: 'summary' }, 'full');
+    const shaped = shapeExtractionResponse(extracted, {}, 'summary');
     const row = (shaped.structuredContent?.results as Array<Record<string, unknown>>)[0];
 
     expect((row.content as string)).toHaveLength(1_500);

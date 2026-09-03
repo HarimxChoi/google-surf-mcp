@@ -931,6 +931,46 @@ export class ResearchService {
     };
   }
 
+  async getProjectSummary(projectIdValue: string) {
+    const project = await this.ensureProject(projectIdValue);
+    const [counts, assertionCounts, entityCounts, jobCounts, activeSourceSnapshot] = await Promise.all([
+      this.store.counts(project.project_id),
+      this.store.assertionCounts(project.project_id),
+      this.store.entityCounts(project.project_id),
+      this.store.knowledgeJobCounts(project.project_id),
+      project.active_source_snapshot_id
+        ? this.store.getSourceSnapshot(project.active_source_snapshot_id)
+        : Promise.resolve(undefined),
+    ]);
+    return {
+      project,
+      plan_count: counts.plans,
+      experiment_count: counts.experiments,
+      decision_count: counts.decisions,
+      assertion_count: assertionCounts.assertions,
+      correction_count: assertionCounts.corrections,
+      entity_count: entityCounts.entities,
+      entity_operation_count: entityCounts.operations,
+      job_counts: jobCounts,
+      session_count: counts.sessions,
+      search_event_count: counts.searchEvents,
+      document_count: counts.documents,
+      citation_observation_count: counts.citationObservations,
+      source_entry_count: activeSourceSnapshot?.file_count ?? counts.sourceEntries,
+      ...(activeSourceSnapshot ? {
+        active_source_snapshot: {
+          snapshot_id: activeSourceSnapshot.snapshot_id,
+          status: activeSourceSnapshot.status,
+          file_count: activeSourceSnapshot.file_count,
+          searchable_file_count: activeSourceSnapshot.searchable_file_count,
+          total_bytes: activeSourceSnapshot.total_bytes,
+          created_at: activeSourceSnapshot.created_at,
+          activated_at: activeSourceSnapshot.activated_at,
+        },
+      } : {}),
+    };
+  }
+
   async indexProject(input: ProjectIndexInput): Promise<ProjectIndexResult> {
     const projectId = cleanProjectId(input.project_id);
     return await this.locked('db-write', async () => await this.indexProjectLocked({

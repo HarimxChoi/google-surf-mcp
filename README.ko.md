@@ -156,7 +156,7 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 
 ## Tools
 
-- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 단일 쿼리의 라이브 탐색과 읽기를 함께 수행하는 기본 도구입니다. 신규 자료를 찾고 읽어야 하면 PDF 다운로드, 저장소 clone, 별도 `extract` 호출 대신 이 호출에 `extract_mode`를 지정합니다. `extract`는 정확한 공개 URL을 이미 알고 있고 신규 탐색이 필요 없을 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. `limit`은 1-20입니다. 추출 기본값은 `none`, `extract_limit`은 1-10이며 기본값은 5입니다. `response_content` 기본값은 `full`입니다.
+- `search(query, limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 단일 쿼리의 라이브 탐색과 읽기를 함께 수행하는 기본 도구입니다. 신규 자료를 찾고 읽어야 하면 PDF 다운로드, 저장소 clone, 별도 `extract` 호출 대신 이 호출에 `extract_mode`를 지정합니다. `extract`는 정확한 공개 URL을 이미 알고 있고 신규 탐색이 필요 없을 때만 사용합니다. `project_id`가 있으면 저장된 지식을 라이브 결과와 결합하지만 로컬 전용 검색으로 바뀌지는 않습니다. `limit`은 1-20입니다. 추출 기본값은 `none`, `extract_limit`은 1-10이며 기본값은 5입니다. 한 번의 응답 크기를 제한하기 위해 `response_content`는 `summary`가 기본값입니다.
 - `scholar_search(query, limit?)` - Google Scholar metadata 검색. `limit`은 1-10입니다. 브라우저, SearchApi 메인, fallback을 지원합니다.
 - `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 여러 쿼리의 넓은 라이브 탐색과 읽기를 함께 수행하는 기본 도구입니다. 최대 4개 탭이 2-12개 쿼리를 처리하며, 웹페이지, PDF, 논문, GitHub 저장소를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. 로컬 PDF 도구는 로컬 파일이나 시각적 레이아웃 검토에만 사용하고, 저장소 clone은 편집, 빌드, 테스트, 전체 Git 이력이 필요할 때만 사용합니다. 쿼리별 `limit`은 1-20입니다. 호출 전체의 `extract_limit`은 abstract에서 기본 12, 최대 20이며 full에서 기본값과 최대값이 10입니다. `response_content`는 한 번의 응답 크기를 제한하기 위해 `summary`가 기본값입니다.
 - 통합 추출 결과는 `requested`, `applied`, `skipped`, `truncated`, `total_chars`를 반환합니다. `remaining_urls`는 검색을 반복하지 않고 `extract`에 바로 전달할 수 있습니다.
@@ -169,6 +169,8 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 - `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 정확한 식별자와 따옴표 표현은 deterministic variant로 자동 추가합니다. 반복 terminal 호출 대신 이 도구를 한 번 사용하며 브라우저, Google, SearchApi는 호출하지 않습니다.
 - `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때 프로젝트 지식을 관리합니다.
   - `action="search"`: `project_memory_search`를 위한 호환 alias입니다.
+  - `action="show"`: 기본적으로 count와 활성 record ID만 반환합니다. 전체 record 본문이 필요할 때만 `detail_level="full"`, 단일 assertion이나 entity는 `target_id`를 사용합니다.
+  - `action="record"`: 전달한 본문을 저장하고 ID, revision, status만 반환합니다.
   - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
 - `health()` - 검색과 로컬 research runtime 상태
 

@@ -1951,9 +1951,13 @@ export class ResearchStore {
     citationObservations: number;
     sourceEntries: number;
     sessions: number;
+    plans: number;
+    experiments: number;
+    decisions: number;
   }> {
     const db = await this.open();
-    const [events, documents, citations, sources, sessions] = await db.query<[
+    const [events, documents, citations, sources, sessions, plans, experiments, decisions] = await db.query<[
+      Array<{ count: number }>, Array<{ count: number }>, Array<{ count: number }>,
       Array<{ count: number }>, Array<{ count: number }>, Array<{ count: number }>,
       Array<{ count: number }>, Array<{ count: number }>,
     ]>(
@@ -1963,7 +1967,10 @@ export class ResearchStore {
        WHERE project_id = $project_id AND kind = 'citation_count' GROUP ALL;
        SELECT count() AS count FROM project_source_entry
        WHERE project_id = $project_id AND active = true GROUP ALL;
-       SELECT count() AS count FROM memory_session WHERE project_id = $project_id GROUP ALL;`,
+       SELECT count() AS count FROM memory_session WHERE project_id = $project_id GROUP ALL;
+       SELECT count() AS count FROM plan_revision WHERE project_id = $project_id GROUP ALL;
+       SELECT count() AS count FROM experiment_run WHERE project_id = $project_id GROUP ALL;
+       SELECT count() AS count FROM decision WHERE project_id = $project_id GROUP ALL;`,
       { project_id: projectId },
     ).collect();
     return {
@@ -1972,6 +1979,9 @@ export class ResearchStore {
       citationObservations: Number(citations[0]?.count ?? 0),
       sourceEntries: Number(sources[0]?.count ?? 0),
       sessions: Number(sessions[0]?.count ?? 0),
+      plans: Number(plans[0]?.count ?? 0),
+      experiments: Number(experiments[0]?.count ?? 0),
+      decisions: Number(decisions[0]?.count ?? 0),
     };
   }
 }

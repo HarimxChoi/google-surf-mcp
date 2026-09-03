@@ -15,6 +15,7 @@ export interface ProjectMemorySearchInput {
 
 export interface ProjectMemoryInput extends ProjectMemorySearchInput {
   action: 'create' | 'show' | 'search' | 'record' | 'rebuild' | 'export' | 'forget';
+  detail_level?: 'summary' | 'full';
   export_format?: 'dot' | 'd3' | 'html' | 'neo4j';
   export_view?: 'graph' | 'ontology' | 'lineage';
   name?: string;
@@ -181,10 +182,17 @@ export async function projectMemoryTool(
           memory: `Project: ${input.project_id} | Entity candidates: ${entities.length} | Status: ready`,
         });
       }
-      const detail = await service.getProject(input.project_id);
+      const detail = input.detail_level === 'full'
+        ? await service.getProject(input.project_id)
+        : await service.getProjectSummary(input.project_id);
+      const planCount = 'plans' in detail ? detail.plans.length : detail.plan_count;
+      const experimentCount = 'experiments' in detail
+        ? detail.experiments.length
+        : detail.experiment_count;
+      const decisionCount = 'decisions' in detail ? detail.decisions.length : detail.decision_count;
       return formatToolResponse({
         ...detail,
-        memory: `Project: ${detail.project.name} | Sources: ${detail.document_count + detail.source_entry_count} | Records: plans ${detail.plans.length}, experiments ${detail.experiments.length}, decisions ${detail.decisions.length}, assertions ${detail.assertion_count}, entities ${detail.entity_count} | Sessions: ${detail.session_count} | Status: ready`,
+        memory: `Project: ${detail.project.name} | Sources: ${detail.document_count + detail.source_entry_count} | Records: plans ${planCount}, experiments ${experimentCount}, decisions ${decisionCount}, assertions ${detail.assertion_count}, entities ${detail.entity_count} | Sessions: ${detail.session_count} | Status: ready`,
       });
     }
 
@@ -282,8 +290,13 @@ export async function projectMemoryTool(
         intent: input.intent,
       });
       return formatToolResponse({
-        session: recorded.session,
-        record: recorded.intent,
+        record: {
+          record_type: 'session',
+          record_id: recorded.intent.intent_revision_id,
+          project_id: projectId,
+          revision: recorded.intent.revision,
+          status: recorded.intent.status,
+        },
         memory_handle: recorded.session.memory_handle,
         memory: `Project: ${projectId} | Session: ${recorded.intent.intent.slice(0, 40)} | Record: session intent v${recorded.intent.revision} | Status: ready`,
       });
@@ -300,7 +313,12 @@ export async function projectMemoryTool(
         based_on_experiment_id: input.based_on_experiment_id,
       }, detail.plans.length > 0);
       return formatToolResponse({
-        record: plan,
+        record: {
+          record_type: 'plan',
+          record_id: plan.plan_revision_id,
+          project_id: projectId,
+          revision: plan.revision,
+        },
         memory: `Project: ${detail.project.name} | Record: plan v${plan.revision} | Status: ready`,
       });
     }
@@ -319,7 +337,12 @@ export async function projectMemoryTool(
           artifacts: input.artifacts,
         });
         return formatToolResponse({
-          record: experiment,
+          record: {
+            record_type: 'experiment',
+            record_id: experiment.experiment_id,
+            project_id: projectId,
+            status: experiment.status,
+          },
           memory: `Project: ${projectId} | Record: experiment ${experiment.name} ${experiment.status} | Status: ready`,
         });
       }
@@ -332,7 +355,12 @@ export async function projectMemoryTool(
         artifacts: input.artifacts,
       });
       return formatToolResponse({
-        record: experiment,
+        record: {
+          record_type: 'experiment',
+          record_id: experiment.experiment_id,
+          project_id: projectId,
+          status: experiment.status,
+        },
         memory: `Project: ${projectId} | Record: experiment ${experiment.name} started | Status: ready`,
       });
     }
@@ -348,7 +376,15 @@ export async function projectMemoryTool(
         supersedes_term_id: input.supersedes_term_id,
       });
       return formatToolResponse({
-        record: term,
+        record: {
+          record_type: 'ontology',
+          record_id: term.term_id,
+          project_id: projectId,
+          kind: term.kind,
+          name: term.name,
+          version: term.version,
+          status: term.status,
+        },
         memory: `Project: ${projectId} | Record: ontology ${term.name} v${term.version} | Status: ready`,
       });
     }
@@ -366,8 +402,13 @@ export async function projectMemoryTool(
           reason: input.reason,
         });
         return formatToolResponse({
-          record: merged.operation,
-          entity: merged.entity,
+          record: {
+            record_type: 'entity_merge',
+            record_id: merged.operation.operation_id,
+            project_id: projectId,
+            entity_id: merged.entity.entity_id,
+            status: merged.entity.status,
+          },
           memory: `Project: ${projectId} | Record: entity merge ${input.source_ids.length} | Status: ready`,
         });
       }
@@ -384,8 +425,13 @@ export async function projectMemoryTool(
           reason: input.reason,
         });
         return formatToolResponse({
-          record: split.operation,
-          entity: split.entity,
+          record: {
+            record_type: 'entity_split',
+            record_id: split.operation.operation_id,
+            project_id: projectId,
+            entity_id: split.entity.entity_id,
+            status: split.entity.status,
+          },
           memory: `Project: ${projectId} | Record: entity split 1 | Status: ready`,
         });
       }
@@ -402,8 +448,13 @@ export async function projectMemoryTool(
         valid_to: input.valid_to,
       });
       return formatToolResponse({
-        record: corrected.correction,
-        assertion: corrected.assertion,
+        record: {
+          record_type: 'correction',
+          record_id: corrected.correction.correction_id,
+          project_id: projectId,
+          assertion_id: corrected.assertion.assertion_id,
+          status: corrected.assertion.status,
+        },
         memory: `Project: ${projectId} | Record: assertion correction 1 | Status: ready`,
       });
     }
@@ -417,7 +468,11 @@ export async function projectMemoryTool(
       experiment_id: input.experiment_id,
     });
     return formatToolResponse({
-      record: decision,
+      record: {
+        record_type: 'decision',
+        record_id: decision.decision_id,
+        project_id: projectId,
+      },
       memory: `Project: ${projectId} | Record: decision ${decision.title} | Status: ready`,
     });
   } catch (error) {

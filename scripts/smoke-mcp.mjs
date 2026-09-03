@@ -89,7 +89,7 @@ try {
       throw new Error(`${name} result limit contract mismatch`);
     }
     const expectedExtractMax = name === 'search_parallel' ? 20 : 10;
-    const expectedResponseDefault = name === 'search_parallel' ? 'summary' : 'full';
+    const expectedResponseDefault = 'summary';
     if (properties.extract_limit?.minimum !== 1
       || properties.extract_limit?.maximum !== expectedExtractMax
       || (name === 'search' && properties.extract_limit?.default !== 5)
@@ -159,7 +159,8 @@ try {
     || !('export_format' in memoryProperties) || !('export_view' in memoryProperties)
     || !memoryProperties.export_format?.enum?.includes('html')
     || !memoryProperties.export_format?.enum?.includes('neo4j')
-    || !('all_projects' in memoryProperties)) {
+    || !('all_projects' in memoryProperties)
+    || memoryProperties.detail_level?.default !== 'summary') {
     throw new Error('project_memory visualization contract missing');
   }
   const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
@@ -230,13 +231,25 @@ try {
       body: 'Validate MCP schemas.',
     },
   });
-  if (planned.isError) throw new Error('plan create failed');
+  if (planned.isError
+    || JSON.stringify(planned.structuredContent).includes('Validate MCP schemas.')) {
+    throw new Error('plan compact receipt failed');
+  }
   const detail = await client.callTool({
     name: 'project_memory',
     arguments: { action: 'show', project_id: 'smoke' },
   });
-  if (detail.isError || detail.structuredContent?.search_event_count !== 0) {
-    throw new Error('project get failed');
+  if (detail.isError
+    || detail.structuredContent?.search_event_count !== 0
+    || detail.structuredContent?.plan_count !== 1
+    || detail.structuredContent?.plans !== undefined) {
+    throw new Error(`project compact show failed: ${JSON.stringify({
+      is_error: detail.isError ?? false,
+      error: detail.structuredContent?.error,
+      search_event_count: detail.structuredContent?.search_event_count,
+      plan_count: detail.structuredContent?.plan_count,
+      has_plans: detail.structuredContent?.plans !== undefined,
+    })}`);
   }
   const indexed = await client.callTool({
     name: 'project_memory',

@@ -36,7 +36,7 @@ describe('project_memory tool', () => {
       replacement: 12,
       reason: 'New citation observation.',
     }, service);
-    const replacementId = corrected.structuredContent?.assertion?.assertion_id as string;
+    const replacementId = corrected.structuredContent?.record?.assertion_id as string;
     const shown = await projectMemoryTool({
       action: 'show',
       project_id: 'correction-tool',
@@ -65,7 +65,7 @@ describe('project_memory tool', () => {
       aliases: ['checkpoint'],
       version: 1,
     }, service);
-    const firstId = result.structuredContent?.record?.term_id as string;
+    const firstId = result.structuredContent?.record?.record_id as string;
     const revised = await projectMemoryTool({
       action: 'record',
       record_type: 'ontology',
@@ -77,15 +77,61 @@ describe('project_memory tool', () => {
     }, service);
 
     expect(result.isError).not.toBe(true);
-    expect(result.structuredContent?.record).toMatchObject({
+    expect(result.structuredContent?.record).toEqual({
+      record_type: 'ontology',
+      record_id: firstId,
       project_id: 'ontology-tool',
       kind: 'entity_type',
       name: 'model',
-      aliases: ['checkpoint'],
       version: 1,
+      status: 'active',
     });
     expect(revised.structuredContent?.record).toMatchObject({ version: 2 });
     expect(await service.getOntologyTerm(firstId)).toMatchObject({ status: 'superseded' });
+  });
+
+  it('keeps project summaries and write receipts compact by default', async () => {
+    await service.createProject('Compact tool', 'compact-tool');
+    const body = `plan-body-marker ${'long plan content '.repeat(2_000)}`;
+    const plan = await projectMemoryTool({
+      action: 'record',
+      record_type: 'plan',
+      project_id: 'compact-tool',
+      title: 'Compact response plan',
+      body,
+    }, service);
+    const decision = await projectMemoryTool({
+      action: 'record',
+      record_type: 'decision',
+      project_id: 'compact-tool',
+      title: 'Compact response decision',
+      summary: `decision-body-marker ${'decision content '.repeat(400)}`,
+    }, service);
+    const summary = await projectMemoryTool({
+      action: 'show',
+      project_id: 'compact-tool',
+    }, service);
+    const full = await projectMemoryTool({
+      action: 'show',
+      project_id: 'compact-tool',
+      detail_level: 'full',
+    }, service);
+
+    expect(plan.structuredContent?.record).toMatchObject({
+      record_type: 'plan',
+      project_id: 'compact-tool',
+      revision: 1,
+    });
+    expect(JSON.stringify(plan.structuredContent)).not.toContain('plan-body-marker');
+    expect(JSON.stringify(decision.structuredContent)).not.toContain('decision-body-marker');
+    expect(summary.structuredContent).toMatchObject({
+      plan_count: 1,
+      experiment_count: 0,
+      decision_count: 1,
+    });
+    expect(summary.structuredContent?.plans).toBeUndefined();
+    expect(JSON.stringify(summary.structuredContent)).not.toContain('plan-body-marker');
+    expect(full.structuredContent?.plans?.[0]?.body).toContain('plan-body-marker');
   });
 
   it('searches stored project knowledge without creating a live search event', async () => {

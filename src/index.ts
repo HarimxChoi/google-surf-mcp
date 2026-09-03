@@ -502,8 +502,8 @@ const SingleSearchExtractionFields = {
   extract_limit: searchExtractLimitSchema().describe(
     `Maximum unique result URLs to extract. Integer ${MIN_SEARCH_EXTRACT_LIMIT}-${MAX_SEARCH_EXTRACT_LIMIT}, default ${DEFAULT_SEARCH_EXTRACT_LIMIT}.`,
   ),
-  response_content: z.enum(['summary', 'full']).default('full').describe(
-    'Controls only the returned body. full returns up to max_chars; summary returns a 1500-character evidence excerpt. Research storage keeps the full captured text in deterministic chunks.',
+  response_content: z.enum(['summary', 'full']).default('summary').describe(
+    'Controls only the returned body. summary is the default and returns a 1500-character evidence excerpt; full returns up to max_chars. Research storage keeps the full captured text in deterministic chunks.',
   ),
   max_chars: z.number().int().min(200).max(50_000).optional().describe(
     `Maximum returned characters per extracted result in response_content=full. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`,
@@ -738,6 +738,9 @@ const ProjectMemoryOutput = {
   document_count: z.number().optional(),
   citation_observation_count: z.number().optional(),
   source_entry_count: z.number().optional(),
+  plan_count: z.number().optional(),
+  experiment_count: z.number().optional(),
+  decision_count: z.number().optional(),
   active_source_snapshot: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };
@@ -762,7 +765,7 @@ server.registerTool('search', {
     'Use extract separately only when the exact public URL is already known and no new discovery is required. Use general repository tools only for editing, building, testing, or full Git history. ' +
     'Providing project_id also fuses stored project evidence with live results, but never makes this a local-only search. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'limit accepts integers from 1 to 20. extract_limit accepts integers from 1 to 10, defaults to 5, and limits unique extracted URLs. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
+    'limit accepts integers from 1 to 20. extract_limit accepts integers from 1 to 10, defaults to 5, and limits unique extracted URLs. Extracted bodies return 1500-character summaries by default; set response_content=full only when the response must contain longer text. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
     'GitHub none mode reads the README; abstract and full can sparse-index eligible repositories with Tree-sitter. ' +
     'With research enabled and project_id set, live web, exact, BM25, vector, code, and graph lanes are fused by RRF and one reranker. ' +
     'research_context returns up to three prior searches for deeper or adjacent follow-up work. ' +
@@ -806,7 +809,7 @@ server.registerTool('search', {
       retrieval_mode: baseDeps.config.researchRetrievalMode,
     }, researchService, runLive)
     : await runLive();
-  return shapeExtractionResponse(result, args, 'full');
+  return shapeExtractionResponse(result, args, 'summary');
 });
 
 server.registerTool('scholar_search', {
@@ -850,7 +853,7 @@ server.registerTool('search_parallel', {
     'Select extract_mode=full, not abstract, when the user asks to read originals, full text, document bodies, or code, or to compare source contents. ' +
     'Use extract separately only when the exact public URL is already known and no new discovery is required. Use general repository tools only for editing, building, testing, or full Git history. ' +
     'For stored project knowledge without live web discovery, use project_memory_search. ' +
-    'Each query limit accepts integers from 1 to 20. Call-wide extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
+    'Each query limit accepts integers from 1 to 20. Call-wide extract_limit accepts 1-20 with default 12 for abstract, and 1-10 with default 10 for full. Extracted bodies return 1500-character summaries by default; set response_content=full only when the response must contain longer text. The response includes applied, skipped, truncated, total_chars, and remaining_urls. ' +
     'GitHub none mode reads the README; abstract and full can sparse-index eligible repositories with Tree-sitter. ' +
     'With research enabled and project_id set, each query fuses live, exact, BM25, vector, code, and graph lanes through RRF and one reranker. ' +
     'research_context returns prior project searches; capture retains data lineage and include_project_ids uses versioned ontology and verified cross-project schema/entity links. ' +
@@ -978,7 +981,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
   description:
     'PROJECT MEMORY MANAGEMENT. ' +
     SharedResearchBrokerDescription +
-    'Use create to create a project; show to inspect known projects or durable records; record to store session intent, immutable plan revisions, experiments, decisions, versioned ontology terms, or corrections; rebuild to index approved local roots; export to write graph or lineage views; and forget for reversible deletion. ' +
+    'Use create to create a project; show to inspect known projects or durable records; record to store session intent, immutable plan revisions, experiments, decisions, versioned ontology terms, or corrections; rebuild to index approved local roots; export to write graph or lineage views; and forget for reversible deletion. show returns a compact summary unless detail_level=full is explicitly requested. record returns only a compact receipt and never echoes submitted bodies. ' +
     'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
     'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
@@ -989,6 +992,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
       'create: project_id and name required. show: inspect a known project, assertion, entity, or durable record. search: compatibility alias for project_memory_search. record: project_id and record_type required. rebuild: project_id required; roots optional. export: project_id, include_project_ids, or all_projects=true required. forget: project_id and forget_mode required; apply also requires confirm_token.',
     ),
     project_id: z.string().min(1).max(64).optional().describe('Stable project id. For search, this is the write-isolated primary scope. Omit to list projects or use all_projects.'),
+    detail_level: z.enum(['summary', 'full']).default('summary').describe('For show with project_id and no target_id, summary returns counts and active ids without durable record bodies. Use full only when every plan, experiment, and decision is explicitly required.'),
     include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects for one local search or integrated visualization export.'),
     all_projects: z.boolean().optional().describe('Search or export every active named project. Excludes Inbox and cannot be combined with project ids.'),
     query: z.string().min(1).max(400).optional().describe('Required for action=search. Searches stored local knowledge only and does not start live web discovery.'),
