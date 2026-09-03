@@ -18,7 +18,13 @@ function fixture() {
     writeFileSync(join(sourceDir, name), `// ${name}\n`, 'utf8');
   }
   writeFileSync(join(codexHome, 'config.toml'), '[features]\nhooks = true\n\n[mcp_servers.example]\ncommand = "example"\n', 'utf8');
-  return { codex_home: codexHome, surf_home: surfHome, source_dir: sourceDir, version: 'test-version' };
+  return {
+    codex_home: codexHome,
+    surf_home: surfHome,
+    source_dir: sourceDir,
+    node_path: 'node',
+    version: 'test-version',
+  };
 }
 
 afterEach(() => {
@@ -33,6 +39,7 @@ describe('host hook installer', () => {
     const once = readFileSync(join(options.codex_home, 'config.toml'), 'utf8');
     expect(once).toContain('[mcp_servers.example]');
     expect(once.match(/BEGIN google-surf host output hooks/g)).toHaveLength(1);
+    expect(once).toContain('command_windows = "& \\"node\\"');
 
     await installCodexHooks(options);
     const twice = readFileSync(join(options.codex_home, 'config.toml'), 'utf8');

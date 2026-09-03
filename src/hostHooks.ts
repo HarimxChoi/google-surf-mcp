@@ -57,7 +57,7 @@ function paths(options: HostHookOptions = {}) {
     installDir: join(surfHome, 'hooks', 'codex', version),
     manifestPath: join(surfHome, 'hooks', 'codex', 'install.json'),
     sourceDir: resolve(options.source_dir ?? dirname(fileURLToPath(import.meta.url))),
-    nodePath: options.node_path ?? 'node',
+    nodePath: options.node_path ?? process.execPath,
   };
 }
 
@@ -88,6 +88,8 @@ function tomlString(value: string): string {
 function hookBlock(nodePath: string, prePath: string, postPath: string): string {
   const preCommand = `${tomlString(nodePath)} ${tomlString(prePath)}`;
   const postCommand = `${tomlString(nodePath)} ${tomlString(postPath)}`;
+  const preWindowsCommand = `& ${preCommand}`;
+  const postWindowsCommand = `& ${postCommand}`;
   return [
     MARKER_START,
     '[[hooks.PreToolUse]]',
@@ -96,7 +98,7 @@ function hookBlock(nodePath: string, prePath: string, postPath: string): string 
     '[[hooks.PreToolUse.hooks]]',
     'type = "command"',
     `command = ${tomlString(preCommand)}`,
-    `command_windows = ${tomlString(preCommand)}`,
+    `command_windows = ${tomlString(preWindowsCommand)}`,
     'timeout = 3',
     'statusMessage = "Checking Google Surf shell budget"',
     '',
@@ -106,7 +108,7 @@ function hookBlock(nodePath: string, prePath: string, postPath: string): string 
     '[[hooks.PostToolUse.hooks]]',
     'type = "command"',
     `command = ${tomlString(postCommand)}`,
-    `command_windows = ${tomlString(postCommand)}`,
+    `command_windows = ${tomlString(postWindowsCommand)}`,
     'timeout = 5',
     'statusMessage = "Reranking oversized shell output"',
     MARKER_END,

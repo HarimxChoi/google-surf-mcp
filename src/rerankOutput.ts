@@ -129,7 +129,7 @@ export async function processOutputHook(
       visible_chars: state.visible_chars + replacement.length,
       updated_at: Date.now(),
     });
-    return { continue: false, stopReason: replacement };
+    return { decision: 'block', reason: replacement };
   } finally {
     await unlink(lock).catch(() => {});
   }

@@ -38,9 +38,9 @@ describe('Codex output hook', () => {
     const response = await processOutputHook(input(large), {
       state_root: root, trigger_chars: 100, max_chars: 500, max_turn_chars: 700,
     });
-    expect(response).toMatchObject({ continue: false });
-    expect(String(response?.stopReason)).toContain('perplexity');
-    expect(String(response?.stopReason).length).toBeLessThanOrEqual(500);
+    expect(response).toMatchObject({ decision: 'block' });
+    expect(String(response?.reason)).toContain('perplexity');
+    expect(String(response?.reason).length).toBeLessThanOrEqual(500);
   });
 
   it('redacts secrets and stores counters without source output', async () => {
@@ -49,8 +49,8 @@ describe('Codex output hook', () => {
     const response = await processOutputHook(input(`${marker}\nerror: authentication failed`), {
       state_root: root, trigger_chars: 1_000, max_chars: 500, max_turn_chars: 1_000,
     });
-    expect(String(response?.stopReason)).toContain('API_KEY=[REDACTED]');
-    expect(String(response?.stopReason)).not.toContain('private-hook-value');
+    expect(String(response?.reason)).toContain('API_KEY=[REDACTED]');
+    expect(String(response?.reason)).not.toContain('private-hook-value');
     const stateText = readdirSync(root)
       .filter((name) => name.endsWith('.json'))
       .map((name) => readFileSync(join(root, name), 'utf8'))
@@ -64,6 +64,6 @@ describe('Codex output hook', () => {
     const options = { state_root: root, trigger_chars: 100, max_chars: 300, max_turn_chars: 350 };
     await processOutputHook(input('x'.repeat(300)), options);
     const response = await processOutputHook(input('y'.repeat(300)), options);
-    expect(String(response?.stopReason)).toContain('reached its shell-output budget');
+    expect(String(response?.reason)).toContain('reached its shell-output budget');
   });
 });

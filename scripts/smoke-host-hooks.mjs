@@ -17,7 +17,11 @@ function run(args, input) {
 }
 
 function runCommand(command, input) {
-  const result = spawnSync(command, { cwd: process.cwd(), env, input, encoding: 'utf8', shell: true });
+  const result = process.platform === 'win32'
+    ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        cwd: process.cwd(), env, input, encoding: 'utf8',
+      })
+    : spawnSync(command, { cwd: process.cwd(), env, input, encoding: 'utf8', shell: true });
   if (result.status !== 0) throw new Error(`${command} failed: ${result.stderr || result.stdout}`);
   return result.stdout;
 }
@@ -35,7 +39,8 @@ try {
   const preHook = join(manifest.install_dir, 'codexShellGuard.js');
   const postHook = join(manifest.install_dir, 'rerankOutput.js');
   assert(existsSync(preHook) && existsSync(postHook), 'installed hook files are missing');
-  const configuredCommands = [...readFileSync(configPath, 'utf8').matchAll(/^command_windows = (.+)$/gm)]
+  const commandKey = process.platform === 'win32' ? 'command_windows' : 'command';
+  const configuredCommands = [...readFileSync(configPath, 'utf8').matchAll(new RegExp(`^${commandKey} = (.+)$`, 'gm'))]
     .map((match) => JSON.parse(match[1]));
   assert(configuredCommands.length === 2, 'managed hook commands are missing from Codex config');
 
@@ -53,9 +58,9 @@ try {
     tool_response: { output: `${'still running\n\n'.repeat(700)}final perplexity: 8.42\nstatus: complete` },
   });
   const post = JSON.parse(runCommand(configuredCommands[1], postInput));
-  assert(post.continue === false, 'oversized output was not replaced');
-  assert(post.stopReason.length <= 6_000, 'ranked output exceeded 6000 characters');
-  assert(post.stopReason.includes('perplexity'), 'ranked output dropped the relevant result');
+  assert(post.decision === 'block', 'oversized output was not replaced');
+  assert(post.reason.length <= 6_000, 'ranked output exceeded 6000 characters');
+  assert(post.reason.includes('perplexity'), 'ranked output dropped the relevant result');
 
   const status = run(['build/cli.js', 'hooks', 'status', '--host', 'codex']);
   assert(status.includes('"files_valid": true'), 'status did not validate installed files');
