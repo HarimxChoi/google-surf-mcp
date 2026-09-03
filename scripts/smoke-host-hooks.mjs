@@ -41,7 +41,8 @@ try {
   assert(existsSync(preHook) && existsSync(postHook), 'installed hook files are missing');
   const commandKey = process.platform === 'win32' ? 'command_windows' : 'command';
   const configuredCommands = [...readFileSync(configPath, 'utf8').matchAll(new RegExp(`^${commandKey} = (.+)$`, 'gm'))]
-    .map((match) => JSON.parse(match[1]));
+    .map((match) => JSON.parse(match[1]))
+    .filter((command) => /(?:codexShellGuard|rerankOutput)\.js/.test(command));
   assert(configuredCommands.length === 2, 'managed hook commands are missing from Codex config');
 
   const preInput = JSON.stringify({
