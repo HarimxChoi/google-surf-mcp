@@ -130,6 +130,22 @@ npm run bootstrap
 CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 ```
 
+### 선택형 Codex 출력 보호
+
+Google Surf는 큰 Bash 출력이 모델에 도달하기 전에 재랭킹하는 [Codex hook](https://developers.openai.com/codex/hooks)을 선택적으로 설치할 수 있습니다. 명령은 기존 호스트가 실행하며, 훅은 source-order, exact, BM25 결과를 RRF로 결합할 뿐입니다. Google Surf DB나 브라우저를 열지 않고 명령 출력도 저장하지 않습니다.
+
+```bash
+npx -y google-surf-mcp@latest hooks install --host codex
+```
+
+Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. 기본값은 재랭킹 결과 6,000자, 턴당 Shell 출력 12,000자와 신규 Bash 호출 12회, 동일하거나 유사한 검색 2회입니다. 명시적인 foreground polling loop도 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
+
+```bash
+npx -y google-surf-mcp@latest hooks status --host codex
+npx -y google-surf-mcp@latest hooks update --host codex
+npx -y google-surf-mcp@latest hooks uninstall --host codex
+```
+
 ## Claude Code에서 사용
 
 `~/.claude.json`에 이거 붙여넣기:
