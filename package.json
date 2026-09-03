@@ -1,12 +1,13 @@
 {
   "name": "google-surf-mcp",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "type": "module",
   "bin": {
-    "google-surf-mcp": "build/index.js",
-    "google-surf-collect": "build/collect.js"
+    "google-surf-mcp": "build/cli.js",
+    "google-surf-collect": "build/collect.js",
+    "google-surf-rerank": "build/rerankOutput.js"
   },
   "files": [
     "build",
@@ -20,7 +21,7 @@
     "sync-versions": "node scripts/sync-versions.mjs",
     "prebuild": "npm run sync-versions",
     "build": "npm run build:core",
-    "build:core": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc && node -e \"for(const f of ['build/index.js','build/collect.js'])require('fs').chmodSync(f,'755')\"",
+    "build:core": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc && node -e \"for(const f of ['build/cli.js','build/index.js','build/collect.js','build/codexShellGuard.js','build/rerankOutput.js'])require('fs').chmodSync(f,'755')\"",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "bootstrap": "node build/bootstrap.js",
@@ -39,6 +40,7 @@
     "research:evaluate": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/evaluate-research-memory.js",
     "research:vector-smoke": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/smoke-vector-retrieval.js",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
+    "smoke:hooks": "node scripts/smoke-host-hooks.mjs",
     "drift-check": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/repair/index.js"
   },
   "keywords": [

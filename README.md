@@ -132,6 +132,22 @@ Override paths if needed:
 CHROME_PATH=/path/to/chrome SURF_TZ=America/New_York npm run bootstrap
 ```
 
+### Optional Codex output protection
+
+Google Surf can install an opt-in [Codex hook](https://developers.openai.com/codex/hooks) that ranks oversized Bash output before it reaches the model. The host still executes the command; the hook only applies stateless source-order, exact, and BM25 ranking with RRF. It opens neither the Google Surf database nor a browser and does not store command output.
+
+```bash
+npx -y google-surf-mcp@latest hooks install --host codex
+```
+
+Restart Codex, then open `/hooks` to review and trust the definitions. Defaults are 6,000 characters per ranked result, 12,000 shell-output characters and 12 new Bash calls per turn, and two identical or near-duplicate searches. Explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
+
+```bash
+npx -y google-surf-mcp@latest hooks status --host codex
+npx -y google-surf-mcp@latest hooks update --host codex
+npx -y google-surf-mcp@latest hooks uninstall --host codex
+```
+
 ## Use with Claude Code
 
 Paste this into your `~/.claude.json`:

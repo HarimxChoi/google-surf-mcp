@@ -19,7 +19,7 @@ const baseEnv = {
 const offClient = new Client({ name: 'google-surf-smoke-off', version: '1.0.0' });
 const offTransport = new StdioClientTransport({
   command: process.execPath,
-  args: ['build/index.js'],
+  args: ['build/cli.js'],
   cwd: process.cwd(),
   env: { ...baseEnv, SURF_RESEARCH: 'false' },
   stderr: 'pipe',
@@ -122,7 +122,7 @@ try {
 const client = new Client({ name: 'google-surf-smoke', version: '1.0.0' });
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ['build/index.js'],
+  args: ['build/cli.js'],
   cwd: process.cwd(),
   env: {
     ...baseEnv,
