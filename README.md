@@ -70,14 +70,14 @@ Browser search needs no API key. SearchApi can be configured as an optional prim
 
 ## Numbers
 
-###Search speed
+### Search speed
 
 | | result |
 |---|---|
 | search | 4.0-5.1s/query |
 | scholar_search | 3.8-5.6s/query |
 
-###Live reranker check
+### Live reranker check
 
 | 32 held-out queries | nDCG@5 | MRR | Precision@5 |
 |---|---:|---:|---:|
