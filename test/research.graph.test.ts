@@ -88,6 +88,11 @@ describe('research graph sidecar', () => {
     expect(first.community).toEqual(second.community);
     expect(first.pagerank).toEqual(second.pagerank);
     expect(rankGraphProjection(projection, 'activation probe')).not.toHaveLength(0);
+    const target = projection.nodes.find((node) => node.label === 'Activation probe')!;
+    const unrelated = projection.nodes.find((node) => node.node_id !== target.node_id)!;
+    const disconnected = { ...projection, nodes: [target, unrelated], edges: [] };
+    expect(rankGraphProjection(disconnected, 'activation probe', 2, [unrelated.node_id])
+      .map(({ node }) => node.node_id)).toContain(target.node_id);
     expect(changed.projection_id).not.toBe(projection.projection_id);
   });
 
@@ -201,5 +206,84 @@ describe('research graph sidecar', () => {
     expect(hits.some((hit) => hit.node.project_id === 'project-b'
       && hit.node.source_id === 'document-b')).toBe(true);
     expect(unlinkedHits.some((hit) => hit.node.project_id === 'project-b')).toBe(false);
+  });
+
+  it('projects typed catalog revisions without collapsing qualified lineage edges', () => {
+    const recordedAt = '2026-09-04T12:00:00.000Z';
+    const asset = (asset_id: string, kind: 'task' | 'attempt' | 'measurement') => ({
+      asset_id,
+      project_id: 'catalog-graph',
+      kind,
+      status: 'active' as const,
+      current_revision: 1,
+      current_revision_id: `${asset_id}:v1`,
+      aliases: [],
+      protected: false,
+      access_tier: 'hot' as const,
+      created_at: recordedAt,
+      updated_at: recordedAt,
+    });
+    const source: ProjectGraphSource = {
+      project: {
+        project_id: 'catalog-graph', name: 'Catalog Graph', status: 'active',
+        created_at: recordedAt, updated_at: recordedAt,
+      },
+      source_entries: [], documents: [], plans: [], experiments: [], decisions: [],
+      sessions: [], intents: [], entities: [], assertions: [], symbols: [], code_relations: [],
+      evidence: [{
+        evidence_id: 'evidence-1', project_id: 'catalog-graph', source_type: 'manual',
+        source_id: 'operator-note', created_at: recordedAt,
+      }],
+      catalog_assets: [
+        asset('task-a', 'task'), asset('attempt-a', 'attempt'), asset('measurement-a', 'measurement'),
+      ],
+      catalog_revisions: [{
+        revision_id: 'task-a:v1', asset_id: 'task-a', project_id: 'catalog-graph', kind: 'task',
+        revision: 1, operation: 'create', body_bytes: 0, fields: { title: 'Build allocator' },
+        evidence_ids: [], artifact_references: [], changed_fields: ['title'], missing_fields: [],
+        effective_at: '2026-09-03T00:00:00.000Z', recorded_at: recordedAt,
+      }, {
+        revision_id: 'attempt-a:v1', asset_id: 'attempt-a', project_id: 'catalog-graph', kind: 'attempt',
+        revision: 1, operation: 'create', body_bytes: 0,
+        fields: { title: 'Integer allocation run', task_id: 'task-a' },
+        evidence_ids: ['evidence-1'],
+        artifact_references: [{ artifact_id: 'run-output', role: 'log', available: true }, {
+          artifact_id: 'run-output', role: 'checkpoint', available: true,
+        }],
+        changed_fields: ['title', 'task_id'], missing_fields: [],
+        effective_at: '2026-09-04T00:00:00.000Z', recorded_at: recordedAt,
+      }, {
+        revision_id: 'measurement-a:v1', asset_id: 'measurement-a', project_id: 'catalog-graph',
+        kind: 'measurement', revision: 1, operation: 'create', body_bytes: 0,
+        fields: { metric: 'ppl', value: 7.04, attempt_id: 'attempt-a' },
+        evidence_ids: ['evidence-1'], artifact_references: [],
+        changed_fields: ['metric', 'value', 'attempt_id'], missing_fields: [], recorded_at: recordedAt,
+      }],
+    };
+
+    const projection = buildGraphProjection([source]);
+    const artifactEdges = projection.edges.filter((edge) => edge.type === 'REFERENCES_ARTIFACT');
+    const attemptRevision = projection.nodes.find((node) => node.source_id === 'attempt-a:v1');
+
+    expect(projection.nodes.some((node) => node.kind === 'task' && node.source_id === 'task-a:v1'))
+      .toBe(true);
+    expect(projection.nodes.some((node) => node.kind === 'measurement'
+      && node.source_id === 'measurement-a:v1')).toBe(true);
+    expect(attemptRevision).toMatchObject({
+      record_id: 'attempt-a',
+      revision_id: 'attempt-a:v1',
+    });
+    expect(projection.edges.some((edge) => edge.type === 'IMPLEMENTS_TASK')).toBe(true);
+    expect(projection.edges.some((edge) => edge.type === 'OBSERVED_IN_ATTEMPT')).toBe(true);
+    expect(projection.edges.some((edge) => edge.type === 'HAS_REVISION'
+      && edge.effective_at === '2026-09-04T00:00:00.000Z'
+      && edge.recorded_at === recordedAt)).toBe(true);
+    expect(artifactEdges).toHaveLength(2);
+    expect(new Set(artifactEdges.map((edge) => edge.edge_id)).size).toBe(2);
+    expect(new Set(artifactEdges.map((edge) => edge.qualifiers?.role)))
+      .toEqual(new Set(['log', 'checkpoint']));
+    expect(projection.edges.some((edge) => edge.source === attemptRevision?.node_id
+      && edge.type === 'SUPPORTED_BY' && edge.evidence_ids?.[0] === 'evidence-1')).toBe(true);
+    expect(rankGraphProjection(projection, 'integer allocation run')).not.toHaveLength(0);
   });
 });

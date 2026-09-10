@@ -326,7 +326,19 @@ flowchart TB
 
 ### One local knowledge base
 
-One SurrealDB instance persistently stores web results, papers, code, sessions, plans, experiments, decisions, ontology, and provenance. A single local research broker owns the embedded RocksDB connection. Multiple MCP sessions connect to it through authenticated local IPC, run reads concurrently, and order writes without opening the database themselves. Graph projections and analytics such as PageRank and communities are derived data that can be rebuilt from source hashes and ontology versions.
+One SurrealDB instance is the authority for three distinct layers:
+
+- **Catalog:** stable identities, revisions, project membership, ontology, provenance, and temporal links.
+- **Payloads:** exact bodies, source snapshots, manifests, and artifact references. Identical content is stored once and can be fetched by ID and byte span.
+- **Derived views:** exact, BM25, vector, code, and graph indexes plus the compact current-project view. These are versioned by source hash and can be rebuilt.
+
+A single local research broker owns the embedded RocksDB connection. Multiple MCP sessions connect through authenticated local IPC, run bounded reads concurrently, and serialize writes without opening another database process. Original evidence and historical occurrences remain addressable even when bodies, embeddings, or graph structures are deduplicated.
+
+### Durable records and incremental indexing
+
+`project_memory` writes plans, experiments, attempts, measurements, artifacts, documents, decisions, and sessions as typed records. A stable asset ID receives revisions; an idempotency key makes an uncertain retry resolve to the same committed revision. `body_path` streams bodies up to 256 MiB, artifact manifests are paginated instead of sliced, and `get`/`get_batch` return exact records or bounded body spans. Compact write receipts report accepted bytes, references, revision, and the exact readback handle without echoing the submitted body.
+
+`sync` accepts registered roots or explicit changed and removed paths. Unchanged roots and parent identities remain intact, a no-op does not rewrite derived indexes, and a one-file change publishes only the affected generation. Code, retrieval, and graph publication run under one durable job ID. `job_wait` uses a revision cursor, `job_cancel` stops at a safe stage boundary, and unfinished jobs resume after process restart.
 
 ### Ontology and cross-project links
 
@@ -344,7 +356,42 @@ This preserves the evidence behind claims and decisions while retaining correcte
 
 Graphology builds a typed graph projection from SurrealDB and computes PageRank, connected components, and Louvain communities. At retrieval time, related nodes seed PPR-based multi-hop search. Live web, exact, BM25, vector, and graph candidates are combined through deterministic RRF and one shared reranker.
 
-Local multi-query retrieval batches query embeddings, fuses lexical and vector candidates first, expands the graph once, hydrates selected chunks once, and reranks once. Graph-only all-project searches use a lightweight memory-node index and verified identity aliases to select at most four graph scopes instead of constructing every project graph at query time.
+Local multi-query retrieval batches query embeddings, keeps exact, BM25, and vector lanes independent through RRF, expands the graph once, hydrates selected chunks once, and reranks once. Graph-only all-project searches use a lightweight memory-node index and verified identity aliases to select at most four graph scopes instead of constructing every project graph at query time.
+
+#### Research retrieval check
+
+The 60-query regression fixture compares the lexical baseline with the complete local RAG path. To separate retrieval changes from HNSW approximation, the check pins one embedding thread and uses exhaustive vector scoring. The table reports the median of three fresh-process runs:
+
+| 60 controlled queries | Recall@10 | nDCG@10 | MRR@10 |
+|---|---:|---:|---:|
+| Lexical baseline | 0.3333 | 0.3333 | 0.3333 |
+| Exact + BM25 + Vector + Graph RRF | **0.9833** | **0.8194** | **0.7668** |
+| + shared reranker | **0.9833** | **0.8194** | **0.7668** |
+
+All retrieved targets passed exact provenance readback. The conservative reranker preserved the fused order on this fixture; this check does not claim production search quality or a reranker gain.
+
+`npm run research:vector-backends -- --rows 5000` compares physical representations with deterministic test vectors. The sample below excludes E5 model loading and should be rerun on the target machine:
+
+| Backend | Input rows | Stored vectors | Insert | Query p95 | Recall |
+|---|---:|---:|---:|---:|---:|
+| HNSW | 5,000 | 5,000 | 1292.1 ms | 10.77 ms | 1.000 |
+| Compact | 5,000 | 1,250 | 357.1 ms | 3.96 ms | 1.000 |
+| Exhaustive | 5,000 | 5,000 | 1197.1 ms | 289.79 ms | 1.000 |
+
+The default remains HNSW for full-chunk semantic coverage. Compact indexes one representative chunk per source; it used less memory and matched aggregate recall in this short-record fixture, but can miss rare details near the tail of long sources.
+
+#### Broker and durability check
+
+| Latest 100-query local soak | Result |
+|---|---:|
+| Browser broker launches | 0 |
+| Active database owner restarts | 0 |
+| Query RSS delta | +10.9 MiB |
+| Peak observed research worker RSS | 375.5 MiB |
+| Idle drain and transparent reopen | Passed |
+| No-op sync / one-file incremental sync | Passed / Passed |
+
+`npm run research:reopen-probe` also verifies byte-exact body paging, a paginated 225-reference artifact manifest, and a pending rebuild that resumes after process restart and becomes searchable. The soak runs with the vector model disabled to isolate broker, database, and query lifecycle memory; vector backends are measured separately above.
 
 ### Project isolation and knowledge reuse
 
@@ -410,6 +457,23 @@ Project: Graph memory | Session: temporal graph research | Stored: paper 1 (Grap
 
 Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `project_memory_search` and `project_memory`. Obsidian and Notion sync are not included and will remain project-level opt-in when added.
 
+### Local operations CLI
+
+These commands use the same authenticated research broker as MCP sessions. They do not open another embedded database owner or browser:
+
+```powershell
+npx google-surf-mcp doctor --json
+npx google-surf-mcp daemon start --background --no-window
+npx google-surf-mcp memory get --project PROJECT --record RECORD --json
+npx google-surf-mcp memory sync --project PROJECT --manifest changes.json --json
+npx google-surf-mcp memory current --project PROJECT --json
+npx google-surf-mcp job wait --project PROJECT --id JOB --after-revision 0 --json
+npx google-surf-mcp job cancel --project PROJECT --id JOB --reason "operator request" --json
+npx google-surf-mcp daemon drain --json
+```
+
+`doctor` is passive: it reports process identity, versions, capabilities, queue counters, memory counters, cache bytes, and current lifecycle state without opening the database, vector model, or graph. The broker drains after meaningful work is idle even if an MCP client remains connected; active requests, commits, and background jobs postpone the drain. The next request reconnects transparently.
+
 ## Env vars
 
 | var | default | notes |
@@ -424,15 +488,22 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 | `SURF_RESEARCH` | `true` | enables local project memory, capture, indexing, `project_memory_search`, and `project_memory`; set `false` for search and extraction only |
 | `SURF_RETRIEVAL_MODE` | `hybrid` | research search route: `live` or `hybrid`; used only when `SURF_RESEARCH=true` |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB data directory |
+| `SURF_RESEARCH_DB_ENDPOINT` | unset | optional remote SurrealDB endpoint; requires `wss`/`https`, except `ws`/`http` is allowed for localhost |
+| `SURF_RESEARCH_DB_NAMESPACE` | `google_surf` | SurrealDB namespace used by the research catalog |
+| `SURF_RESEARCH_DB_DATABASE` | `research` | SurrealDB database used by the research catalog |
+| `SURF_RESEARCH_DB_TOKEN` | unset | bearer token for a remote research database; alternatively set `SURF_RESEARCH_DB_USERNAME` and `SURF_RESEARCH_DB_PASSWORD` |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | local 384-dimensional model used by HNSW vector retrieval and final reranking. The default model revision is pinned; `off` disables the vector lane. |
 | `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | disables the ONNX CPU memory arena and memory pattern; set `false` to trade higher peak memory for faster initial indexing |
 | `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread count, clamped to 1-16 |
+| `SURF_RESEARCH_VECTOR_BACKEND` | `hnsw` | vector representation: `hnsw`, content-deduplicated `compact`, or bounded `exhaustive` |
 | `SURF_RESEARCH_REPO_AUTO` | `true` | automatically sparse-index at most one small, relevant GitHub repository per search call |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | maximum searchable source-text size for automatic GitHub indexing; assets are excluded |
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | maximum searchable source file count for automatic GitHub indexing |
-| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | how long the shared research broker remains available after the last client disconnects |
+| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | drain delay after the last meaningful work, even when clients remain connected; active requests and background jobs postpone drain |
 | `SURF_RESEARCH_READ_CONCURRENCY` | `4` | maximum concurrent broker reads; identical in-flight reads share one operation |
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | timeout per embedded SurrealDB query, clamped to 1-600 seconds; a timed-out retrieval lane is reported as partial while other lanes still return |
+| `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | byte budget for in-process graph projections and analysis artifacts |
+| `SURF_RESEARCH_WORKER_SOFT_MEMORY_MB` | `2048` | RSS threshold that requests an immediate idle drain after active work completes |
 | `GITHUB_TOKEN` | unset | optional GitHub token that raises API limits for repository inspection |
 | `SURF_RESEARCH_CODE_WORKERS` | auto, max 4 | Tree-sitter worker count for initial code structure indexing |
 | `SURF_LOCALE` | `en-US` | browser locale |

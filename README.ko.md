@@ -297,7 +297,19 @@ flowchart TB
 
 ### 하나의 로컬 지식 베이스
 
-SurrealDB 하나가 웹 검색, 논문, 코드, 세션, 계획, 실험, 결정, 온톨로지와 provenance를 영구 저장합니다. 로컬 research broker 하나만 embedded RocksDB 연결을 소유합니다. 여러 MCP 세션은 인증된 로컬 IPC로 broker에 연결해 조회를 병렬 실행하고 쓰기 순서를 보장하며 DB를 직접 열지 않습니다. Graph projection과 PageRank, community 같은 분석 결과는 원본이 아니라 source hash와 ontology version에서 다시 만들 수 있는 파생 데이터로 관리합니다.
+SurrealDB 하나가 서로 다른 세 계층의 기준이 됩니다.
+
+- **Catalog:** 안정적인 ID, revision, 프로젝트 소속, ontology, provenance와 시간 관계
+- **Payload:** 정확한 본문, source snapshot, manifest와 artifact reference. 같은 내용은 한 번 저장하고 ID와 byte 구간으로 다시 읽습니다.
+- **Derived view:** exact, BM25, vector, code, graph index와 작은 현재 프로젝트 view. Source hash를 기준으로 다시 만들 수 있습니다.
+
+로컬 research broker 하나만 embedded RocksDB 연결을 소유합니다. 여러 MCP 세션은 인증된 로컬 IPC로 연결해 제한된 조회를 병렬 실행하고 쓰기를 순서대로 처리합니다. 본문, embedding과 graph 구조를 중복 제거해도 원본 evidence와 각 실험의 이력은 별도 ID로 계속 조회할 수 있습니다.
+
+### 손실 없는 기록과 증분 색인
+
+`project_memory`는 계획, 실험, attempt, measurement, artifact, 문서, 결정과 세션을 typed record로 저장합니다. 같은 asset ID에 revision을 추가하고, 결과를 받지 못해 재시도해도 같은 idempotency key는 이미 commit된 revision을 반환합니다. `body_path`는 최대 256 MiB 본문을 streaming 저장하고 artifact manifest는 자르지 않고 페이지로 읽습니다. `get`과 `get_batch`는 정확한 record 또는 지정한 본문 byte 구간을 반환합니다. 쓰기 영수증은 본문을 다시 출력하지 않고 저장 byte, reference 수, revision과 readback handle만 반환합니다.
+
+`sync`는 등록 root 또는 명시적인 변경·삭제 path를 받습니다. 변경되지 않은 root와 parent ID는 유지하고, no-op은 파생 index를 다시 쓰지 않으며, 파일 하나의 변경은 해당 generation만 갱신합니다. Code, retrieval, graph publication은 하나의 durable job ID로 추적합니다. `job_wait`는 revision cursor로 상태 변경을 기다리고, `job_cancel`은 안전한 stage 경계에서 중단하며, 완료되지 않은 작업은 process 재시작 후 이어서 실행합니다.
 
 ### 온톨로지와 프로젝트 간 연결
 
@@ -315,7 +327,42 @@ Versioned ontology는 entity type과 relation의 변경 이력을 revision으로
 
 Graphology는 SurrealDB의 원본에서 typed graph projection을 만들고 PageRank, connected components와 Louvain community를 계산합니다. 검색할 때는 관련 node를 시작점으로 PPR 기반 multi-hop 검색을 수행합니다. Live web, exact, BM25, vector와 graph 결과는 결정형 RRF와 공통 리랭커로 결합합니다.
 
-로컬 multi-query 검색은 query embedding을 batch 처리하고 lexical·vector 후보를 먼저 통합한 뒤 graph 확장, 선택 chunk hydrate, 최종 rerank를 각각 한 번만 수행합니다. Graph-only 전체 프로젝트 검색은 query 시점에 모든 프로젝트 graph를 만들지 않고 가벼운 memory-node index와 검증된 identity alias로 최대 4개 graph scope를 선택합니다.
+로컬 multi-query 검색은 query embedding을 batch 처리하고 exact, BM25, vector lane을 독립적으로 RRF에 반영한 뒤 graph 확장, 선택 chunk hydrate, 최종 rerank를 각각 한 번만 수행합니다. Graph-only 전체 프로젝트 검색은 query 시점에 모든 프로젝트 graph를 만들지 않고 가벼운 memory-node index와 검증된 identity alias로 최대 4개 graph scope를 선택합니다.
+
+#### 로컬 RAG 검색 검증
+
+60개 query 회귀 fixture로 lexical baseline과 전체 로컬 RAG 경로를 비교합니다. HNSW 근사 탐색의 변동과 검색 로직 변경을 분리하기 위해 embedding thread를 1개로 고정하고 exhaustive vector scoring을 사용했습니다. 아래 표는 fresh process에서 세 번 실행한 중앙값입니다.
+
+| 통제 query 60개 | Recall@10 | nDCG@10 | MRR@10 |
+|---|---:|---:|---:|
+| Lexical baseline | 0.3333 | 0.3333 | 0.3333 |
+| Exact + BM25 + Vector + Graph RRF | **0.9833** | **0.8194** | **0.7668** |
+| + shared reranker | **0.9833** | **0.8194** | **0.7668** |
+
+검색된 모든 target은 원문 provenance readback을 통과했습니다. 보수적인 reranker는 이 fixture에서 RRF 순서를 유지했습니다. 이 수치는 실제 프로젝트의 검색 품질이나 reranker 개선 폭을 주장하는 benchmark가 아닙니다.
+
+`npm run research:vector-backends -- --rows 5000`은 결정론적 test vector로 물리 표현을 비교합니다. 아래 표는 E5 model load를 포함하지 않으며 대상 컴퓨터에서 다시 측정해야 합니다.
+
+| Backend | 입력 row | 저장 vector | Insert | Query p95 | Recall |
+|---|---:|---:|---:|---:|---:|
+| HNSW | 5,000 | 5,000 | 1292.1 ms | 10.77 ms | 1.000 |
+| Compact | 5,000 | 1,250 | 357.1 ms | 3.96 ms | 1.000 |
+| Exhaustive | 5,000 | 5,000 | 1197.1 ms | 289.79 ms | 1.000 |
+
+기본값은 전체 chunk의 semantic coverage를 유지하는 HNSW입니다. Compact는 source마다 대표 chunk 하나만 색인하며 이 짧은 record fixture에서는 메모리를 덜 사용하면서 aggregate recall을 유지했지만, 긴 source 후반의 드문 근거를 놓칠 수 있습니다.
+
+#### Broker와 내구성 검증
+
+| 최근 local-only query 100회 soak | 결과 |
+|---|---:|
+| Browser broker 실행 | 0회 |
+| 작업 중 database owner 재시작 | 0회 |
+| Query RSS 증가 | +10.9 MiB |
+| Research worker 관측 peak RSS | 375.5 MiB |
+| Idle drain 후 자동 재연결 | 통과 |
+| No-op sync / 파일 1개 증분 sync | 통과 / 통과 |
+
+`npm run research:reopen-probe`는 byte 단위 본문 paging, 225개 reference를 가진 artifact manifest의 페이지 조회, process 재시작 후 pending rebuild 재개와 검색 반영도 검증합니다. Soak에서는 broker, database와 query lifecycle 메모리만 분리해 보기 위해 vector model을 끄며, vector backend는 위 표에서 별도로 측정합니다.
 
 ### 프로젝트 격리와 지식 재사용
 
@@ -381,6 +428,23 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 
 `SURF_RESEARCH=false`이면 DB와 sidecar를 열지 않고 `project_memory_search`와 `project_memory`도 등록하지 않습니다. Obsidian과 Notion 동기화는 포함하지 않으며 이후에도 프로젝트별 opt-in으로만 제공합니다.
 
+### 로컬 운영 CLI
+
+다음 명령은 MCP 세션과 같은 인증된 research broker를 사용합니다. 별도 embedded DB owner나 browser를 열지 않습니다.
+
+```powershell
+npx google-surf-mcp doctor --json
+npx google-surf-mcp daemon start --background --no-window
+npx google-surf-mcp memory get --project PROJECT --record RECORD --json
+npx google-surf-mcp memory sync --project PROJECT --manifest changes.json --json
+npx google-surf-mcp memory current --project PROJECT --json
+npx google-surf-mcp job wait --project PROJECT --id JOB --after-revision 0 --json
+npx google-surf-mcp job cancel --project PROJECT --id JOB --reason "operator request" --json
+npx google-surf-mcp daemon drain --json
+```
+
+`doctor`는 passive 진단입니다. DB, vector model과 graph를 열지 않고 process identity, version, capability, queue, memory, cache와 lifecycle 상태를 표시합니다. MCP client가 연결된 상태여도 실제 작업이 없으면 broker를 drain하고, 진행 중인 요청, commit과 background job이 있으면 종료를 미룹니다. 다음 요청은 자동으로 다시 연결됩니다.
+
 ## Env vars
 
 | 변수 | 기본값 | 설명 |
@@ -395,15 +459,22 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 | `SURF_RESEARCH` | `true` | 로컬 프로젝트 메모리, 저장, 색인, `project_memory_search`와 `project_memory` 활성화 |
 | `SURF_RETRIEVAL_MODE` | `hybrid` | 연구 검색 분기: `live` 또는 `hybrid`. `SURF_RESEARCH=true`일 때만 사용 |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB 데이터 디렉터리 |
+| `SURF_RESEARCH_DB_ENDPOINT` | 미설정 | 선택 remote SurrealDB endpoint. `wss`/`https`가 필요하며 localhost만 `ws`/`http` 허용 |
+| `SURF_RESEARCH_DB_NAMESPACE` | `google_surf` | research catalog가 사용하는 SurrealDB namespace |
+| `SURF_RESEARCH_DB_DATABASE` | `research` | research catalog가 사용하는 SurrealDB database |
+| `SURF_RESEARCH_DB_TOKEN` | 미설정 | remote research DB bearer token. 또는 `SURF_RESEARCH_DB_USERNAME`과 `SURF_RESEARCH_DB_PASSWORD` 사용 |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | HNSW vector 검색과 최종 리랭킹에 쓰는 local 384차원 모델. 기본 model revision은 고정되며 `off`로 vector lane 비활성화 |
 | `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | ONNX CPU memory arena와 memory pattern을 비활성화. `false`는 최초 색인 속도를 높이는 대신 peak memory 증가 |
 | `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread 수. 1-16 범위 |
+| `SURF_RESEARCH_VECTOR_BACKEND` | `hnsw` | vector 표현: `hnsw`, content 중복을 제거한 `compact`, 제한된 `exhaustive` |
 | `SURF_RESEARCH_REPO_AUTO` | `true` | 검색 호출당 작고 관련성 높은 GitHub 저장소를 최대 하나 sparse-index |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | 자동 GitHub 색인의 검색 가능한 소스 텍스트 상한. asset은 제외 |
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | 자동 GitHub 색인의 검색 가능한 소스 파일 수 상한 |
-| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | 마지막 client 연결이 끝난 뒤 shared research broker를 유지하는 시간 |
+| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | client 연결 여부와 무관하게 마지막 실제 작업 이후 drain 대기 시간. 진행 중인 요청과 background job은 종료를 미룸 |
 | `SURF_RESEARCH_READ_CONCURRENCY` | `4` | broker 동시 조회 상한. 동일한 진행 중 조회는 하나의 연산을 공유 |
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | embedded SurrealDB 쿼리별 timeout. 1-600초 범위이며 한 검색 lane이 timeout이면 partial로 표시하고 나머지 결과는 반환 |
+| `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | process 내부 graph projection과 분석 artifact의 byte budget |
+| `SURF_RESEARCH_WORKER_SOFT_MEMORY_MB` | `2048` | 진행 중인 작업 완료 후 즉시 idle drain을 요청하는 RSS 기준 |
 | `GITHUB_TOKEN` | 미설정 | 저장소 확인을 위한 GitHub API 한도를 높이는 선택 token |
 | `SURF_RESEARCH_CODE_WORKERS` | 자동, 최대 4 | 최초 코드 구조 색인에 사용하는 Tree-sitter worker 수 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |

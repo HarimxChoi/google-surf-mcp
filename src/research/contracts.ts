@@ -3,6 +3,13 @@ import type { SearchResult } from '../types.js';
 export type RetrievalMode = 'hybrid' | 'live';
 export type ExperimentStatus = 'running' | 'success' | 'failed' | 'inconclusive';
 export type AssertionValue = string | number | boolean | null;
+export type CatalogAssetKind = 'project' | 'plan' | 'task' | 'method' | 'experiment'
+  | 'attempt' | 'arm' | 'measurement' | 'byte_ledger' | 'artifact' | 'document'
+  | 'decision' | 'session';
+export type CatalogWriteOperation = 'create' | 'patch' | 'append_evidence' | 'relocate' | 'correct';
+export type CatalogAccessTier = 'hot' | 'warm' | 'cold';
+export type ProjectDocumentRole = 'experiment_record' | 'result' | 'method' | 'log'
+  | 'paper' | 'plan' | 'config' | 'source' | 'report' | 'other';
 
 export interface ProjectRecord {
   project_id: string;
@@ -12,11 +19,17 @@ export interface ProjectRecord {
   created_at: string;
   updated_at: string;
   active_plan_revision_id?: string;
+  current_plan_asset_id?: string;
+  current_plan_revision_id?: string;
   active_source_snapshot_id?: string;
   active_code_snapshot_id?: string;
   active_graph_projection_id?: string;
   graph_dirty_at?: string;
   active_graph_dirty_at?: string;
+  catalog_generation?: number;
+  purpose?: string;
+  user_constraints?: string[];
+  protected_parent_ids?: string[];
 }
 
 export interface ProjectForgetPreview {
@@ -67,6 +80,11 @@ export interface PlanRevisionRecord {
   change_reason?: string;
   parent_revision_id?: string;
   based_on_experiment_id?: string;
+  effective_at?: string;
+  recorded_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
   created_at: string;
 }
 
@@ -76,10 +94,16 @@ export interface ExperimentRunRecord {
   plan_revision_id: string;
   name: string;
   hypothesis: string;
+  body?: string;
   status: ExperimentStatus;
   summary?: string;
   metrics?: Record<string, string | number | boolean | null>;
   artifacts?: string[];
+  effective_at?: string;
+  recorded_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
   started_at: string;
   finished_at?: string;
 }
@@ -91,7 +115,116 @@ export interface DecisionRecord {
   experiment_id?: string;
   title: string;
   summary: string;
+  body?: string;
+  effective_at?: string;
+  recorded_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
   created_at: string;
+}
+
+export interface CatalogAssetRecord {
+  asset_id: string;
+  project_id: string;
+  kind: CatalogAssetKind;
+  status: 'active' | 'forgotten' | 'merged';
+  current_revision: number;
+  current_revision_id: string;
+  aliases: string[];
+  protected: boolean;
+  access_tier: CatalogAccessTier;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ArtifactReference {
+  artifact_id: string;
+  path?: string;
+  member?: string;
+  size?: number;
+  media_type?: string;
+  content_hash?: string;
+  role?: string;
+  location?: string;
+  observed_at?: string;
+  available?: boolean;
+  verification?: 'declared' | 'present' | 'hash_verified' | 'restore_tested' | 'replayed';
+}
+
+export interface CatalogRevisionRecord {
+  revision_id: string;
+  asset_id: string;
+  project_id: string;
+  kind: CatalogAssetKind;
+  revision: number;
+  operation: CatalogWriteOperation;
+  parent_revision_id?: string;
+  body_blob_id?: string;
+  body_bytes: number;
+  fields: Record<string, unknown>;
+  evidence_ids: string[];
+  artifact_references: ArtifactReference[];
+  artifact_manifest_id?: string;
+  artifact_reference_count?: number;
+  changed_fields: string[];
+  missing_fields: string[];
+  effective_at?: string;
+  recorded_at: string;
+  source_sequence?: number;
+  source_reference?: string;
+  correction_reason?: string;
+}
+
+export interface CatalogRecordReadback {
+  asset: CatalogAssetRecord;
+  revision: CatalogRevisionRecord;
+  body?: string;
+  body_span?: { start: number; end: number; total_bytes: number };
+  next_body_offset?: number;
+  artifact_span?: { start: number; end: number; total: number };
+  next_artifact_offset?: number;
+}
+
+export interface DurableWriteReceipt {
+  project_id: string;
+  record_id: string;
+  revision: number;
+  revision_id: string;
+  operation_id: string;
+  idempotency_key: string;
+  durability: 'committed';
+  changed: boolean;
+  changed_fields: string[];
+  previous_revision?: number;
+  previous_revision_id?: string;
+  stored_fields: string[];
+  body_bytes_received: number;
+  body_bytes_stored: number;
+  artifact_references_received: number;
+  artifact_references_stored: number;
+  omitted_fields: string[];
+  truncated: false;
+  index_state: 'not_required' | 'queued' | 'current';
+  index_job_id?: string;
+  readback: { action: 'get'; record_id: string };
+  request_hash: string;
+  committed_at: string;
+}
+
+export interface CatalogTimelineEvent {
+  event_id: string;
+  project_id: string;
+  asset_id: string;
+  revision_id: string;
+  revision: number;
+  kind: CatalogAssetKind;
+  operation: CatalogWriteOperation;
+  effective_at?: string;
+  recorded_at: string;
+  source_sequence?: number;
+  changed_fields: string[];
+  reason?: string;
 }
 
 export interface OntologyTermRecord {
@@ -195,12 +328,15 @@ export interface GraphNodeRecord {
   node_id: string;
   project_id: string;
   kind: 'project' | 'root' | 'directory' | 'source' | 'document' | 'plan'
-    | 'experiment' | 'decision' | 'session' | 'intent' | 'entity' | 'assertion' | 'symbol'
-    | 'ontology' | 'schema' | 'identity' | 'evidence' | 'snapshot';
+    | 'task' | 'method' | 'experiment' | 'attempt' | 'arm' | 'measurement' | 'byte_ledger'
+    | 'artifact' | 'decision' | 'session' | 'intent' | 'entity' | 'assertion' | 'symbol'
+    | 'ontology' | 'schema' | 'identity' | 'evidence' | 'snapshot' | 'catalog_asset';
   label: string;
   text?: string;
   url?: string;
   source_id?: string;
+  record_id?: string;
+  revision_id?: string;
 }
 
 export interface GraphEdgeRecord {
@@ -211,6 +347,9 @@ export interface GraphEdgeRecord {
   type: string;
   weight: number;
   evidence_ids?: string[];
+  qualifiers?: Record<string, string | number | boolean | null>;
+  effective_at?: string;
+  recorded_at?: string;
 }
 
 export interface GraphProjection {
@@ -248,7 +387,7 @@ export interface KnowledgeJobSummary {
   attempts: number;
 }
 
-export type KnowledgeJobStatus = 'queued' | 'running' | 'done' | 'failed';
+export type KnowledgeJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface KnowledgeJobRecord {
   job_id: string;
@@ -261,9 +400,15 @@ export interface KnowledgeJobRecord {
   algorithm_version: string;
   affected_source_ids: string[];
   attempts: number;
+  revision?: number;
+  stage?: string;
+  completed_items?: number;
+  total_items?: number;
   result_digest?: string;
   result_counts?: Record<string, number>;
   error?: string;
+  cancel_requested_at?: string;
+  cancel_reason?: string;
   created_at: string;
   updated_at: string;
 }
@@ -301,7 +446,12 @@ export interface ProjectSourceSnapshot {
   total_bytes: number;
   kinds: Record<string, number>;
   root_labels: string[];
-  roots: Array<{ label: string; path: string }>;
+  roots: Array<{
+    label: string;
+    path: string;
+    role?: ProjectDocumentRole;
+    manifest?: Array<{ path: string; role: ProjectDocumentRole; aliases?: string[] }>;
+  }>;
   git_root?: string;
   git?: {
     branch: string;
@@ -325,9 +475,34 @@ export interface ProjectSourceEntryRecord {
   kind: string;
   entry_type: 'file' | 'collection';
   searchable: boolean;
+  size: number;
+  modified_ms: number;
+  tracked: boolean;
+  sensitive: boolean;
+  unreadable?: boolean;
   content_hash?: string;
   experiment_key?: string;
+  role?: ProjectDocumentRole;
+  aliases?: string[];
+  historical_locations?: string[];
+  moved_from_entry_ids?: string[];
   updated_snapshot_id?: string;
+}
+
+export interface SourceRecordReadback {
+  source: true;
+  entry: ProjectSourceEntryRecord;
+  body?: string;
+  body_span?: { start: number; end: number; total_bytes: number };
+  next_body_offset?: number;
+}
+
+export interface DocumentRecordReadback {
+  document: true;
+  record: ProjectDocumentRecord;
+  body?: string;
+  body_span?: { start: number; end: number; total_bytes: number };
+  next_body_offset?: number;
 }
 
 export interface ProjectDocumentRecord {
@@ -399,12 +574,29 @@ export interface ProjectIndexResult {
 
 export interface LocalSearchHit extends SearchResult {
   document_id: string;
+  record_id?: string;
+  revision_id?: string;
+  body_handle?: string;
+  source_span?: { start: number; end: number };
+  index_freshness?: 'current' | 'stale';
   content: string;
   score: number;
   project_ids: string[];
   source_family: 'document' | 'code' | 'graph';
   retrieval_family?: 'exact' | 'bm25' | 'vector' | 'graph';
   retrieval_families?: Array<'exact' | 'bm25' | 'vector' | 'graph'>;
+  kind?: string;
+  role?: ProjectDocumentRole;
+  recorded_at?: string;
+}
+
+export interface ResearchSearchFilters {
+  source_families?: Array<'document' | 'code' | 'graph'>;
+  retrieval_lanes?: Array<'exact' | 'bm25' | 'vector' | 'graph'>;
+  kinds?: string[];
+  roles?: ProjectDocumentRole[];
+  recorded_after?: string;
+  recorded_before?: string;
 }
 
 export interface LocalSearchFamilies {
@@ -425,6 +617,9 @@ export interface RetrievalIndexItem {
   content_hash: string;
   exact_terms: string[];
   text: string;
+  span_start?: number;
+  span_end?: number;
+  role?: ProjectDocumentRole;
 }
 
 export interface ResearchReceipt {

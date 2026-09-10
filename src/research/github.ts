@@ -147,6 +147,7 @@ function git(args: string[]): Promise<void> {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
+      shell: false,
     });
     let error = '';
     child.stderr.on('data', (chunk) => { error += String(chunk); });
@@ -163,6 +164,7 @@ function gitWithInput(args: string[], lines: string[]): Promise<void> {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       stdio: ['pipe', 'ignore', 'pipe'],
       windowsHide: true,
+      shell: false,
     });
     let error = '';
     child.stderr.on('data', (chunk) => { error += String(chunk); });

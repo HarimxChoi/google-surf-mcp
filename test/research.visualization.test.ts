@@ -33,6 +33,8 @@ const projection: GraphProjection = {
     {
       edge_id: 'edge:ontology', project_id: 'alpha', source: 'ontology:paper',
       target: 'schema:paper', type: 'ALIGNS_TO_SCHEMA', weight: 2,
+      evidence_ids: ['evidence-1'], qualifiers: { revision: 2, role: 'type' },
+      effective_at: '2026-09-01T00:00:00.000Z', recorded_at: '2026-09-02T00:00:00.000Z',
     },
     {
       edge_id: 'edge:document', project_id: 'alpha', source: 'project:alpha',
@@ -65,6 +67,10 @@ describe('graph visualization export', () => {
       community: 1,
     });
     expect(document.nodes.every((node: any) => !('text' in node))).toBe(true);
+    expect(document.links[0]).toMatchObject({
+      evidence_ids: ['evidence-1'], qualifiers: { revision: 2, role: 'type' },
+      effective_at: '2026-09-01T00:00:00.000Z', recorded_at: '2026-09-02T00:00:00.000Z',
+    });
   });
 
   it('escapes labels in Graphviz DOT', () => {
@@ -72,6 +78,7 @@ describe('graph visualization export', () => {
 
     expect(result.content).toContain('digraph "graph-export-test"');
     expect(result.content).toContain('label="Quoted \\"paper\\""');
+    expect(result.content).toContain('qualifiers="{\\"revision\\":2,\\"role\\":\\"type\\"}"');
     expect(result.content).not.toContain('body must not be exported');
   });
 
@@ -307,10 +314,13 @@ describe('graph visualization export', () => {
     expect(files.get('nodes.csv')).not.toContain('body must not be exported');
     expect(files.get('relationships.csv')).toContain(':TYPE,edge_id,relation_type');
     expect(files.get('relationships.csv')).toContain('ALIGNS_TO_SCHEMA');
+    expect(files.get('relationships.csv')).toContain('qualifiers_json,effective_at,recorded_at');
+    expect(files.get('relationships.csv')).toContain('evidence-1');
+    expect(files.get('load.cypher')).toContain('edge.qualifiers_json');
     expect(files.get('constraints.cypher')).toContain('REQUIRE node.id IS UNIQUE');
     expect(files.get('load.cypher')).toContain('SURF_RELATION');
     expect(JSON.parse(files.get('manifest.json')!)).toMatchObject({
-      schema_version: 'surf-neo4j-export-v1',
+      schema_version: 'surf-neo4j-export-v2',
       projection_id: 'graph-export-test',
       node_count: 4,
       edge_count: 2,

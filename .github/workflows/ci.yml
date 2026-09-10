@@ -25,5 +25,6 @@ jobs:
       - run: npx tsc -p tsconfig.scripts.json --noEmit
       - run: npm run research:reopen-probe
       - run: npm run smoke:mcp
+      - run: npm run research:memory-soak -- 100
       - run: npm run smoke:hooks
       - run: npm test

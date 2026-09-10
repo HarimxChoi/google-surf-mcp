@@ -26,6 +26,10 @@ interface ViewerEdge {
   target: string;
   type: string;
   weight: number;
+  evidence_ids?: string[];
+  qualifiers?: Record<string, string | number | boolean | null>;
+  effective_at?: string;
+  recorded_at?: string;
 }
 
 interface ViewerGraph {
@@ -49,11 +53,13 @@ const VIEW_KINDS: Record<Exclude<View, 'graph'>, Set<GraphNodeRecord['kind']>> =
   lineage: new Set([
     'project', 'root', 'directory', 'source', 'document', 'snapshot', 'symbol',
     'evidence', 'assertion', 'session', 'intent', 'plan', 'experiment', 'decision',
+    'catalog_asset', 'task', 'method', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact',
   ]),
   ontology: new Set([
     'project', 'root', 'directory', 'source', 'document', 'snapshot', 'symbol',
     'evidence', 'assertion', 'session', 'intent', 'plan', 'experiment', 'decision',
     'ontology', 'schema', 'entity', 'identity',
+    'catalog_asset', 'task', 'method', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact',
   ]),
 };
 
@@ -67,17 +73,23 @@ const VIEW_LIMIT: Record<View, number> = { graph: 240, lineage: 180, ontology: 1
 const KIND_PRIORITY: Record<View, Partial<Record<GraphNodeRecord['kind'], number>>> = {
   graph: {
     project: 100, decision: 98, plan: 96, experiment: 94, intent: 92,
+    task: 93, method: 91, attempt: 89, arm: 87, measurement: 85, byte_ledger: 83,
+    artifact: 81, catalog_asset: 79,
     assertion: 90, evidence: 88, ontology: 86, schema: 84, identity: 82,
     entity: 80, document: 76, symbol: 68, source: 62, snapshot: 58,
     session: 56, root: 52, directory: 30,
   },
   lineage: {
     project: 100, decision: 98, experiment: 96, plan: 94, intent: 92,
+    task: 93, method: 91, attempt: 89, arm: 87, measurement: 85, byte_ledger: 83,
+    artifact: 81, catalog_asset: 79,
     assertion: 90, evidence: 88, document: 82, snapshot: 78, symbol: 74,
     source: 70, session: 66, root: 58, directory: 40,
   },
   ontology: {
     schema: 100, ontology: 98, identity: 96, project: 94, entity: 82,
+    task: 81, method: 80, attempt: 79, arm: 78, measurement: 77, byte_ledger: 76,
+    artifact: 75, catalog_asset: 74,
     decision: 80, experiment: 78, plan: 76, assertion: 74, evidence: 72,
     symbol: 70, source: 68, document: 66, session: 64, intent: 62,
     snapshot: 60, directory: 50, root: 48,
@@ -90,32 +102,40 @@ const KIND_CAP: Record<View, Partial<Record<GraphNodeRecord['kind'], number>>> =
     assertion: 36, evidence: 36, ontology: 20, schema: 20, identity: 20,
     entity: 64, document: 32, symbol: 80, source: 42, snapshot: 20,
     session: 16, root: 12, directory: 24,
+    task: 32, method: 24, attempt: 40, arm: 40, measurement: 40,
+    byte_ledger: 20, artifact: 36, catalog_asset: 40,
   },
   lineage: {
     project: 12, decision: 30, experiment: 36, plan: 24, intent: 20,
     assertion: 36, evidence: 36, document: 26, snapshot: 20, symbol: 36,
     source: 34, session: 18, root: 12, directory: 18,
+    task: 32, method: 24, attempt: 40, arm: 40, measurement: 40,
+    byte_ledger: 20, artifact: 36, catalog_asset: 40,
   },
   ontology: {
     schema: 40, ontology: 40, identity: 24, project: 20, entity: 12,
     decision: 6, experiment: 8, plan: 6, assertion: 8, evidence: 8,
     symbol: 12, source: 10, document: 8, session: 4, intent: 4,
     snapshot: 4, directory: 6, root: 2,
+    task: 8, method: 8, attempt: 8, arm: 8, measurement: 8,
+    byte_ledger: 6, artifact: 8, catalog_asset: 8,
   },
 };
 
 const LINEAGE_LANE: Partial<Record<GraphNodeRecord['kind'], number>> = {
   project: 0,
-  snapshot: 1, session: 1,
-  root: 2, directory: 2, intent: 2,
-  source: 3, document: 3, plan: 3,
+  snapshot: 1, session: 1, catalog_asset: 1,
+  root: 2, directory: 2, intent: 2, plan: 2,
+  source: 3, document: 3, task: 3, method: 3,
   symbol: 4, evidence: 4, experiment: 4,
-  assertion: 5, decision: 5,
+  attempt: 5, arm: 5,
+  measurement: 6, byte_ledger: 6, artifact: 6, assertion: 6, decision: 6,
 };
 
 const LINEAGE_LABELS = [
-  'Project', 'Snapshot / session', 'Source tree / intent',
-  'Files / plans', 'Code + evidence / experiments', 'Assertions / decisions',
+  'Project', 'Snapshot / session / catalog', 'Source tree / intent / plan',
+  'Files / tasks / methods', 'Code / evidence / experiments', 'Attempts / arms',
+  'Measurements / artifacts / decisions',
 ];
 
 function escapedPattern(value: string): string {
@@ -253,6 +273,10 @@ function selectNodes(
       'DERIVED_FROM', 'SUPPORTED_BY', 'HAS_SESSION', 'HAS_INTENT', 'HAS_PLAN',
       'USES_PLAN', 'BASED_ON', 'PART_OF_EXPERIMENT', 'HAS_DECISION',
       'DECIDES_PLAN', 'DECIDES_EXPERIMENT',
+      'HAS_CATALOG_RECORD', 'HAS_REVISION', 'CURRENT_REVISION', 'SUPERSEDES_REVISION',
+      'IMPLEMENTS_TASK', 'USES_METHOD', 'BELONGS_TO_EXPERIMENT', 'OBSERVED_IN_ATTEMPT',
+      'MEASURES_ARM', 'DERIVED_FROM_ARM', 'COMPARES_TO_ARM', 'DERIVED_FROM_PARENT',
+      'REFERENCES_ARTIFACT', 'REFERENCES_ARTIFACT_MANIFEST',
     ];
     for (const type of lineageTypes) {
       let added = 0;
@@ -389,7 +413,8 @@ function lanePositions(
     return hasIdentity ? 4 : 3;
   };
   const memoryKinds = new Set<GraphNodeRecord['kind']>([
-    'session', 'intent', 'plan', 'experiment', 'decision',
+    'session', 'intent', 'plan', 'task', 'method', 'experiment', 'attempt', 'arm',
+    'measurement', 'byte_ledger', 'decision',
   ]);
   const groups = new Map<string, GraphNodeRecord[]>();
   for (const node of nodes) {
@@ -586,6 +611,10 @@ function buildViewerGraph(
       target: anonymousIds.get(edge.target)!,
       type: edge.type,
       weight: edge.weight,
+      ...(edge.evidence_ids?.length ? { evidence_ids: edge.evidence_ids } : {}),
+      ...(edge.qualifiers ? { qualifiers: edge.qualifiers } : {}),
+      ...(edge.effective_at ? { effective_at: edge.effective_at } : {}),
+      ...(edge.recorded_at ? { recorded_at: edge.recorded_at } : {}),
     })),
     source_node_count: sourceNodes.length,
     source_edge_count: sourceEdges.length,

@@ -34,9 +34,11 @@ const NON_RETRIEVAL_EDGES = new Set([
   'ALIGNS_TO_SCHEMA', 'USES_ONTOLOGY', 'INSTANCE_OF', 'USES_RELATION',
   'HAS_DOCUMENT', 'HAS_PLAN', 'HAS_EXPERIMENT', 'HAS_DECISION', 'HAS_SESSION',
   'HAS_ENTITY', 'HAS_ASSERTION', 'HAS_SOURCE_SNAPSHOT', 'CONTAINS', 'CONTAINS_ENTRY',
+  'HAS_CATALOG_RECORD', 'HAS_REVISION', 'CURRENT_REVISION',
 ]);
 const RETRIEVABLE_NODE_KINDS = new Set([
   'source', 'symbol', 'document', 'plan', 'experiment', 'decision', 'assertion',
+  'task', 'method', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact',
 ]);
 
 export function isRetrievalGraphEdge(edge: GraphEdgeRecord): boolean {
@@ -279,9 +281,16 @@ export function rankGraphProjection(
   limit = 20,
   preferredSeeds: string[] = [],
 ): GraphRankedNode[] {
-  const seeds = preferredSeeds.length
-    ? [...new Set(preferredSeeds)].slice(0, 16)
-    : graphQuerySeeds(projection, query, 16);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const exactQuerySeeds = projection.nodes.filter((node) => (
+    [node.node_id, node.label, node.source_id, node.url]
+      .some((value) => value?.trim().toLocaleLowerCase() === normalizedQuery)
+  )).map((node) => node.node_id).slice(0, 8);
+  const seeds = exactQuerySeeds.length
+    ? [...new Set([...exactQuerySeeds, ...preferredSeeds.slice(0, 8)])].slice(0, 16)
+    : preferredSeeds.length
+      ? [...new Set(preferredSeeds)].slice(0, 16)
+      : graphQuerySeeds(projection, query, 16);
   const ranked = localizedPageRankVector(projection, seeds);
   if (!ranked) return [];
   const cappedLimit = Math.max(1, limit);

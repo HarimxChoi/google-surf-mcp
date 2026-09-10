@@ -249,7 +249,12 @@ export class SharedNativeBrowser implements NativeBrowserHandle {
       detached: true,
       windowsHide: true,
       stdio: 'ignore',
-      env: { ...process.env, SURF_NATIVE_BROWSER_BROKER_CONFIG: encoded },
+      env: {
+        ...process.env,
+        SURF_PROCESS_CLASS: 'native-browser-broker',
+        SURF_PARENT_PID: String(process.pid),
+        SURF_NATIVE_BROWSER_BROKER_CONFIG: encoded,
+      },
     });
     child.once('error', () => {});
     child.unref();

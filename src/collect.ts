@@ -401,7 +401,7 @@ function inheritedEnvironment(): Record<string, string> {
 function gitCommit(cwd: string): string | undefined {
   try {
     return execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
     }).trim();
   } catch {
     return undefined;

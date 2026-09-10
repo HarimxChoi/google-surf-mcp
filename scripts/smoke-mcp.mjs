@@ -216,6 +216,14 @@ try {
     }
   }
 
+  const passiveHealth = await client.callTool({ name: 'health', arguments: {} });
+  if (passiveHealth.isError
+    || passiveHealth.structuredContent?.research?.passive !== true
+    || passiveHealth.structuredContent?.research?.database_open !== false
+    || passiveHealth.structuredContent?.research?.capabilities?.passive_health_opens_database !== false) {
+    throw new Error(`research passive health failed: ${JSON.stringify(passiveHealth.structuredContent?.research)}`);
+  }
+
   const created = await client.callTool({
     name: 'project_memory',
     arguments: { action: 'create', project_id: 'smoke', name: 'Smoke project' },

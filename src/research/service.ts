@@ -1,10 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, statfs, writeFile } from 'node:fs/promises';
-import { basename, extname, join, resolve } from 'node:path';
+import { createReadStream } from 'node:fs';
+import { createRequire } from 'node:module';
+import { mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { fenceUntrustedContent } from '../response.js';
 import { MAX_RESEARCH_CAPTURE_CHARS } from '../searchLimits.js';
+import { VERSION } from '../version.js';
 import type {
-  AssertionCorrectionRecord, AssertionRecord, AssertionValue, CaptureResult, DecisionRecord,
+  ArtifactReference, CatalogAccessTier, CatalogAssetKind, CatalogRecordReadback, CatalogTimelineEvent,
+  CatalogWriteOperation, DurableWriteReceipt,
+  AssertionCorrectionRecord, AssertionRecord, AssertionValue, CaptureResult, DecisionRecord, DocumentRecordReadback,
   EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord,
   ExperimentRunRecord, ExperimentStatus, GraphAnalysis, GraphArtifact, GraphProjection,
   IntentRevisionRecord,
@@ -12,7 +17,7 @@ import type {
   MemorySessionRecord,
   OntologyTermRecord, PlanRevisionRecord, ProjectDetail, ProjectIndexResult,
   ProjectForgetPreview, ProjectRecord, RecordForgetPreview, ResearchReceipt, RetrievalIndexItem,
-  ResearchSearchContext, SearchEventRecord,
+  ResearchSearchContext, ResearchSearchFilters, SearchEventRecord, SourceRecordReadback,
 } from './contracts.js';
 import { runCodeStructureBatchStream, type CodeSourceInput } from './codeStructure.js';
 import { cosineSimilarity, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
@@ -27,7 +32,10 @@ import {
   decideRepository, GitHubClient, parseGitHubRepositoryUrl, selectedRepositoryPaths,
   type RepositoryClient, type RepositoryDecision, type RepositoryReadMode,
 } from './github.js';
-import { inventoryProject, type ProjectRootInput } from './projectInventory.js';
+import {
+  inventoryProject, inventoryProjectIncremental,
+  type ProjectPathChange, type ProjectRootInput,
+} from './projectInventory.js';
 import { ResearchStore, type CodeSourceManifestEntry } from './store.js';
 import {
   exportGraphVisualization, exportNeo4jVisualization,
@@ -38,15 +46,87 @@ export interface ResearchServiceOptions {
   enabled: boolean;
   root: string;
   endpoint?: string;
+  databaseNamespace?: string;
+  databaseName?: string;
   vectorModel?: string;
   vectorLowMemory?: boolean;
   vectorThreads?: number;
+  vectorBackend?: 'hnsw' | 'exhaustive' | 'compact';
   embeddingProvider?: EmbeddingProvider;
   repositoryAuto?: boolean;
   repositoryMaxSourceBytes?: number;
   repositoryMaxSourceFiles?: number;
   repositoryClient?: RepositoryClient;
   queryTimeoutMs?: number;
+  graphCacheMaxBytes?: number;
+}
+
+export interface ResearchServiceStatus {
+  enabled: boolean;
+  state: string;
+  root: string;
+  vector: 'off' | 'on';
+  external_sync: 'off';
+  database_open: boolean;
+  background_jobs: number;
+  repository_jobs: number;
+  scheduled_graph_jobs: number;
+  graph_projection_cache: number;
+  graph_artifact_cache: number;
+  graph_cache_bytes: number;
+}
+
+export interface ResearchPassiveStatus extends ResearchServiceStatus {
+  passive: true;
+  observed_at: string;
+  process: {
+    process_class: 'in_process' | 'research_broker';
+    pid: number;
+    parent_pid: number;
+    uptime_ms: number;
+    rss_bytes: number;
+    peak_rss_bytes: number;
+    private_bytes: null;
+    heap_total_bytes: number;
+    heap_used_bytes: number;
+    external_bytes: number;
+    array_buffers_bytes: number;
+  };
+  runtime: {
+    google_surf_mcp: string;
+    node: string;
+    platform: NodeJS.Platform;
+    arch: string;
+    surrealdb_node: string | null;
+    surrealdb_engine: string | null;
+  };
+  capabilities: {
+    persistent_store: 'surrealdb_rocksdb' | 'surrealdb_remote';
+    remote_endpoint?: string;
+    vector_index: 'hnsw' | 'exhaustive' | 'compact';
+    vector_dimensions: number;
+    passive_health_opens_database: false;
+  };
+}
+
+let surrealRuntimeVersions: Pick<ResearchPassiveStatus['runtime'], 'surrealdb_node' | 'surrealdb_engine'> | undefined;
+
+function readSurrealRuntimeVersions(): Pick<ResearchPassiveStatus['runtime'], 'surrealdb_node' | 'surrealdb_engine'> {
+  if (surrealRuntimeVersions) return surrealRuntimeVersions;
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require('../../node_modules/@surrealdb/node/package.json') as {
+      version?: string;
+      surreal?: string;
+    };
+    surrealRuntimeVersions = {
+      surrealdb_node: pkg.version ?? null,
+      surrealdb_engine: pkg.surreal ?? null,
+    };
+  } catch {
+    surrealRuntimeVersions = { surrealdb_node: null, surrealdb_engine: null };
+  }
+  return surrealRuntimeVersions;
 }
 
 interface CaptureInput {
@@ -73,8 +153,14 @@ interface DecisionInput {
   project_id: string;
   title: string;
   summary: string;
+  body?: string;
   plan_revision_id?: string;
   experiment_id?: string;
+  effective_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
+  idempotency_key?: string;
 }
 
 interface PlanInput {
@@ -83,14 +169,25 @@ interface PlanInput {
   body: string;
   change_reason?: string;
   based_on_experiment_id?: string;
+  effective_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
+  idempotency_key?: string;
 }
 
 interface ExperimentStartInput {
   project_id: string;
   name: string;
   hypothesis: string;
+  body?: string;
   plan_revision_id?: string;
   artifacts?: string[];
+  effective_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
+  idempotency_key?: string;
 }
 
 interface ExperimentFinishInput {
@@ -100,12 +197,44 @@ interface ExperimentFinishInput {
   summary: string;
   metrics?: Record<string, string | number | boolean | null>;
   artifacts?: string[];
+  body?: string;
+  effective_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  missing_fields?: string[];
+  idempotency_key?: string;
 }
 
 interface ProjectIndexInput {
   project_id: string;
-  roots: ProjectRootInput[];
+  roots?: ProjectRootInput[];
   git_root?: string;
+  root_mode?: 'merge' | 'replace' | 'remove';
+  changed_paths?: ProjectPathChange[];
+  removed_paths?: ProjectPathChange[];
+}
+
+export interface CatalogWriteInput {
+  project_id: string;
+  kind: CatalogAssetKind;
+  operation: CatalogWriteOperation;
+  asset_id?: string;
+  expected_revision?: number;
+  idempotency_key: string;
+  body?: string;
+  body_path?: string;
+  fields?: Record<string, unknown>;
+  evidence_ids?: string[];
+  artifact_references?: ArtifactReference[];
+  aliases?: string[];
+  protected?: boolean;
+  access_tier?: CatalogAccessTier;
+  set_current?: boolean;
+  missing_fields?: string[];
+  effective_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  correction_reason?: string;
 }
 
 interface EvidenceInput {
@@ -272,6 +401,107 @@ function documentChunks(text: string): Array<{
   return chunks;
 }
 
+function semanticSourceChunks(text: string): Array<{ text: string; start: number; end: number }> {
+  const chunks: Array<{ text: string; start: number; end: number }> = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + DOCUMENT_CHUNK_CHARS, text.length);
+    if (end < text.length) {
+      const boundary = text.lastIndexOf('\n', end);
+      if (boundary > start + DOCUMENT_CHUNK_CHARS / 2) end = boundary + 1;
+    }
+    chunks.push({ text: text.slice(start, end), start, end });
+    start = end;
+  }
+  return chunks;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+const MEASUREMENT_CONTRACT_FIELDS = [
+  'metric', 'value', 'unit', 'evaluator_contract', 'dataset', 'split', 'tokenizer',
+  'context_length', 'targets', 'carrier_precision', 'source_locator',
+] as const;
+const MEASUREMENT_IDENTITY_FIELDS = MEASUREMENT_CONTRACT_FIELDS.filter((field) => field !== 'value');
+const BYTE_LEDGER_FIELDS = ['byte_components', 'denominator', 'scope'] as const;
+
+function normalizeCatalogFields(
+  kind: CatalogAssetKind,
+  input: Record<string, unknown> | undefined,
+  missingFields: string[],
+): Record<string, unknown> {
+  const fields = { ...(input ?? {}) };
+  const required = kind === 'measurement'
+    ? MEASUREMENT_CONTRACT_FIELDS
+    : kind === 'byte_ledger' ? BYTE_LEDGER_FIELDS : [];
+  const undeclared = required.filter((field) => fields[field] === undefined && !missingFields.includes(field));
+  if (undeclared.length) {
+    throw new Error(
+      `${kind} fields missing: ${undeclared.join(', ')}; provide values or list unknowns in missing_fields`,
+    );
+  }
+  if (kind === 'measurement') {
+    fields.comparison_contract_id = createHash('sha256').update(stableJson(Object.fromEntries(
+      MEASUREMENT_IDENTITY_FIELDS.map((field) => [field, fields[field] ?? null]),
+    ))).digest('hex');
+  }
+  if (kind === 'byte_ledger') {
+    fields.ledger_scope_id = createHash('sha256').update(stableJson(Object.fromEntries(
+      BYTE_LEDGER_FIELDS.map((field) => [field, fields[field] ?? null]),
+    ))).digest('hex');
+  }
+  return fields;
+}
+
+function filterSearchHits(rows: LocalSearchHit[], filters?: ResearchSearchFilters): LocalSearchHit[] {
+  if (!filters) return rows;
+  return rows.filter((row) => {
+    if (filters.source_families?.length && !filters.source_families.includes(row.source_family)) return false;
+    if (filters.retrieval_lanes?.length
+      && (!row.retrieval_family || !filters.retrieval_lanes.includes(row.retrieval_family))) return false;
+    if (filters.kinds?.length && (!row.kind || !filters.kinds.includes(row.kind))) return false;
+    if (filters.roles?.length && (!row.role || !filters.roles.includes(row.role))) return false;
+    if (filters.recorded_after && (!row.recorded_at || row.recorded_at < filters.recorded_after)) return false;
+    if (filters.recorded_before && (!row.recorded_at || row.recorded_at > filters.recorded_before)) return false;
+    return true;
+  });
+}
+
+function graphProjectionBytes(projection: GraphProjection): number {
+  let bytes = 256;
+  for (const node of projection.nodes) {
+    bytes += 96 + Buffer.byteLength(node.node_id) + Buffer.byteLength(node.project_id)
+      + Buffer.byteLength(node.kind) + Buffer.byteLength(node.label)
+      + Buffer.byteLength(node.text ?? '') + Buffer.byteLength(node.url ?? '');
+  }
+  for (const edge of projection.edges) {
+    bytes += 72 + Buffer.byteLength(edge.edge_id) + Buffer.byteLength(edge.source)
+      + Buffer.byteLength(edge.target) + Buffer.byteLength(edge.type)
+      + (edge.evidence_ids?.reduce((sum, id) => sum + Buffer.byteLength(id), 0) ?? 0);
+  }
+  return bytes;
+}
+
+function durableRequestHash(input: Omit<CatalogWriteInput, 'idempotency_key'>): string {
+  return createHash('sha256').update(stableJson(input)).digest('hex');
+}
+
+function artifactReferences(values: string[] = []): ArtifactReference[] {
+  return values.map((value) => ({
+    artifact_id: createHash('sha256').update(value).digest('hex'),
+    path: value,
+    verification: 'declared',
+  }));
+}
+
 function queryTerms(value: string): Set<string> {
   return new Set(value.toLocaleLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) ?? []);
 }
@@ -366,6 +596,11 @@ function fuseRankedGroups(
         existing.score += contribution;
         existing.row = {
           ...existing.row,
+          record_id: existing.row.record_id ?? row.record_id,
+          revision_id: existing.row.revision_id ?? row.revision_id,
+          body_handle: existing.row.body_handle ?? row.body_handle,
+          source_span: existing.row.source_span ?? row.source_span,
+          index_freshness: existing.row.index_freshness ?? row.index_freshness,
           project_ids: [...new Set([...existing.row.project_ids, ...row.project_ids])].sort(),
           retrieval_families: [...new Set([
             ...(existing.row.retrieval_families ?? (existing.row.retrieval_family
@@ -386,6 +621,23 @@ function fuseRankedGroups(
       score,
       ...(family ? { retrieval_family: family, retrieval_families: [family] } : {}),
     }));
+}
+
+function preserveBoundedCandidates(
+  bounded: LocalSearchHit[],
+  expanded: LocalSearchHit[],
+  limit: number,
+): LocalSearchHit[] {
+  const seen = new Set<string>();
+  const selected: LocalSearchHit[] = [];
+  for (const row of [...bounded, ...expanded]) {
+    const key = row.url || row.document_id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push(row);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -505,12 +757,20 @@ function repositoryDecisions(payload: Record<string, unknown>): RepositoryDecisi
   });
 }
 
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
 export class ResearchService {
   private readonly store: ResearchStore;
   private readonly planLocks = new Map<string, Promise<unknown>>();
   private readonly graphCache = new Map<string, GraphProjection>();
   private readonly graphArtifacts = new Map<string, GraphArtifact>();
+  private graphCacheBytes = 0;
   private readonly backgroundJobs = new Set<Promise<unknown>>();
+  private readonly scheduledJobIds = new Set<string>();
   private readonly graphTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly embeddings: EmbeddingProvider;
   private readonly repositoryClient: RepositoryClient;
@@ -519,7 +779,14 @@ export class ResearchService {
   private state: 'disabled' | 'idle' | 'ready' | 'unavailable';
 
   constructor(private readonly options: ResearchServiceOptions) {
-    this.store = new ResearchStore(options.root, options.endpoint, options.queryTimeoutMs);
+    this.store = new ResearchStore(
+      options.root,
+      options.endpoint,
+      options.queryTimeoutMs,
+      options.vectorBackend ?? 'hnsw',
+      options.databaseNamespace,
+      options.databaseName,
+    );
     this.embeddings = options.embeddingProvider ?? new LocalEmbeddingModel(
       options.vectorModel,
       undefined,
@@ -533,7 +800,12 @@ export class ResearchService {
   private rememberGraphProjection(key: string, projection: GraphProjection): GraphProjection {
     const shared = this.graphArtifacts.get(projection.projection_id)?.projection ?? projection;
     this.graphCache.clear();
-    this.graphCache.set(key, shared);
+    this.graphCacheBytes = 0;
+    const weight = graphProjectionBytes(shared);
+    if (weight <= (this.options.graphCacheMaxBytes ?? 64 * 1024 * 1024)) {
+      this.graphCache.set(key, shared);
+      this.graphCacheBytes = weight;
+    }
     for (const projectionId of this.graphArtifacts.keys()) {
       if (projectionId !== shared.projection_id) this.graphArtifacts.delete(projectionId);
     }
@@ -547,36 +819,81 @@ export class ResearchService {
       ? { ...artifact, projection: cached }
       : artifact;
     this.graphArtifacts.clear();
-    this.graphArtifacts.set(projectionId, shared);
+    const weight = graphProjectionBytes(shared.projection);
+    if (weight <= (this.options.graphCacheMaxBytes ?? 64 * 1024 * 1024)) {
+      this.graphArtifacts.set(projectionId, shared);
+      this.graphCacheBytes = Math.max(this.graphCacheBytes, weight);
+    }
     for (const [key, projection] of this.graphCache) {
       if (projection.projection_id !== projectionId) this.graphCache.delete(key);
     }
     return shared;
   }
 
-  status(): {
-    enabled: boolean;
-    state: string;
-    root: string;
-    vector: 'off' | 'on';
-    external_sync: 'off';
-    graph_projection_cache: number;
-    graph_artifact_cache: number;
-  } {
+  status(): ResearchServiceStatus {
     return {
       enabled: this.options.enabled,
       state: this.state,
       root: this.options.root,
       vector: this.embeddings.enabled() ? 'on' : 'off',
       external_sync: 'off',
+      database_open: this.store.isOpen(),
+      background_jobs: this.backgroundJobs.size,
+      repository_jobs: this.repositoryJobs.size,
+      scheduled_graph_jobs: this.graphTimers.size,
       graph_projection_cache: this.graphCache.size,
       graph_artifact_cache: this.graphArtifacts.size,
+      graph_cache_bytes: this.graphCacheBytes,
+    };
+  }
+
+  passiveStatus(processClass: 'in_process' | 'research_broker' = 'in_process'): ResearchPassiveStatus {
+    const memory = process.memoryUsage();
+    const resources = process.resourceUsage();
+    const remoteEndpoint = this.options.endpoint && /^(?:wss?|https?):\/\//i.test(this.options.endpoint)
+      ? new URL(this.options.endpoint).origin
+      : undefined;
+    return {
+      ...this.status(),
+      passive: true,
+      observed_at: new Date().toISOString(),
+      process: {
+        process_class: processClass,
+        pid: process.pid,
+        parent_pid: process.ppid,
+        uptime_ms: Math.round(process.uptime() * 1_000),
+        rss_bytes: memory.rss,
+        peak_rss_bytes: Math.max(memory.rss, resources.maxRSS * 1024),
+        private_bytes: null,
+        heap_total_bytes: memory.heapTotal,
+        heap_used_bytes: memory.heapUsed,
+        external_bytes: memory.external,
+        array_buffers_bytes: memory.arrayBuffers,
+      },
+      runtime: {
+        google_surf_mcp: VERSION,
+        node: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        ...readSurrealRuntimeVersions(),
+      },
+      capabilities: {
+        persistent_store: remoteEndpoint ? 'surrealdb_remote' : 'surrealdb_rocksdb',
+        ...(remoteEndpoint ? { remote_endpoint: remoteEndpoint } : {}),
+        vector_index: this.options.vectorBackend ?? 'hnsw',
+        vector_dimensions: this.embeddings.dimensions(),
+        passive_health_opens_database: false,
+      },
     };
   }
 
   async probe(): Promise<ReturnType<ResearchService['status']>> {
     if (this.options.enabled) await this.ready();
     return this.status();
+  }
+
+  async requestDrain(): Promise<{ accepted: true; background_jobs: number }> {
+    return { accepted: true, background_jobs: this.backgroundJobs.size };
   }
 
   async close(): Promise<void> {
@@ -586,6 +903,9 @@ export class ResearchService {
     await this.store.close();
     await this.embeddings.dispose?.();
     this.recoveredDirtyProjects = false;
+    this.graphCache.clear();
+    this.graphArtifacts.clear();
+    this.graphCacheBytes = 0;
     if (this.options.enabled) this.state = 'idle';
   }
 
@@ -602,8 +922,19 @@ export class ResearchService {
       this.state = 'ready';
       if (!this.recoveredDirtyProjects) {
         this.recoveredDirtyProjects = true;
+        const pendingJobs = await this.store.listPendingKnowledgeJobs();
+        const pendingRebuildProjects = new Set(pendingJobs
+          .filter((job) => job.kind === 'rebuild')
+          .map((job) => job.project_id));
         for (const project of await this.store.listDirtyProjects()) {
-          this.scheduleGraph(project.project_id);
+          if (!pendingRebuildProjects.has(project.project_id)) this.scheduleGraph(project.project_id);
+        }
+        for (const job of pendingJobs) {
+          if (job.kind === 'retrieval_index' && job.schema_version === 'catalog-record-v1') {
+            this.scheduleCatalogIndex(job);
+          } else if (job.kind === 'rebuild') {
+            this.scheduleSourceIndex(job);
+          }
         }
       }
     } catch (error) {
@@ -630,6 +961,11 @@ export class ResearchService {
     for (const [key, artifact] of this.graphArtifacts) {
       if (artifact.projection.project_ids.includes(projectId)) this.graphArtifacts.delete(key);
     }
+    this.graphCacheBytes = Math.max(
+      ...[...this.graphCache.values()].map(graphProjectionBytes),
+      ...[...this.graphArtifacts.values()].map((artifact) => graphProjectionBytes(artifact.projection)),
+      0,
+    );
     await this.store.markGraphDirty(projectId, `${Date.now()}-${randomUUID()}`);
     if (schedule) this.scheduleGraph(projectId);
   }
@@ -652,6 +988,117 @@ export class ResearchService {
       () => this.backgroundJobs.delete(job),
       () => this.backgroundJobs.delete(job),
     );
+  }
+
+  private scheduleCatalogIndex(job: KnowledgeJobRecord): void {
+    if (this.scheduledJobIds.has(job.job_id)) return;
+    this.scheduledJobIds.add(job.job_id);
+    this.schedule(async () => {
+      try {
+        const current = await this.store.getKnowledgeJob(job.job_id);
+        if (!current || current.status === 'done' || current.status === 'cancelled') return;
+        if (current.status === 'queued') {
+          await this.transitionKnowledgeJob({
+            project_id: current.project_id,
+            job_id: current.job_id,
+            status: 'running',
+          });
+        }
+        await this.updateKnowledgeJobProgress(
+          current.project_id, current.job_id, 'indexing', 0, current.affected_source_ids.length,
+        );
+        for (let index = 0; index < current.affected_source_ids.length; index++) {
+          const assetId = current.affected_source_ids[index];
+          if (await this.knowledgeJobCancelled(current.job_id)) return;
+          const record = await this.store.getCatalogRecord(current.project_id, assetId);
+          if (record) await this.indexCatalogRecord(record);
+          await this.updateKnowledgeJobProgress(
+            current.project_id, current.job_id, 'indexing', index + 1, current.affected_source_ids.length,
+          );
+        }
+        if (await this.knowledgeJobCancelled(current.job_id)) return;
+        await this.updateKnowledgeJobProgress(
+          current.project_id, current.job_id, 'retrieval_publish', 0, 1,
+        );
+        await this.materializeRetrievalIndex(current.project_id, 'document');
+        if (await this.knowledgeJobCancelled(current.job_id)) return;
+        await this.invalidateGraph(current.project_id, false);
+        await this.materializeGraph([current.project_id]);
+        if (await this.knowledgeJobCancelled(current.job_id)) return;
+        await this.transitionKnowledgeJob({
+          project_id: current.project_id,
+          job_id: current.job_id,
+          status: 'done',
+          result_digest: current.source_hash,
+        });
+        const receipt = await this.store.getOperationReceiptByJobId(current.job_id);
+        if (receipt) await this.store.updateOperationReceipt({ ...receipt, index_state: 'current' });
+      } catch (error) {
+        const current = await this.store.getKnowledgeJob(job.job_id).catch(() => undefined);
+        if (current && current.status !== 'failed' && current.status !== 'done'
+          && current.status !== 'cancelled') {
+          await this.transitionKnowledgeJob({
+            project_id: current.project_id,
+            job_id: current.job_id,
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          }).catch(() => {});
+        }
+      } finally {
+        this.scheduledJobIds.delete(job.job_id);
+      }
+    });
+  }
+
+  private scheduleSourceIndex(job: KnowledgeJobRecord): void {
+    if (this.scheduledJobIds.has(job.job_id)) return;
+    this.scheduledJobIds.add(job.job_id);
+    this.schedule(async () => {
+      try {
+        let current = await this.store.getKnowledgeJob(job.job_id);
+        if (!current || current.status === 'done' || current.status === 'cancelled') return;
+        if (current.status === 'queued') {
+          current = await this.transitionKnowledgeJob({
+            project_id: current.project_id,
+            job_id: current.job_id,
+            status: 'running',
+          });
+        }
+        await this.updateKnowledgeJobProgress(current.project_id, current.job_id, 'code', 0, 3);
+        await this.materializeCodeStructure(current.project_id, current.source_hash);
+        if (await this.knowledgeJobCancelled(current.job_id)) return;
+        await this.updateKnowledgeJobProgress(current.project_id, current.job_id, 'retrieval', 1, 3);
+        await this.materializeRetrievalIndex(current.project_id, 'code');
+        if (await this.knowledgeJobCancelled(current.job_id)) return;
+        await this.updateKnowledgeJobProgress(current.project_id, current.job_id, 'graph', 2, 3);
+        const graph = await this.materializeGraph([current.project_id]);
+        if (await this.knowledgeJobCancelled(current.job_id)) return;
+        await this.transitionKnowledgeJob({
+          project_id: current.project_id,
+          job_id: current.job_id,
+          status: 'done',
+          result_digest: current.source_hash,
+          result_counts: {
+            code_sources: current.affected_source_ids.length,
+            graph_nodes: graph.projection.nodes.length,
+            graph_edges: graph.projection.edges.length,
+          },
+        });
+      } catch (error) {
+        const current = await this.store.getKnowledgeJob(job.job_id).catch(() => undefined);
+        if (current && current.status !== 'failed' && current.status !== 'done'
+          && current.status !== 'cancelled') {
+          await this.transitionKnowledgeJob({
+            project_id: current.project_id,
+            job_id: current.job_id,
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          }).catch(() => {});
+        }
+      } finally {
+        this.scheduledJobIds.delete(job.job_id);
+      }
+    });
   }
 
   private async indexAdditionalRoot(projectId: string, label: string, path: string): Promise<void> {
@@ -816,6 +1263,841 @@ export class ResearchService {
   async listProjects(): Promise<ProjectRecord[]> {
     await this.ready();
     return await this.store.listProjects();
+  }
+
+  async updateProjectContext(input: {
+    project_id: string;
+    purpose?: string;
+    user_constraints?: string[];
+    protected_parent_ids?: string[];
+  }): Promise<ProjectRecord> {
+    const project = await this.ensureProject(input.project_id);
+    return await this.store.updateProjectContext(project.project_id, {
+      ...(input.purpose !== undefined
+        ? { purpose: cleanText(input.purpose, 'purpose', 10_000) } : {}),
+      ...(input.user_constraints !== undefined
+        ? { user_constraints: [...new Set(input.user_constraints.map((item) => cleanText(item, 'user_constraint', 2_000)))] }
+        : {}),
+      ...(input.protected_parent_ids !== undefined
+        ? { protected_parent_ids: [...new Set(input.protected_parent_ids.map((item) => cleanText(item, 'protected_parent_id', 500)))] }
+        : {}),
+    });
+  }
+
+  async exportCatalogSnapshot(projectIdValue: string): Promise<{
+    path: string;
+    sha256: string;
+    catalog_generation: number;
+    record_count: number;
+    cutoff: string;
+  }> {
+    const project = await this.ensureProject(projectIdValue);
+    const records: CatalogRecordReadback[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const assets = await this.store.listCatalogAssets(project.project_id, { after, limit: 100 });
+      if (!assets.length) break;
+      for (const asset of assets) {
+        for (const revision of await this.store.listCatalogRevisions(project.project_id, asset.asset_id)) {
+          const first = await this.store.getCatalogRecord(
+            project.project_id,
+            asset.asset_id,
+            revision.revision,
+            0,
+            1024 * 1024,
+          );
+          if (!first) continue;
+          let body = first.body ?? '';
+          let offset = first.next_body_offset;
+          while (offset !== undefined) {
+            const next = await this.store.getCatalogRecord(
+              project.project_id,
+              asset.asset_id,
+              revision.revision,
+              offset,
+              1024 * 1024,
+            );
+            if (!next) break;
+            body += next.body ?? '';
+            offset = next.next_body_offset;
+          }
+          records.push({ ...first, ...(first.revision.body_blob_id ? { body } : {}) });
+        }
+      }
+      after = assets.at(-1)!.asset_id;
+      if (assets.length < 100) break;
+    }
+    const cutoff = new Date().toISOString();
+    const snapshot = {
+      format: 'google-surf-catalog-v2',
+      project,
+      catalog_generation: project.catalog_generation ?? 0,
+      cutoff,
+      records,
+    };
+    const encoded = JSON.stringify(snapshot, null, 2);
+    const sha256 = createHash('sha256').update(encoded).digest('hex');
+    const directory = join(this.options.root, 'exports');
+    await mkdir(directory, { recursive: true });
+    const path = join(directory, `${project.project_id}-catalog-g${snapshot.catalog_generation}-${sha256.slice(0, 12)}.json`);
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    await writeFile(temporary, encoded, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, path);
+    return { path, sha256, catalog_generation: snapshot.catalog_generation, record_count: records.length, cutoff };
+  }
+
+  async importCatalogSnapshot(input: {
+    project_id: string;
+    path: string;
+    expected_generation?: number;
+    dry_run?: boolean;
+    rollback?: boolean;
+  }): Promise<Record<string, unknown>> {
+    const project = await this.ensureProject(input.project_id);
+    if (input.expected_generation !== undefined
+      && input.expected_generation !== (project.catalog_generation ?? 0)) {
+      throw new Error(`catalog generation conflict: expected ${input.expected_generation}, current ${project.catalog_generation ?? 0}`);
+    }
+    const snapshotBytes = await readFile(resolve(input.path));
+    const snapshotSha256 = createHash('sha256').update(snapshotBytes).digest('hex');
+    const payload = JSON.parse(snapshotBytes.toString('utf8')) as {
+      format?: string;
+      project?: ProjectRecord;
+      records?: CatalogRecordReadback[];
+    };
+    if (!['google-surf-catalog-v1', 'google-surf-catalog-v2'].includes(payload.format ?? '')
+      || !Array.isArray(payload.records)) {
+      throw new Error('unsupported catalog snapshot');
+    }
+    const proposed = payload.records.filter((record) => record?.asset?.asset_id && record?.revision);
+    const currentRevisionIds = new Set(payload.records
+      .filter((record) => record.asset.current_revision_id === record.revision.revision_id)
+      .map((record) => record.revision.revision_id));
+    if (input.dry_run !== false) {
+      return {
+        dry_run: true,
+        mode: input.rollback ? 'rollback' : 'import',
+        revisions: proposed.length,
+        current_records: currentRevisionIds.size,
+        snapshot_sha256: snapshotSha256,
+        project_id: project.project_id,
+      };
+    }
+    const receipts: DurableWriteReceipt[] = [];
+    const targetWasEmpty = !(await this.store.listCatalogAssets(project.project_id, { limit: 1 })).length;
+    const applicable = targetWasEmpty
+      ? proposed
+      : proposed.filter((record) => currentRevisionIds.has(record.revision.revision_id));
+    for (const record of applicable) {
+      const existing = await this.store.getCatalogAsset(project.project_id, record.asset.asset_id);
+      receipts.push(await this.writeCatalogRecord({
+        project_id: project.project_id,
+        kind: record.asset.kind,
+        operation: existing ? 'patch' : 'create',
+        asset_id: record.asset.asset_id,
+        expected_revision: existing?.current_revision ?? 0,
+        idempotency_key: `catalog-${input.rollback ? 'rollback' : 'import'}:${snapshotSha256}:${record.revision.revision_id}:${project.catalog_generation ?? 0}`,
+        body: record.body,
+        fields: record.revision.fields,
+        evidence_ids: record.revision.evidence_ids,
+        artifact_references: record.revision.artifact_references,
+        aliases: record.asset.aliases,
+        protected: record.asset.protected,
+        access_tier: record.asset.access_tier,
+        set_current: record.asset.asset_id === payload.project?.current_plan_asset_id,
+        missing_fields: record.revision.missing_fields,
+        effective_at: record.revision.effective_at,
+        source_sequence: record.revision.source_sequence,
+        source_reference: record.revision.source_reference,
+      }));
+    }
+    const updated = await this.ensureProject(project.project_id);
+    const journalId = createHash('sha256').update(
+      `${input.rollback ? 'rollback' : 'import'}\0${project.project_id}\0${snapshotSha256}\0${project.catalog_generation ?? 0}`,
+    ).digest('hex');
+    await this.store.putCatalogMigrationJournal({
+      journal_id: journalId,
+      project_id: project.project_id,
+      mode: input.rollback ? 'rollback' : 'import',
+      snapshot_path: resolve(input.path),
+      snapshot_sha256: snapshotSha256,
+      snapshot_generation: payload.project?.catalog_generation ?? 0,
+      catalog_generation_before: project.catalog_generation ?? 0,
+      catalog_generation_after: updated.catalog_generation ?? 0,
+      applied_revision_ids: receipts.map((receipt) => receipt.revision_id),
+      preserved_post_snapshot_assets: !targetWasEmpty,
+      created_at: new Date().toISOString(),
+    });
+    return {
+      dry_run: false,
+      mode: input.rollback ? 'rollback' : 'import',
+      journal_id: journalId,
+      records: receipts.length,
+      snapshot_sha256: snapshotSha256,
+      catalog_generation_before: project.catalog_generation ?? 0,
+      catalog_generation_after: updated.catalog_generation ?? 0,
+      preserved_post_snapshot_assets: !targetWasEmpty,
+      receipts,
+    };
+  }
+
+  private async indexCatalogRecord(record: CatalogRecordReadback): Promise<void> {
+    const documentIdValue = `catalog-${createHash('sha256')
+      .update(record.asset.asset_id).digest('hex').slice(0, 32)}`;
+    const titleValue = record.revision.fields.title ?? record.revision.fields.name;
+    const title = typeof titleValue === 'string' && titleValue.trim()
+      ? titleValue.slice(0, 1_000)
+      : `${record.asset.kind}: ${record.asset.asset_id}`.slice(0, 1_000);
+    const fallbackText = stableJson(record.revision.fields);
+    const chunkSetId = record.revision.body_blob_id
+      ?? createHash('sha256').update(fallbackText).digest('hex');
+    const now = new Date().toISOString();
+    let chunkIndex = 0;
+    let bodyOffset = 0;
+    let hasBodyPage = false;
+    for (;;) {
+      const page = record.revision.body_blob_id
+        ? await this.store.getCatalogRecord(
+          record.asset.project_id,
+          record.asset.asset_id,
+          record.revision.revision,
+          bodyOffset,
+          1024 * 1024,
+        )
+        : undefined;
+      const text = page?.body ?? (!hasBodyPage ? fallbackText : '');
+      if (text) {
+        const pageStart = page?.body_span?.start ?? 0;
+        const chunks = documentChunks(text).map((chunk) => {
+          const currentIndex = chunkIndex++;
+          return {
+            chunk_id: `${documentIdValue}_${chunkSetId.slice(0, 16)}_${currentIndex}`,
+            document_id: documentIdValue,
+            chunk_set_id: chunkSetId,
+            chunk_index: currentIndex,
+            title,
+            url: `surf://projects/${record.asset.project_id}/records/${encodeURIComponent(record.asset.asset_id)}`,
+            text: chunk.text,
+            content_hash: chunk.content_hash,
+            source_span: {
+              start: pageStart + Buffer.byteLength(
+                text.slice(0, chunk.chunk_index * DOCUMENT_CHUNK_CHARS),
+                'utf8',
+              ),
+              end: pageStart + Buffer.byteLength(
+                text.slice(0, chunk.chunk_index * DOCUMENT_CHUNK_CHARS + chunk.text.length),
+                'utf8',
+              ),
+            },
+            updated_at: now,
+          };
+        });
+        await this.store.stageDocumentChunks(chunks);
+      }
+      hasBodyPage = true;
+      if (!page?.next_body_offset) break;
+      bodyOffset = page.next_body_offset;
+    }
+    if (!chunkIndex) return;
+    await this.store.publishDocumentChunkSet({
+      document_id: documentIdValue,
+      canonical_url: `surf://projects/${record.asset.project_id}/records/${encodeURIComponent(record.asset.asset_id)}`,
+      title,
+      kind: record.asset.kind,
+      content_hash: chunkSetId,
+      catalog_asset_id: record.asset.asset_id,
+      catalog_revision_id: record.revision.revision_id,
+      updated_at: now,
+    }, {
+      project_id: record.asset.project_id,
+      document_id: documentIdValue,
+      state: 'lexical_active',
+      added_at: record.asset.created_at,
+      updated_at: now,
+    }, chunkSetId);
+  }
+
+  async writeCatalogRecord(input: CatalogWriteInput): Promise<DurableWriteReceipt> {
+    const project = await this.ensureProject(input.project_id);
+    const assetIdValue = input.asset_id?.trim()
+      || `${project.project_id}:${input.kind}:${randomUUID()}`;
+    if (input.operation !== 'create' && !input.asset_id) throw new Error('asset_id required');
+    if (!input.idempotency_key.trim()) throw new Error('idempotency_key required');
+    if (input.body !== undefined && input.body_path) throw new Error('body and body_path cannot be combined');
+    if (input.body !== undefined && Buffer.byteLength(input.body, 'utf8') > 64 * 1024 * 1024) {
+      throw new Error('body exceeds 67108864 UTF-8 bytes; use body_path for a streamed versioned attachment');
+    }
+    if ((input.artifact_references?.length ?? 0) > 50_000) {
+      throw new Error('artifact_references accepts at most 50000 entries per operation');
+    }
+    let bodyAttachment: { blob_id: string; byte_length: number } | undefined;
+    if (input.body_path) {
+      const path = resolve(input.body_path);
+      const file = await stat(path);
+      if (!file.isFile()) throw new Error('body_path must reference a regular file');
+      if (file.size > 256 * 1024 * 1024) throw new Error('body_path exceeds 268435456 bytes');
+      const hash = createHash('sha256');
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      for await (const chunk of createReadStream(path, { highWaterMark: 256 * 1024 })) {
+        hash.update(chunk);
+        decoder.decode(chunk, { stream: true });
+      }
+      decoder.decode();
+      bodyAttachment = { blob_id: hash.digest('hex'), byte_length: file.size };
+      await this.store.putContentBlobChunks(
+        bodyAttachment.blob_id,
+        bodyAttachment.byte_length,
+        createReadStream(path, { highWaterMark: 256 * 1024 }),
+      );
+    }
+    const missingFields = [...new Set(input.missing_fields ?? [])];
+    const fields = normalizeCatalogFields(input.kind, input.fields, missingFields);
+    const { body_path: _bodyPath, fields: _fields, ...inputWithoutPath } = input;
+    const normalized = {
+      ...inputWithoutPath,
+      project_id: project.project_id,
+      asset_id: assetIdValue,
+      fields,
+      aliases: [...new Set(input.aliases ?? [])],
+      evidence_ids: [...new Set(input.evidence_ids ?? [])],
+      artifact_references: input.artifact_references ?? [],
+      missing_fields: missingFields,
+      ...(input.effective_at ? { effective_at: cleanTime(input.effective_at, 'effective_at') } : {}),
+      ...(bodyAttachment ? { body_attachment: bodyAttachment } : {}),
+    };
+    const receipt = await this.store.commitCatalogRevision({
+      ...normalized,
+      asset_id: assetIdValue,
+      idempotency_key: input.idempotency_key,
+      request_hash: durableRequestHash(normalized),
+    });
+    if (receipt.changed) await this.invalidateGraph(project.project_id, false);
+    if (receipt.index_job_id) {
+      const job = await this.store.getKnowledgeJob(receipt.index_job_id);
+      if (job) this.scheduleCatalogIndex(job);
+    }
+    return receipt;
+  }
+
+  async getCatalogRecord(
+    projectIdValue: string,
+    recordId: string,
+    revision?: number,
+    bodyOffset = 0,
+    bodyBytes = 64 * 1024,
+    artifactOffset = 0,
+    artifactLimit = 200,
+  ): Promise<CatalogRecordReadback | SourceRecordReadback | DocumentRecordReadback | { legacy: true; record: unknown }> {
+    const project = await this.ensureProject(projectIdValue);
+    const catalog = await this.store.getCatalogRecord(
+      project.project_id,
+      cleanText(recordId, 'record_id', 500),
+      revision,
+      bodyOffset,
+      Math.min(Math.max(bodyBytes, 1), 1024 * 1024),
+      Math.max(0, artifactOffset),
+      Math.min(Math.max(artifactLimit, 1), 1_000),
+    );
+    if (catalog) return catalog;
+    const source = await this.store.getProjectSourceRecord(
+      project.project_id,
+      cleanText(recordId, 'record_id', 500),
+      bodyOffset,
+      Math.min(Math.max(bodyBytes, 1), 1024 * 1024),
+    );
+    if (source) return source;
+    const document = await this.store.getProjectDocumentRecord(
+      project.project_id,
+      cleanText(recordId, 'record_id', 500),
+      bodyOffset,
+      Math.min(Math.max(bodyBytes, 1), 1024 * 1024),
+    );
+    if (document) return document;
+    const [plan, experiment, decision, assertion, entity, ontology] = await Promise.all([
+      this.store.getPlan(recordId),
+      this.store.getExperiment(recordId),
+      this.store.getDecision(recordId),
+      this.store.getAssertion(recordId),
+      this.store.getEntity(recordId),
+      this.store.getOntologyTerm(recordId),
+    ]);
+    const record = [plan, experiment, decision, assertion, entity, ontology]
+      .find((value) => value?.project_id === project.project_id);
+    if (!record) throw new Error(`record not found in project: ${recordId}`);
+    return { legacy: true, record };
+  }
+
+  async getCatalogRecords(
+    projectIdValue: string,
+    recordIds: string[],
+    options: {
+      body_offset?: number;
+      body_bytes?: number;
+      artifact_offset?: number;
+      artifact_limit?: number;
+    } = {},
+  ): Promise<Array<{ record_id: string; record?: Awaited<ReturnType<ResearchService['getCatalogRecord']>>; error?: string }>> {
+    if (!recordIds.length || recordIds.length > 100) throw new Error('record_ids accepts 1-100 entries');
+    return await mapConcurrent([...new Set(recordIds)], 4, async (recordId) => {
+      try {
+        return {
+          record_id: recordId,
+          record: await this.getCatalogRecord(
+            projectIdValue,
+            recordId,
+            undefined,
+            options.body_offset,
+            options.body_bytes,
+            options.artifact_offset,
+            options.artifact_limit,
+          ),
+        };
+      } catch (error) {
+        return { record_id: recordId, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+  }
+
+  async projectContext(
+    projectIdValue: string,
+    budgetBytes = 12_000,
+    sinceRevision?: number,
+    asOf?: string,
+  ): Promise<Record<string, unknown>> {
+    const project = await this.ensureProject(projectIdValue);
+    const cutoff = asOf ? cleanTime(asOf, 'as_of') : undefined;
+    const [summary, plans, timeline, catalogPlan, planAssets, intents, experiments] = await Promise.all([
+      this.getProjectSummary(project.project_id),
+      this.store.listPlans(project.project_id),
+      this.store.listCatalogTimeline(project.project_id, { before: cutoff, limit: 200 }),
+      cutoff
+        ? this.store.findCatalogPlanAt(project.project_id, cutoff)
+        : project.current_plan_asset_id
+          ? this.store.getCatalogRecord(project.project_id, project.current_plan_asset_id, undefined, 0, 256 * 1024)
+          : Promise.resolve(undefined),
+      this.store.listCatalogAssets(project.project_id, { kind: 'plan', limit: 200 }),
+      this.store.listProjectIntents(project.project_id),
+      this.store.listExperiments(project.project_id),
+    ]);
+    const legacyPlan = cutoff
+      ? [...plans].filter((plan) => (plan.effective_at ?? plan.recorded_at ?? plan.created_at) <= cutoff)
+        .sort((left, right) => (right.effective_at ?? right.recorded_at ?? right.created_at)
+          .localeCompare(left.effective_at ?? left.recorded_at ?? left.created_at))[0]
+      : plans.find((plan) => plan.plan_revision_id === project.active_plan_revision_id);
+    const activePlan = catalogPlan && !('legacy' in catalogPlan) ? {
+      plan_revision_id: catalogPlan.revision.revision_id,
+      asset_id: catalogPlan.asset.asset_id,
+      revision: catalogPlan.revision.revision,
+      title: typeof catalogPlan.revision.fields.title === 'string'
+        ? catalogPlan.revision.fields.title : catalogPlan.asset.asset_id,
+      body: catalogPlan.body ?? '',
+      effective_at: catalogPlan.revision.effective_at,
+      recorded_at: catalogPlan.revision.recorded_at,
+    } : legacyPlan ? {
+      plan_revision_id: legacyPlan.plan_revision_id,
+      revision: legacyPlan.revision,
+      title: legacyPlan.title,
+      body: legacyPlan.body,
+      effective_at: legacyPlan.effective_at,
+      recorded_at: legacyPlan.recorded_at ?? legacyPlan.created_at,
+    } : undefined;
+    const protectedParents = (await Promise.all((project.protected_parent_ids ?? []).slice(0, 50)
+      .map(async (recordId) => {
+        const record = await this.store.getCatalogRecord(project.project_id, recordId, undefined, 0, 1);
+        if (!record) return { record_id: recordId, missing: true };
+        const label = record.revision.fields.title ?? record.revision.fields.name ?? record.asset.asset_id;
+        return {
+          record_id: record.asset.asset_id,
+          revision: record.revision.revision,
+          kind: record.asset.kind,
+          label,
+          access_tier: record.asset.access_tier,
+          body_handle: record.revision.body_blob_id ? record.asset.asset_id : undefined,
+        };
+      })));
+    const changes = timeline.filter((event) => event.revision > (sinceRevision ?? 0)).slice(-20);
+    const latestPlanAsset = [...planAssets].sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0];
+    const stalePlanWarning = !cutoff && latestPlanAsset
+      && latestPlanAsset.current_revision_id !== project.current_plan_revision_id
+      ? `A newer plan revision exists but is not the selected current plan: ${latestPlanAsset.current_revision_id}`
+      : undefined;
+    const context = {
+      project: {
+        project_id: project.project_id,
+        name: project.name,
+        purpose: project.purpose,
+        user_constraints: project.user_constraints ?? [],
+        protected_parent_ids: project.protected_parent_ids ?? [],
+        catalog_generation: project.catalog_generation ?? 0,
+      },
+      active_plan: activePlan ? {
+        plan_revision_id: activePlan.plan_revision_id,
+        ...('asset_id' in activePlan ? { asset_id: activePlan.asset_id } : {}),
+        revision: activePlan.revision,
+        title: activePlan.title,
+        body: activePlan.body,
+        effective_at: activePlan.effective_at,
+        recorded_at: activePlan.recorded_at,
+      } : null,
+      current_intent: intents.at(-1) ? {
+        intent_revision_id: intents.at(-1)!.intent_revision_id,
+        intent: intents.at(-1)!.intent,
+        status: intents.at(-1)!.status,
+        recorded_at: intents.at(-1)!.created_at,
+      } : null,
+      active_work: experiments.filter((experiment) => experiment.status === 'running').slice(-20).map((experiment) => ({
+        experiment_id: experiment.experiment_id,
+        plan_revision_id: experiment.plan_revision_id,
+        name: experiment.name,
+        hypothesis: experiment.hypothesis,
+        started_at: experiment.started_at,
+      })),
+      protected_parents: protectedParents,
+      counts: summary,
+      changes,
+      ...(cutoff ? { as_of: cutoff } : {}),
+      ...(stalePlanWarning ? { warnings: [stalePlanWarning] } : {}),
+    };
+    const encoded = JSON.stringify(context);
+    if (Buffer.byteLength(encoded, 'utf8') <= budgetBytes) return { ...context, truncated: false };
+    return {
+      project: context.project,
+      active_plan: activePlan ? {
+        plan_revision_id: activePlan.plan_revision_id,
+        ...('asset_id' in activePlan ? { asset_id: activePlan.asset_id } : {}),
+        revision: activePlan.revision,
+        title: activePlan.title,
+        body_handle: activePlan.plan_revision_id,
+      } : null,
+      current_intent: context.current_intent,
+      active_work: context.active_work.slice(-5),
+      counts: summary,
+      protected_parents: protectedParents,
+      changes: changes.slice(-5),
+      truncated: true,
+      budget_bytes: budgetBytes,
+      ...(cutoff ? { as_of: cutoff } : {}),
+      ...(stalePlanWarning ? { warnings: [stalePlanWarning] } : {}),
+    };
+  }
+
+  async materializeCurrentView(projectIdValue: string): Promise<{
+    path: string;
+    catalog_generation: number;
+    bytes: number;
+  }> {
+    const context = await this.projectContext(projectIdValue, 64 * 1024) as {
+      project: { project_id: string; name: string; purpose?: string; user_constraints?: string[]; catalog_generation: number };
+      active_plan: null | { plan_revision_id: string; asset_id?: string; title: string; body?: string; body_handle?: string };
+      current_intent?: null | { intent_revision_id: string; intent: string; status: string };
+      active_work?: Array<{ experiment_id: string; plan_revision_id: string; name: string; hypothesis: string }>;
+      protected_parents?: Array<{ record_id: string; revision?: number; kind?: string; label?: unknown; missing?: boolean }>;
+      warnings?: string[];
+    };
+    const oneLine = (value: unknown): string => String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
+    const lines = [
+      `# ${oneLine(context.project.name)}: Current Research Context`,
+      '',
+      '> Generated from the authoritative Google Surf catalog. Do not edit this view directly.',
+      '',
+      `- Project: \`${context.project.project_id}\``,
+      `- Catalog generation: ${context.project.catalog_generation}`,
+      `- Generated at: ${new Date().toISOString()}`,
+      ...(context.project.purpose ? [`- Purpose: ${oneLine(context.project.purpose)}`] : []),
+      '',
+      '## Current Intent',
+      '',
+      context.current_intent
+        ? `${context.current_intent.intent}\n\nRecord: \`${context.current_intent.intent_revision_id}\``
+        : 'No current intent is recorded.',
+      '',
+      '## Active Plan',
+      '',
+      context.active_plan
+        ? `**${oneLine(context.active_plan.title)}**  \nRecord: \`${context.active_plan.asset_id ?? context.active_plan.plan_revision_id}\`  \nRevision: \`${context.active_plan.plan_revision_id}\`${context.active_plan.body ? `\n\n${context.active_plan.body.slice(0, 4_000)}${context.active_plan.body.length > 4_000 ? '\n\n[Body preview truncated; fetch the record by ID.]' : ''}` : ''}`
+        : 'No active plan is selected.',
+      '',
+      '## Protected Parents',
+      '',
+      ...(context.protected_parents?.length
+        ? context.protected_parents.map((parent) => `- \`${parent.record_id}\`${parent.missing ? ' (missing)' : `: ${oneLine(parent.label)}`}`)
+        : ['- None recorded.']),
+      '',
+      '## Active Work',
+      '',
+      ...(context.active_work?.length
+        ? context.active_work.map((work) => `- \`${work.experiment_id}\`: ${oneLine(work.name)} (plan \`${work.plan_revision_id}\`)`)
+        : ['- No running experiment is recorded.']),
+      ...(context.warnings?.length ? ['', '## Preservation Gaps', '', ...context.warnings.map((warning) => `- ${oneLine(warning)}`)] : []),
+      '',
+    ];
+    const content = lines.join('\n');
+    const directory = join(this.options.root, 'exports');
+    await mkdir(directory, { recursive: true });
+    const path = join(directory, `${context.project.project_id}-CURRENT.md`);
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    await writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, path);
+    return {
+      path,
+      catalog_generation: context.project.catalog_generation,
+      bytes: Buffer.byteLength(content, 'utf8'),
+    };
+  }
+
+  async catalogTimeline(
+    projectIdValue: string,
+    options: { after?: string; before?: string; limit?: number } = {},
+  ): Promise<{ events: CatalogTimelineEvent[]; next_cursor?: string }> {
+    const project = await this.ensureProject(projectIdValue);
+    const events = await this.store.listCatalogTimeline(project.project_id, options);
+    return {
+      events,
+      ...(events.length === (options.limit ?? 50) ? { next_cursor: events.at(-1)!.recorded_at } : {}),
+    };
+  }
+
+  async catalogDiff(
+    projectIdValue: string,
+    recordId: string,
+    fromRevision: number,
+    toRevision?: number,
+  ): Promise<Record<string, unknown>> {
+    const project = await this.ensureProject(projectIdValue);
+    const asset = await this.store.getCatalogAsset(project.project_id, recordId);
+    if (!asset) throw new Error(`record not found in project: ${recordId}`);
+    const from = await this.store.getCatalogRecord(project.project_id, asset.asset_id, fromRevision);
+    const to = await this.store.getCatalogRecord(
+      project.project_id,
+      asset.asset_id,
+      toRevision ?? asset.current_revision,
+    );
+    if (!from || !to) throw new Error('revision not found');
+    const keys = [...new Set([...Object.keys(from.revision.fields), ...Object.keys(to.revision.fields)])].sort();
+    const fields = Object.fromEntries(keys.flatMap((key) => (
+      stableJson(from.revision.fields[key]) === stableJson(to.revision.fields[key])
+        ? [] : [[key, { before: from.revision.fields[key], after: to.revision.fields[key] }]]
+    )));
+    return {
+      record_id: asset.asset_id,
+      from_revision: from.revision.revision,
+      to_revision: to.revision.revision,
+      fields,
+      body_changed: from.revision.body_blob_id !== to.revision.body_blob_id,
+      evidence_added: to.revision.evidence_ids.filter((id) => !from.revision.evidence_ids.includes(id)),
+      artifacts_added: to.revision.artifact_references.filter((item) => (
+        !from.revision.artifact_references.some((prior) => stableJson(prior) === stableJson(item))
+      )),
+    };
+  }
+
+  async jobStatus(projectIdValue: string, jobId: string): Promise<KnowledgeJobRecord> {
+    const project = await this.ensureProject(projectIdValue);
+    const job = await this.store.getKnowledgeJob(jobId);
+    if (!job || job.project_id !== project.project_id) throw new Error('job_id must belong to the project');
+    return job;
+  }
+
+  async waitForJob(
+    projectIdValue: string,
+    jobId: string,
+    afterRevision = 0,
+    timeoutMs = 30_000,
+  ): Promise<{ job: KnowledgeJobRecord; timed_out: boolean }> {
+    const deadline = Date.now() + Math.min(Math.max(timeoutMs, 0), 60_000);
+    for (;;) {
+      const job = await this.jobStatus(projectIdValue, jobId);
+      const revision = job.revision ?? job.attempts;
+      if (revision > afterRevision || job.status === 'done' || job.status === 'failed'
+        || job.status === 'cancelled') {
+        return { job, timed_out: false };
+      }
+      if (Date.now() >= deadline) return { job, timed_out: true };
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(250, deadline - Date.now())));
+    }
+  }
+
+  async cancelJob(
+    projectIdValue: string,
+    jobId: string,
+    reason = 'cancelled by client',
+  ): Promise<KnowledgeJobRecord> {
+    const project = await this.ensureProject(projectIdValue);
+    return await this.locked(`job-state:${jobId}`, async () => {
+      const job = await this.store.getKnowledgeJob(jobId);
+      if (!job || job.project_id !== project.project_id) {
+        throw new Error('job_id must belong to the project');
+      }
+      if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') return job;
+      const now = new Date().toISOString();
+      return await this.store.putKnowledgeJob({
+        ...job,
+        status: 'cancelled',
+        revision: (job.revision ?? 1) + 1,
+        cancel_requested_at: now,
+        cancel_reason: cleanText(reason, 'cancel_reason', 500),
+        updated_at: now,
+      });
+    });
+  }
+
+  private async knowledgeJobCancelled(jobId: string): Promise<boolean> {
+    return (await this.store.getKnowledgeJob(jobId))?.status === 'cancelled';
+  }
+
+  private async updateKnowledgeJobProgress(
+    projectId: string,
+    jobId: string,
+    stage: string,
+    completedItems: number,
+    totalItems: number,
+  ): Promise<KnowledgeJobRecord> {
+    return await this.locked(`job-state:${jobId}`, async () => {
+      const job = await this.store.getKnowledgeJob(jobId);
+      if (!job || job.project_id !== projectId) throw new Error('job_id must belong to the project');
+      if (job.status !== 'running') return job;
+      return await this.store.putKnowledgeJob({
+        ...job,
+        stage,
+        completed_items: completedItems,
+        total_items: totalItems,
+        revision: (job.revision ?? 1) + 1,
+        updated_at: new Date().toISOString(),
+      });
+    });
+  }
+
+  async verifyCatalogRecord(
+    projectIdValue: string,
+    recordId: string,
+    level: 'declared' | 'present' | 'hash_verified' | 'restore_tested' | 'replayed' = 'declared',
+  ): Promise<Record<string, unknown>> {
+    const readback = await this.getCatalogRecord(projectIdValue, recordId, undefined, 0, 1);
+    if ('legacy' in readback) return { record_id: recordId, level: 'declared', legacy: true };
+    if ('source' in readback) {
+      const present = Boolean(readback.entry.content_hash && readback.body_span);
+      return {
+        record_id: readback.entry.entry_id,
+        source: true,
+        requested_level: level,
+        content_hash: readback.entry.content_hash,
+        complete: level === 'declared' || (level === 'present' && present),
+        ...(level !== 'declared' && level !== 'present'
+          ? { reason: `${level} requires a full source-body verification workflow` }
+          : {}),
+      };
+    }
+    if ('document' in readback) {
+      const present = Boolean(readback.body_span);
+      return {
+        record_id: readback.record.document_id,
+        document: true,
+        requested_level: level,
+        complete: level === 'declared' || (level === 'present' && present),
+        ...(level !== 'declared' && level !== 'present'
+          ? { reason: `${level} requires a full document-body verification workflow` }
+          : {}),
+      };
+    }
+    const order = ['declared', 'present', 'hash_verified', 'restore_tested', 'replayed'];
+    const artifacts = await mapConcurrent(readback.revision.artifact_references, 4, async (artifact) => {
+      const location = artifact.location ?? artifact.path;
+      const declared = artifact.verification ?? 'declared';
+      const payloadState = artifact.available === false
+        ? 'remote_unavailable'
+        : artifact.available === true ? 'declared_available' : 'unknown';
+      if (level === 'declared') {
+        return {
+          artifact_id: artifact.artifact_id,
+          location,
+          payload_state: payloadState,
+          declared_verification: declared,
+          satisfies: true,
+        };
+      }
+      if (!location || !isAbsolute(location) || artifact.member) {
+        return {
+          artifact_id: artifact.artifact_id,
+          location,
+          payload_state: payloadState,
+          declared_verification: declared,
+          satisfies: order.indexOf(declared) >= order.indexOf(level),
+          verification_source: 'existing_receipt',
+          ...(!artifact.member ? { reason: 'no absolute local path' }
+            : { reason: 'archive member requires an archive restore verifier' }),
+        };
+      }
+      try {
+        const file = await stat(location);
+        if (!file.isFile()) throw new Error('not a regular file');
+        if (level === 'present') {
+          return {
+            artifact_id: artifact.artifact_id,
+            location,
+            payload_state: 'local_present',
+            declared_verification: declared,
+            observed_size: file.size,
+            expected_size: artifact.size,
+            satisfies: artifact.size === undefined || artifact.size === file.size,
+            verification_source: 'live_local_file',
+          };
+        }
+        if (level === 'hash_verified') {
+          if (!artifact.content_hash) {
+            return {
+              artifact_id: artifact.artifact_id,
+              location,
+              payload_state: 'local_present',
+              declared_verification: declared,
+              observed_size: file.size,
+              satisfies: false,
+              reason: 'no expected content hash',
+            };
+          }
+          const actualHash = await sha256File(location);
+          const expectedHash = artifact.content_hash.replace(/^sha256:/i, '').toLowerCase();
+          return {
+            artifact_id: artifact.artifact_id,
+            location,
+            payload_state: 'local_present',
+            declared_verification: declared,
+            observed_size: file.size,
+            expected_hash: expectedHash,
+            observed_hash: actualHash,
+            satisfies: actualHash === expectedHash,
+            verification_source: 'live_local_file',
+          };
+        }
+        return {
+          artifact_id: artifact.artifact_id,
+          location,
+          payload_state: 'local_present',
+          declared_verification: declared,
+          satisfies: order.indexOf(declared) >= order.indexOf(level),
+          verification_source: 'existing_receipt',
+          reason: `${level} requires an external workflow and cannot be inferred from file presence`,
+        };
+      } catch (error) {
+        return {
+          artifact_id: artifact.artifact_id,
+          location,
+          payload_state: payloadState,
+          declared_verification: declared,
+          satisfies: false,
+          reason: artifact.available === false
+            ? 'payload is declared unavailable at the recorded remote location; manifest metadata is retained'
+            : error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
+    return {
+      record_id: readback.asset.asset_id,
+      revision: readback.revision.revision,
+      requested_level: level,
+      body_committed: Boolean(readback.revision.body_blob_id),
+      artifacts,
+      complete: artifacts.every((artifact) => artifact.satisfies),
+    };
   }
 
   async previewForgetProject(projectIdValue: string): Promise<ProjectForgetPreview> {
@@ -1002,20 +2284,46 @@ export class ResearchService {
 
   private async indexProjectLocked(input: ProjectIndexInput): Promise<ProjectIndexResult> {
     const project = await this.ensureProject(input.project_id);
-    const inventory = await inventoryProject({
-      roots: input.roots,
-      ...(input.git_root ? { git_root: input.git_root } : {}),
-    });
-    const searchable = inventory.records.filter((record) => record.text !== undefined
-      && searchableByPolicy('structured', record.kind, record.tracked));
+    const activeSnapshot = project.active_source_snapshot_id
+      ? await this.store.getSourceSnapshot(project.active_source_snapshot_id)
+      : undefined;
+    const mode = input.root_mode ?? 'merge';
+    const requestedRoots = input.roots ?? [];
+    const priorRoots = activeSnapshot?.roots ?? [];
+    const roots = mode === 'replace'
+      ? requestedRoots
+      : mode === 'remove'
+        ? priorRoots.filter((root) => !requestedRoots.some((removed) => removed.label === root.label))
+        : [...new Map([...priorRoots, ...requestedRoots].map((root) => [root.label, root])).values()];
+    if (!roots.length) throw new Error('root update would leave the project without indexed roots');
+    const gitRoot = input.git_root ?? activeSnapshot?.git_root;
+    const hasExplicitDelta = Boolean(input.changed_paths?.length || input.removed_paths?.length);
+    if (hasExplicitDelta && mode !== 'merge') {
+      throw new Error('changed_paths and removed_paths require root_mode=merge');
+    }
+    if (hasExplicitDelta && !activeSnapshot) {
+      throw new Error('incremental path sync requires an existing source snapshot');
+    }
+    const inventory = hasExplicitDelta
+      ? await inventoryProjectIncremental({
+        roots,
+        ...(gitRoot ? { git_root: gitRoot } : {}),
+        current: await this.store.listProjectSourceEntries(project.project_id),
+        changed_paths: input.changed_paths ?? [],
+        removed_paths: input.removed_paths ?? [],
+      })
+      : await inventoryProject({
+        roots,
+        ...(gitRoot ? { git_root: gitRoot } : {}),
+      });
+    const searchable = inventory.records.filter((record) => (
+      record.text !== undefined || record.searchable === true
+    ) && searchableByPolicy('structured', record.kind, record.tracked));
     const bodies = new Map<string, string>();
     for (const record of searchable) {
       if (record.content_hash && record.text !== undefined) bodies.set(record.content_hash, record.text);
     }
     const now = new Date().toISOString();
-    const activeSnapshot = project.active_source_snapshot_id
-      ? await this.store.getSourceSnapshot(project.active_source_snapshot_id)
-      : undefined;
     const snapshotId = activeSnapshot?.inventory_digest === inventory.digest
       ? activeSnapshot.snapshot_id
       : `${project.project_id}-${createHash('sha256')
@@ -1032,7 +2340,7 @@ export class ResearchService {
       file_count: inventory.records.length,
       collection_count: inventory.records.filter((record) => record.entry_type === 'collection').length,
       searchable_file_count: searchable.length,
-      unique_body_count: bodies.size,
+      unique_body_count: new Set(searchable.map((record) => record.content_hash).filter(Boolean)).size,
       sensitive_file_count: inventory.records.filter((record) => record.sensitive).length,
       unreadable_file_count: inventory.records.filter((record) => record.unreadable).length,
       total_bytes: inventory.records.reduce((sum, record) => sum + record.size, 0),
@@ -1055,7 +2363,7 @@ export class ResearchService {
     if (job.status === 'done' && activeSnapshot?.snapshot_id !== snapshotId) {
       throw new Error('completed rebuild job has no matching active snapshot');
     }
-    if (job.status === 'failed') {
+    if (job.status === 'failed' || job.status === 'cancelled') {
       job = await this.transitionKnowledgeJob({
         project_id: project.project_id,
         job_id: job.job_id,
@@ -1090,39 +2398,11 @@ export class ResearchService {
           unreadable: record.unreadable,
           ...(record.content_hash ? { content_hash: record.content_hash } : {}),
           ...(record.experiment_key ? { experiment_key: record.experiment_key } : {}),
+          ...(record.role ? { role: record.role } : {}),
+          ...(record.aliases?.length ? { aliases: record.aliases } : {}),
         })),
         bodies: [...bodies].map(([content_hash, text]) => ({ content_hash, text })),
       });
-      const exactSourceItems: RetrievalIndexItem[] = searchable.flatMap((record) => {
-        if (!record.content_hash || record.text === undefined) return [];
-        const name = basename(record.path);
-        const extension = extname(name);
-        return [{
-          item_id: `source:${record.id}`,
-          project_id: project.project_id,
-          source_family: 'code',
-          source_id: record.id,
-          title: `${record.root}/${record.path}`,
-          url: `surf://projects/${project.project_id}/files/${record.id}`,
-          content_hash: record.content_hash,
-          exact_terms: exactTerms(
-            `${record.root}/${record.path}`,
-            record.path,
-            name,
-            extension ? name.slice(0, -extension.length) : name,
-          ),
-          text: `${record.root}/${record.path}\n${record.text}`,
-        }];
-      });
-      await this.store.replaceExactItems(project.project_id, 'code', exactSourceItems);
-      if (job.status === 'running') {
-        job = await this.transitionKnowledgeJob({
-          project_id: project.project_id,
-          job_id: job.job_id,
-          status: 'done',
-          result_digest: snapshotId,
-        });
-      }
     } catch (error) {
       if (job.status === 'running') {
         try {
@@ -1150,12 +2430,10 @@ export class ResearchService {
         : activeSnapshot
         ? `Project: ${project.name} | Stored: added ${write.added}, modified ${write.modified}, removed ${write.removed}`
         : `Project: ${project.name} | Stored: code ${added.code}, experiments ${added.experiment}, documents ${added.document}, configs ${added.config}, checkpoint metadata ${added.checkpoint}`;
-    if (!write.reused) await this.invalidateGraph(project.project_id, false);
-    this.schedule(async () => {
-      await this.materializeCodeStructure(project.project_id, snapshotId);
-      await this.materializeRetrievalIndex(project.project_id, 'code');
-      await this.materializeGraph([project.project_id]);
-    });
+    if (!write.reused) {
+      await this.invalidateGraph(project.project_id, false);
+    }
+    if (job.status !== 'done') this.scheduleSourceIndex(job);
     return {
       project_id: project.project_id,
       snapshot_id: snapshotId,
@@ -1164,7 +2442,7 @@ export class ResearchService {
       file_count: inventory.records.length,
       collection_count: snapshot.collection_count,
       searchable_file_count: searchable.length,
-      unique_body_count: bodies.size,
+      unique_body_count: snapshot.unique_body_count,
       sensitive_file_count: snapshot.sensitive_file_count,
       unreadable_file_count: snapshot.unreadable_file_count,
       total_bytes: snapshot.total_bytes,
@@ -1206,9 +2484,38 @@ export class ResearchService {
         ...(input.based_on_experiment_id
           ? { based_on_experiment_id: input.based_on_experiment_id }
           : {}),
+        ...(cleanTime(input.effective_at, 'effective_at')
+          ? { effective_at: cleanTime(input.effective_at, 'effective_at') }
+          : {}),
+        recorded_at: new Date().toISOString(),
+        ...(input.source_sequence !== undefined ? { source_sequence: input.source_sequence } : {}),
+        ...(input.source_reference
+          ? { source_reference: cleanText(input.source_reference, 'source_reference', 2_000) }
+          : {}),
+        ...(input.missing_fields?.length ? { missing_fields: [...new Set(input.missing_fields)] } : {}),
         created_at: new Date().toISOString(),
       };
       await this.store.putPlan(project, plan);
+      await this.writeCatalogRecord({
+        project_id: projectId,
+        kind: 'plan',
+        operation: revision === 1 ? 'create' : 'patch',
+        asset_id: `${projectId}:plan`,
+        expected_revision: revision - 1,
+        idempotency_key: input.idempotency_key ?? `legacy-plan:${plan.plan_revision_id}`,
+        body: plan.body,
+        fields: {
+          title: plan.title,
+          plan_revision_id: plan.plan_revision_id,
+          change_reason: plan.change_reason,
+          based_on_experiment_id: plan.based_on_experiment_id,
+        },
+        aliases: revision === 1 ? [`${projectId}:master-plan`] : [],
+        missing_fields: plan.missing_fields,
+        effective_at: plan.effective_at,
+        source_sequence: plan.source_sequence,
+        source_reference: plan.source_reference,
+      });
       await this.invalidateGraph(projectId);
       return plan;
     });
@@ -1228,11 +2535,41 @@ export class ResearchService {
       plan_revision_id: planRevisionId,
       name: cleanText(input.name, 'name', 200),
       hypothesis: cleanText(input.hypothesis, 'hypothesis', 5_000),
+      ...(input.body ? { body: cleanText(input.body, 'body', 4 * 1024 * 1024) } : {}),
       status: 'running',
-      ...(input.artifacts?.length ? { artifacts: input.artifacts.slice(0, 50) } : {}),
+      ...(input.artifacts?.length ? { artifacts: [...input.artifacts] } : {}),
+      ...(cleanTime(input.effective_at, 'effective_at')
+        ? { effective_at: cleanTime(input.effective_at, 'effective_at') }
+        : {}),
+      recorded_at: new Date().toISOString(),
+      ...(input.source_sequence !== undefined ? { source_sequence: input.source_sequence } : {}),
+      ...(input.source_reference
+        ? { source_reference: cleanText(input.source_reference, 'source_reference', 2_000) }
+        : {}),
+      ...(input.missing_fields?.length ? { missing_fields: [...new Set(input.missing_fields)] } : {}),
       started_at: new Date().toISOString(),
     };
     const stored = await this.store.putExperiment(experiment);
+    await this.writeCatalogRecord({
+      project_id: project.project_id,
+      kind: 'experiment',
+      operation: 'create',
+      asset_id: stored.experiment_id,
+      expected_revision: 0,
+      idempotency_key: input.idempotency_key ?? `legacy-experiment-start:${stored.experiment_id}`,
+      body: stored.body ?? stored.hypothesis,
+      fields: {
+        name: stored.name,
+        hypothesis: stored.hypothesis,
+        status: stored.status,
+        plan_revision_id: stored.plan_revision_id,
+      },
+      artifact_references: artifactReferences(stored.artifacts),
+      missing_fields: stored.missing_fields,
+      effective_at: stored.effective_at,
+      source_sequence: stored.source_sequence,
+      source_reference: stored.source_reference,
+    });
     await this.invalidateGraph(project.project_id);
     return stored;
   }
@@ -1248,11 +2585,43 @@ export class ResearchService {
       ...experiment,
       status: input.status,
       summary: cleanText(input.summary, 'summary', 10_000),
+      ...(input.body ? { body: cleanText(input.body, 'body', 4 * 1024 * 1024) } : {}),
       ...(input.metrics ? { metrics: input.metrics } : {}),
       ...(input.artifacts?.length
-        ? { artifacts: [...(experiment.artifacts ?? []), ...input.artifacts].slice(0, 100) }
+        ? { artifacts: [...(experiment.artifacts ?? []), ...input.artifacts] }
         : {}),
+      ...(cleanTime(input.effective_at, 'effective_at')
+        ? { effective_at: cleanTime(input.effective_at, 'effective_at') }
+        : {}),
+      recorded_at: new Date().toISOString(),
+      ...(input.source_sequence !== undefined ? { source_sequence: input.source_sequence } : {}),
+      ...(input.source_reference
+        ? { source_reference: cleanText(input.source_reference, 'source_reference', 2_000) }
+        : {}),
+      ...(input.missing_fields?.length ? { missing_fields: [...new Set(input.missing_fields)] } : {}),
       finished_at: new Date().toISOString(),
+    });
+    await this.writeCatalogRecord({
+      project_id: projectId,
+      kind: 'experiment',
+      operation: 'patch',
+      asset_id: stored.experiment_id,
+      expected_revision: 1,
+      idempotency_key: input.idempotency_key ?? `legacy-experiment-finish:${stored.experiment_id}`,
+      body: stored.body ?? stored.summary,
+      fields: {
+        name: stored.name,
+        hypothesis: stored.hypothesis,
+        status: stored.status,
+        summary: stored.summary,
+        metrics: stored.metrics,
+        plan_revision_id: stored.plan_revision_id,
+      },
+      artifact_references: artifactReferences(input.artifacts),
+      missing_fields: stored.missing_fields,
+      effective_at: stored.effective_at,
+      source_sequence: stored.source_sequence,
+      source_reference: stored.source_reference,
     });
     await this.invalidateGraph(projectId);
     return stored;
@@ -1280,7 +2649,36 @@ export class ResearchService {
       ...(input.experiment_id ? { experiment_id: input.experiment_id } : {}),
       title: cleanText(input.title, 'title', 200),
       summary: cleanText(input.summary, 'summary', 10_000),
+      ...(input.body ? { body: cleanText(input.body, 'body', 4 * 1024 * 1024) } : {}),
+      ...(cleanTime(input.effective_at, 'effective_at')
+        ? { effective_at: cleanTime(input.effective_at, 'effective_at') }
+        : {}),
+      recorded_at: new Date().toISOString(),
+      ...(input.source_sequence !== undefined ? { source_sequence: input.source_sequence } : {}),
+      ...(input.source_reference
+        ? { source_reference: cleanText(input.source_reference, 'source_reference', 2_000) }
+        : {}),
+      ...(input.missing_fields?.length ? { missing_fields: [...new Set(input.missing_fields)] } : {}),
       created_at: new Date().toISOString(),
+    });
+    await this.writeCatalogRecord({
+      project_id: project.project_id,
+      kind: 'decision',
+      operation: 'create',
+      asset_id: stored.decision_id,
+      expected_revision: 0,
+      idempotency_key: input.idempotency_key ?? `legacy-decision:${stored.decision_id}`,
+      body: stored.body ?? stored.summary,
+      fields: {
+        title: stored.title,
+        summary: stored.summary,
+        plan_revision_id: stored.plan_revision_id,
+        experiment_id: stored.experiment_id,
+      },
+      missing_fields: stored.missing_fields,
+      effective_at: stored.effective_at,
+      source_sequence: stored.source_sequence,
+      source_reference: stored.source_reference,
     });
     await this.invalidateGraph(project.project_id);
     return stored;
@@ -1704,8 +3102,8 @@ export class ResearchService {
   async queueKnowledgeJob(input: KnowledgeJobInput): Promise<KnowledgeJobRecord> {
     const project = await this.ensureProject(input.project_id);
     const sourceHash = cleanText(input.source_hash, 'source_hash', 200);
-    const schemaVersion = cleanText(input.schema_version, 'schema_version', 100);
-    const algorithmVersion = cleanText(input.algorithm_version, 'algorithm_version', 100);
+    const schemaVersion = cleanText(input.schema_version, 'schema_version', 500);
+    const algorithmVersion = cleanText(input.algorithm_version, 'algorithm_version', 500);
     const key = knowledgeJobKey({
       project_id: project.project_id,
       kind: input.kind,
@@ -1728,6 +3126,7 @@ export class ResearchService {
         algorithm_version: algorithmVersion,
         affected_source_ids: [...new Set(input.affected_source_ids ?? [])],
         attempts: 0,
+        revision: 1,
         created_at: now,
         updated_at: now,
       });
@@ -1743,29 +3142,33 @@ export class ResearchService {
     error?: string;
   }): Promise<KnowledgeJobRecord> {
     const project = await this.ensureProject(input.project_id);
-    const job = await this.store.getKnowledgeJob(input.job_id);
-    if (!job || job.project_id !== project.project_id) {
-      throw new Error('job_id must belong to the project');
-    }
-    const allowed: Record<KnowledgeJobStatus, KnowledgeJobStatus[]> = {
-      queued: ['running'],
-      running: ['done', 'failed'],
-      done: ['queued'],
-      failed: ['queued'],
-    };
-    if (!allowed[job.status].includes(input.status)) {
-      throw new Error(`invalid job transition: ${job.status} -> ${input.status}`);
-    }
-    return await this.store.putKnowledgeJob({
-      ...job,
-      status: input.status,
-      attempts: input.status === 'running' ? job.attempts + 1 : job.attempts,
-      ...(input.result_digest
-        ? { result_digest: cleanText(input.result_digest, 'result_digest', 200) }
-        : {}),
-      ...(input.result_counts ? { result_counts: input.result_counts } : {}),
-      ...(input.error ? { error: cleanText(input.error, 'error', 2_000) } : {}),
-      updated_at: new Date().toISOString(),
+    return await this.locked(`job-state:${input.job_id}`, async () => {
+      const job = await this.store.getKnowledgeJob(input.job_id);
+      if (!job || job.project_id !== project.project_id) {
+        throw new Error('job_id must belong to the project');
+      }
+      const allowed: Record<KnowledgeJobStatus, KnowledgeJobStatus[]> = {
+        queued: ['running', 'cancelled'],
+        running: ['done', 'failed', 'cancelled'],
+        done: ['queued'],
+        failed: ['queued'],
+        cancelled: ['queued'],
+      };
+      if (!allowed[job.status].includes(input.status)) {
+        throw new Error(`invalid job transition: ${job.status} -> ${input.status}`);
+      }
+      return await this.store.putKnowledgeJob({
+        ...job,
+        status: input.status,
+        attempts: input.status === 'running' ? job.attempts + 1 : job.attempts,
+        revision: (job.revision ?? 1) + 1,
+        ...(input.result_digest
+          ? { result_digest: cleanText(input.result_digest, 'result_digest', 200) }
+          : {}),
+        ...(input.result_counts ? { result_counts: input.result_counts } : {}),
+        ...(input.error ? { error: cleanText(input.error, 'error', 2_000) } : {}),
+        updated_at: new Date().toISOString(),
+      });
     });
   }
 
@@ -1907,26 +3310,31 @@ export class ResearchService {
         text: chunk.text,
       }];
     });
-    const sourceItems: RetrievalIndexItem[] = sources.map((source) => {
+    const sourceItems: RetrievalIndexItem[] = sources.flatMap((source) => {
       const name = basename(source.path);
       const extension = extname(name);
-      return {
-        item_id: `source:${source.entry_id}`,
+      const terms = exactTerms(
+        `${source.root}/${source.path}`,
+        source.path,
+        name,
+        extension ? name.slice(0, -extension.length) : name,
+        ...(source.aliases ?? []),
+        ...(symbolNames.get(source.entry_id) ?? []),
+      );
+      return semanticSourceChunks(source.text).map((chunk, index) => ({
+        item_id: `source:${source.entry_id}:${index}`,
         project_id: projectId,
         source_family: 'code',
         source_id: source.entry_id,
         title: `${source.root}/${source.path}`,
         url: `surf://projects/${projectId}/files/${source.entry_id}`,
         content_hash: source.content_hash,
-        exact_terms: exactTerms(
-          `${source.root}/${source.path}`,
-          source.path,
-          name,
-          extension ? name.slice(0, -extension.length) : name,
-          ...(symbolNames.get(source.entry_id) ?? []),
-        ),
-        text: `${source.root}/${source.path}\n${source.text}`,
-      };
+        exact_terms: index === 0 ? terms : [],
+        text: chunk.text,
+        span_start: chunk.start,
+        span_end: chunk.end,
+        ...(source.role ? { role: source.role } : {}),
+      }));
     });
     return [...documentItems, ...sourceItems];
   }
@@ -1950,22 +3358,40 @@ export class ResearchService {
       item_id: item.item_id,
       content_hash: item.content_hash,
       exact_terms: item.exact_terms,
+      text_hash: createHash('sha256').update(item.text).digest('hex'),
     })))).digest('hex');
-    await this.store.replaceExactItems(projectId, sourceFamily, items);
+    const delta = await this.store.planRetrievalItemDelta(projectId, sourceFamily, items);
     const model = this.embeddings.modelId();
-    if (!model) return undefined;
+    if (!model) {
+      await this.store.commitRetrievalGeneration(projectId, sourceFamily, digest, delta);
+      return undefined;
+    }
+    const vectorItems = this.options.vectorBackend === 'compact'
+      ? [...items].sort((left, right) => left.item_id.localeCompare(right.item_id))
+        .filter((item, index, values) => values.findIndex((row) => row.source_id === item.source_id) === index)
+      : items;
+    const prunedVectorItemIds = this.options.vectorBackend === 'compact'
+      ? (await this.store.listVectorItemIds(projectId, sourceFamily))
+        .filter((itemId) => !vectorItems.some((item) => item.item_id === itemId))
+      : [];
+    const vectorsPruned = prunedVectorItemIds.length;
     const identity = {
       project_id: projectId,
       kind: 'retrieval_index' as const,
       source_hash: digest,
-      schema_version: `retrieval-v1-${sourceFamily}-${this.embeddings.dimensions()}`,
-      algorithm_version: `${RETRIEVAL_ALGORITHM_VERSION}:${sourceFamily}:${model}`,
+      schema_version: `retrieval-v2-${sourceFamily}-${this.embeddings.dimensions()}`,
+      algorithm_version: `${RETRIEVAL_ALGORITHM_VERSION}:${sourceFamily}:${model}:${this.options.vectorBackend ?? 'hnsw'}`,
     };
     let job = await this.queueKnowledgeJob({
       ...identity,
-      affected_source_ids: items.map((item) => item.source_id),
+      affected_source_ids: vectorItems.map((item) => item.source_id),
     });
-    if (job.status === 'done') return job;
+    if (job.status === 'done') {
+      if (delta.inserted || delta.updated || delta.removed || prunedVectorItemIds.length) {
+        throw new Error('completed retrieval generation does not match current item state');
+      }
+      return job;
+    }
     if (job.status === 'running') {
       job = await this.transitionKnowledgeJob({
         project_id: projectId,
@@ -1974,7 +3400,7 @@ export class ResearchService {
         error: 'interrupted before completion',
       });
     }
-    if (job.status === 'failed') {
+    if (job.status === 'failed' || job.status === 'cancelled') {
       job = await this.transitionKnowledgeJob({
         project_id: projectId,
         job_id: job.job_id,
@@ -1989,12 +3415,26 @@ export class ResearchService {
       });
     }
     try {
-      const cacheKeys = items.map((item) => createHash('sha256')
-        .update(`${model}\0${item.text.slice(0, 4_000)}`).digest('hex'));
+      await this.updateKnowledgeJobProgress(projectId, job.job_id, 'embedding', 0, vectorItems.length);
+      const states = new Map((await this.store.listRetrievalItemStates(projectId, sourceFamily))
+        .map((state) => [state.item_id, state]));
+      const pendingItems = vectorItems.filter((item) => {
+        const state = states.get(item.item_id);
+        return state?.embedding_model !== model || !state.embedding_hash;
+      });
+      const cacheKeys = pendingItems.map((item) => createHash('sha256')
+        .update(stableJson({
+          model,
+          dimensions: this.embeddings.dimensions(),
+          normalization: 'passage-v1',
+          role: item.role ?? 'passage',
+          text_hash: createHash('sha256').update(item.text).digest('hex'),
+        })).digest('hex'));
       const cached = await this.store.cachedEmbeddings(cacheKeys);
-      const missing = items.map((item, index) => ({ item, index, cache_key: cacheKeys[index] }))
+      const missing = pendingItems.map((item, index) => ({ item, index, cache_key: cacheKeys[index] }))
         .filter((row) => !cached.has(row.cache_key));
       const generated = await this.embeddings.embedPassages(missing.map((row) => row.item.text));
+      if (await this.knowledgeJobCancelled(job.job_id)) throw new Error(`job ${job.job_id} cancelled`);
       await this.store.putCachedEmbeddings(missing.map((row, index) => ({
         cache_key: row.cache_key,
         embedding: generated[index],
@@ -2007,9 +3447,21 @@ export class ResearchService {
         item_id: item.item_id,
         content_hash: item.content_hash,
         exact_terms: item.exact_terms,
+        text_hash: createHash('sha256').update(item.text).digest('hex'),
       })))).digest('hex');
       if (currentDigest !== digest) throw new Error('retrieval source superseded');
-      await this.store.replaceVectorItems(projectId, sourceFamily, items, model, vectors);
+      await this.updateKnowledgeJobProgress(
+        projectId, job.job_id, 'retrieval_publish', vectorItems.length, vectorItems.length,
+      );
+      await this.store.commitRetrievalGeneration(
+        projectId,
+        sourceFamily,
+        digest,
+        delta,
+        pendingItems.map((item, index) => ({ item, embedding: vectors[index] })),
+        model,
+        prunedVectorItemIds,
+      );
       job = await this.transitionKnowledgeJob({
         project_id: projectId,
         job_id: job.job_id,
@@ -2018,8 +3470,13 @@ export class ResearchService {
         result_counts: {
           retrieval_documents: sourceFamily === 'document' ? items.length : 0,
           retrieval_sources: sourceFamily === 'code' ? items.length : 0,
-          retrieval_vectors: vectors.length,
+          retrieval_vectors: pendingItems.length,
+          retrieval_vectors_pruned: vectorsPruned,
           retrieval_vectors_reused: vectors.length - missing.length,
+          retrieval_items_inserted: delta.inserted,
+          retrieval_items_updated: delta.updated,
+          retrieval_items_removed: delta.removed,
+          retrieval_items_unchanged: delta.unchanged,
         },
       });
       return job;
@@ -2087,7 +3544,7 @@ export class ResearchService {
             error: 'interrupted before completion',
           });
         }
-        if (current.status === 'failed') {
+        if (current.status === 'failed' || current.status === 'cancelled') {
           current = await this.transitionKnowledgeJob({
             project_id: projectId,
             job_id: current.job_id,
@@ -2105,11 +3562,14 @@ export class ResearchService {
       });
       if (job.status === 'done') return job;
       try {
+        await this.updateKnowledgeJobProgress(projectId, job.job_id, 'code_parse', 0, entries.length);
         const loaded = { count: 0 };
         const structure = await runCodeStructureBatchStream(
           this.codeSourceBatches(projectId, entries, loaded),
         );
+        if (await this.knowledgeJobCancelled(job.job_id)) throw new Error(`job ${job.job_id} cancelled`);
         const deferred = entries.length - loaded.count;
+        await this.updateKnowledgeJobProgress(projectId, job.job_id, 'code_publish', loaded.count, entries.length);
         job = await this.locked('db-write', async () => {
           const current = await this.store.getProject(projectId);
           if (current?.active_source_snapshot_id !== snapshotId) {
@@ -2290,7 +3750,7 @@ export class ResearchService {
       const project = await this.ensureProject(projectId);
       const [
         sourceSnapshots, sourceEntries, documents, plans, experiments, decisions, sessions, intents, entities,
-        aliases, ontologyTerms, evidence, assertions, symbols, codeRelations,
+        aliases, ontologyTerms, evidence, assertions, symbols, codeRelations, catalog,
       ] = await Promise.all([
         this.store.listProjectSourceSnapshots(projectId),
         this.store.listProjectSourceEntries(projectId),
@@ -2307,6 +3767,7 @@ export class ResearchService {
         this.store.listAssertions(projectId),
         this.store.listCodeSymbols(projectId),
         this.store.listCodeRelations(projectId),
+        this.store.listCatalogGraphRecords(projectId),
       ]);
       return {
         project,
@@ -2325,6 +3786,8 @@ export class ResearchService {
         assertions,
         symbols,
         code_relations: codeRelations,
+        catalog_assets: catalog.assets,
+        catalog_revisions: catalog.revisions,
       };
     }));
     const projection = buildGraphProjection(sources);
@@ -2466,7 +3929,7 @@ export class ResearchService {
         algorithm_version: GRAPH_ALGORITHM_VERSION,
         affected_source_ids: [],
       });
-      if (job.status === 'failed') {
+      if (job.status === 'failed' || job.status === 'cancelled') {
         job = await this.transitionKnowledgeJob({
           project_id: projectId,
           job_id: job.job_id,
@@ -2549,7 +4012,7 @@ export class ResearchService {
         error: 'interrupted before completion',
       });
     }
-    if (job.status === 'failed') {
+    if (job.status === 'failed' || job.status === 'cancelled') {
       job = await this.transitionKnowledgeJob({
         project_id: owner,
         job_id: job.job_id,
@@ -2565,9 +4028,14 @@ export class ResearchService {
     }
     try {
       const analysisStarted = Date.now();
+      await this.updateKnowledgeJobProgress(owner, job.job_id, 'graph_analysis', 0, projection.nodes.length);
       const analysis = await runGraphSidecar(projection);
+      if (await this.knowledgeJobCancelled(job.job_id)) throw new Error(`job ${job.job_id} cancelled`);
       const analysisMs = Date.now() - analysisStarted;
       const publishStarted = Date.now();
+      await this.updateKnowledgeJobProgress(
+        owner, job.job_id, 'graph_publish', projection.nodes.length, projection.nodes.length,
+      );
       await this.store.publishGraphProjection(projection, analysis);
       this.rememberGraphArtifact(projection.projection_id, { projection, analysis });
       const publishMs = Date.now() - publishStarted;
@@ -2670,6 +4138,8 @@ export class ResearchService {
       .slice(0, limit)
       .map(({ node, score }) => ({
         document_id: node.source_id ?? node.node_id,
+        ...(node.record_id ? { record_id: node.record_id, body_handle: node.record_id } : {}),
+        ...(node.revision_id ? { revision_id: node.revision_id } : {}),
         title: node.label,
         url: node.url ?? `surf://projects/${node.project_id}/graph/${node.node_id}`,
         description: (node.text ?? node.label).slice(0, 500),
@@ -2680,6 +4150,7 @@ export class ResearchService {
           ? 'code' as const
           : 'graph' as const,
         retrieval_family: 'graph' as const,
+        kind: node.kind,
       }));
   }
 
@@ -2703,6 +4174,7 @@ export class ResearchService {
     preparedQueryVector?: number[],
     includeGraph = true,
     signal?: AbortSignal,
+    filters?: ResearchSearchFilters,
   ): Promise<LocalSearchFamilies> {
     ensureNotAborted(signal);
     const degradedLanes = new Set<RetrievalLane>();
@@ -2710,8 +4182,9 @@ export class ResearchService {
     const projects = await Promise.all(projectIds.map((projectId) => this.ensureProject(projectId)));
     const cleanedQuery = cleanText(query, 'query', 400);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
+    const lanes = new Set(filters?.retrieval_lanes ?? ['exact', 'bm25', 'vector', 'graph']);
     const [exactGroups, bm25Groups, queryVector] = await Promise.all([
-      mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
+      lanes.has('exact') ? mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
         'exact',
         degradedLanes,
         async () => await this.store.searchProjectExact(
@@ -2719,15 +4192,15 @@ export class ResearchService {
           normalizeEntityName(cleanedQuery),
           cappedLimit,
         ),
-      )),
-      mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
+      )) : Promise.resolve(projects.map(() => [] as LocalSearchHit[])),
+      lanes.has('bm25') ? mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
         'bm25',
         degradedLanes,
         async () => await this.store.searchProjectBm25(project.project_id, cleanedQuery, cappedLimit),
-      )),
-      preparedQueryVector
+      )) : Promise.resolve(projects.map(() => [] as LocalSearchHit[])),
+      lanes.has('vector') && preparedQueryVector
         ? Promise.resolve(preparedQueryVector)
-        : this.embeddings.enabled()
+        : lanes.has('vector') && this.embeddings.enabled()
         ? this.embeddings.embedQuery(cleanedQuery).catch(() => undefined)
         : Promise.resolve(undefined),
     ]);
@@ -2753,7 +4226,7 @@ export class ResearchService {
       bm25Groups[index] ?? [],
       vectorGroups[index] ?? [],
     ], cappedLimit));
-    const graphGroups = !includeGraph ? [] : projects.length > 1
+    const graphGroups = !includeGraph || !lanes.has('graph') ? [] : projects.length > 1
       ? [await runRetrievalLane(
         'graph',
         degradedLanes,
@@ -2776,10 +4249,10 @@ export class ResearchService {
       ));
     ensureNotAborted(signal);
     return {
-      exact: fuseRankedGroups(exactGroups, cappedLimit, 'exact'),
-      bm25: fuseRankedGroups(bm25Groups, cappedLimit, 'bm25'),
-      vector: fuseRankedGroups(vectorGroups, cappedLimit, 'vector'),
-      graph: fuseRankedGroups(graphGroups, cappedLimit, 'graph'),
+      exact: filterSearchHits(fuseRankedGroups(exactGroups, cappedLimit, 'exact'), filters),
+      bm25: filterSearchHits(fuseRankedGroups(bm25Groups, cappedLimit, 'bm25'), filters),
+      vector: filterSearchHits(fuseRankedGroups(vectorGroups, cappedLimit, 'vector'), filters),
+      graph: filterSearchHits(fuseRankedGroups(graphGroups, cappedLimit, 'graph'), filters),
       degraded_lanes: [...degradedLanes].sort(),
     };
   }
@@ -2790,6 +4263,7 @@ export class ResearchService {
     limit: number,
     includeProjectIds: string[] = [],
     signal?: AbortSignal,
+    filters?: ResearchSearchFilters,
   ): Promise<LocalSearchHit[]> {
     return (await this.searchBatch(
       projectIdValue,
@@ -2798,6 +4272,7 @@ export class ResearchService {
       limit,
       includeProjectIds,
       signal,
+      filters,
     )).results;
   }
 
@@ -2808,19 +4283,27 @@ export class ResearchService {
     limit: number,
     includeProjectIds: string[] = [],
     signal?: AbortSignal,
+    filters?: ResearchSearchFilters,
+    rerank = true,
+    includePreRerank = false,
   ): Promise<{
+    request_id: string;
     queries: string[];
     results: LocalSearchHit[];
+    pre_rerank_results?: LocalSearchHit[];
     graph_project_count: number;
     degraded_lanes: RetrievalLane[];
     timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
+    candidate_counts: { exact: number; bm25: number; vector: number; graph: number; fused: number };
   }> {
     const started = performance.now();
+    const requestId = randomUUID();
     ensureNotAborted(signal);
     const degradedLanes = new Set<RetrievalLane>();
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const candidateLimit = Math.min(40, cappedLimit * 3);
     const queries = tuneLocalQueries(query, queryVariants);
+    const candidateCounts = { exact: 0, bm25: 0, vector: 0, graph: 0, fused: 0 };
     let vectors: Array<number[] | undefined> = queries.map(() => undefined);
     if (this.embeddings.enabled()) {
       try {
@@ -2841,16 +4324,26 @@ export class ResearchService {
         vectors[index],
         false,
         signal,
+        filters,
       );
+      candidateCounts.exact += families.exact.length;
+      candidateCounts.bm25 += families.bm25.length;
+      candidateCounts.vector += families.vector.length;
       for (const lane of families.degraded_lanes) degradedLanes.add(lane);
-      return fuseRankedGroups([
-        families.exact,
-        families.bm25,
-        families.vector,
-        families.graph,
-      ], candidateLimit);
+      const groups = [families.exact, families.bm25, families.vector, families.graph];
+      return {
+        bounded: groups.map((rows) => rows.slice(0, cappedLimit)),
+        expanded: groups,
+      };
     });
-    const baseFused = fuseRankedGroups(queryGroups, candidateLimit);
+    const boundedBaseFused = fuseRankedGroups(
+      queryGroups.flatMap((group) => group.bounded),
+      cappedLimit,
+    );
+    const baseFused = fuseRankedGroups(
+      queryGroups.flatMap((group) => group.expanded),
+      candidateLimit,
+    );
     ensureNotAborted(signal);
     const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
     let projects: ProjectRecord[] = [];
@@ -2878,25 +4371,41 @@ export class ResearchService {
       );
       const graphProjectIds = [...selectedProjects, ...linkedProjects].slice(0, 4);
       projects = await Promise.all(graphProjectIds.map((projectId) => this.ensureProject(projectId)));
-      graph = !projects.length ? [] : projects.length > 1
-        ? await this.searchCombinedGraph(projects, query, candidateLimit, baseFused)
-        : await this.searchMaterializedGraph(projects[0], query, candidateLimit, baseFused);
+      graph = !projects.length || (filters?.retrieval_lanes?.length
+        && !filters.retrieval_lanes.includes('graph')) ? [] : projects.length > 1
+        ? await this.searchCombinedGraph(projects, query, candidateLimit, boundedBaseFused)
+        : await this.searchMaterializedGraph(projects[0], query, candidateLimit, boundedBaseFused);
     } catch (error) {
       if (!isResearchQueryTimeout(error)) throw error;
       degradedLanes.add('graph');
     }
     ensureNotAborted(signal);
     const baseKeys = new Set(baseFused.map((row) => row.url || row.document_id));
+    const filteredGraph = filterSearchHits(graph, filters);
     const graphCandidates = !this.embeddings.enabled() && baseKeys.size
-      ? graph.filter((row) => baseKeys.has(row.url || row.document_id))
-      : graph;
-    const fused = fuseRankedGroups([...queryGroups, graphCandidates], candidateLimit);
+      ? filteredGraph.filter((row) => baseKeys.has(row.url || row.document_id))
+      : filteredGraph;
+    candidateCounts.graph = graphCandidates.length;
+    const boundedFused = fuseRankedGroups([
+      ...queryGroups.flatMap((group) => group.bounded),
+      graphCandidates.slice(0, cappedLimit),
+    ], cappedLimit);
+    const expandedFused = fuseRankedGroups([
+      ...queryGroups.flatMap((group) => group.expanded),
+      graphCandidates,
+    ], candidateLimit);
+    const fused = preserveBoundedCandidates(boundedFused, expandedFused, candidateLimit);
+    candidateCounts.fused = fused.length;
     const retrieved = performance.now();
-    const results = await this.rerankCandidates(query, fused, cappedLimit, vectors[0], signal);
+    const results = rerank
+      ? await this.rerankCandidates(query, fused, cappedLimit, vectors[0], signal)
+      : fused.slice(0, cappedLimit);
     const reranked = performance.now();
     return {
+      request_id: requestId,
       queries,
       results,
+      ...(includePreRerank ? { pre_rerank_results: fused.slice(0, cappedLimit) } : {}),
       graph_project_count: projects.length,
       degraded_lanes: [...degradedLanes].sort(),
       timings: {
@@ -2904,7 +4413,53 @@ export class ResearchService {
         retrieval_ms: retrieved - embedded,
         rerank_ms: reranked - retrieved,
       },
+      candidate_counts: candidateCounts,
     };
+  }
+
+  async searchGrouped(
+    projectIdValue: string,
+    groups: Array<{ id: string; query: string; query_variants?: string[]; limit?: number }>,
+    includeProjectIds: string[] = [],
+    signal?: AbortSignal,
+    filters?: ResearchSearchFilters,
+  ): Promise<Array<{
+    request_id: string;
+    id: string;
+    query: string;
+    results: LocalSearchHit[];
+    degraded_lanes: RetrievalLane[];
+    timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
+    candidate_counts: { exact: number; bm25: number; vector: number; graph: number; fused: number };
+  }>> {
+    if (!groups.length || groups.length > 20) throw new Error('queries accepts 1-20 groups');
+    const ids = new Set<string>();
+    for (const group of groups) {
+      cleanText(group.id, 'query id', 100);
+      if (ids.has(group.id)) throw new Error(`duplicate query id: ${group.id}`);
+      ids.add(group.id);
+    }
+    return await mapConcurrent(groups, 2, async (group) => {
+      ensureNotAborted(signal);
+      const searched = await this.searchBatch(
+        projectIdValue,
+        group.query,
+        group.query_variants ?? [],
+        group.limit ?? 10,
+        includeProjectIds,
+        signal,
+        filters,
+      );
+      return {
+        request_id: searched.request_id,
+        id: group.id,
+        query: group.query,
+        results: searched.results,
+        degraded_lanes: searched.degraded_lanes,
+        timings: searched.timings,
+        candidate_counts: searched.candidate_counts,
+      };
+    });
   }
 
   async researchSearchContext(
@@ -2992,25 +4547,34 @@ export class ResearchService {
         index,
         similarity: cosineSimilarity(queryVector, passageVectors[index]),
       })).sort((a, b) => b.similarity - a.similarity || a.index - b.index);
-      const semanticRank = new Map(semantic.map((entry, index) => [entry.index, index]));
-      const ranked = working.map((row, index) => ({
-        row,
-        index,
-        score: (row._rrf_score ?? row.score ?? 1 / (60 + index + 1))
-          + 0.1 / (60 + semanticRank.get(index)! + 1),
-      })).sort((a, b) => b.score - a.score || a.index - b.index);
-      const selected = ranked.slice(0, cappedLimit);
-      const fresh = ranked.filter((entry) => entry.row.fresh_web);
+      const byIndex = new Map(semantic.map((entry) => [entry.index, entry]));
+      const selected = working.slice(0, cappedLimit).map((_row, index) => byIndex.get(index)!);
+      const tail = semantic.filter((entry) => entry.index >= cappedLimit && !entry.row.fresh_web);
+      for (const candidate of tail.slice(0, 2)) {
+        let replacement = -1;
+        for (let index = 2; index < selected.length; index++) {
+          if (selected[index].row.fresh_web) continue;
+          if (replacement < 0 || selected[index].similarity < selected[replacement].similarity) {
+            replacement = index;
+          }
+        }
+        if (replacement < 0 || candidate.similarity - selected[replacement].similarity < 0.05) continue;
+        selected[replacement] = candidate;
+      }
+      const fresh = semantic.filter((entry) => entry.row.fresh_web);
       const freshFloor = Math.min(fresh.length, cappedLimit >= 10 ? 2 : 1);
       const selectedFresh = selected.filter((entry) => entry.row.fresh_web).length;
       for (let index = selectedFresh; index < freshFloor; index++) {
-        const candidate = fresh.find((entry) => !selected.includes(entry));
-        const replace = [...selected].reverse().findIndex((entry) => !entry.row.fresh_web);
+        const candidate = fresh.find((entry) => !selected.some((selectedEntry) => (
+          selectedEntry.row === entry.row
+        )));
+        const replace = [...selected].reverse().findIndex((entry, reverseIndex) => (
+          selected.length - 1 - reverseIndex >= 2 && !entry.row.fresh_web
+        ));
         if (!candidate || replace < 0) break;
         selected.splice(selected.length - 1 - replace, 1, candidate);
       }
-      return visible(selected.sort((a, b) => b.score - a.score || a.index - b.index)
-        .map((entry) => entry.row));
+      return visible(selected.map((entry) => entry.row));
     } catch {
       return visible(rows.slice(0, cappedLimit));
     }
@@ -3022,13 +4586,16 @@ export class ResearchService {
     limit: number,
     includeProjectIds: string[] = [],
   ): Promise<LocalSearchHit[]> {
-    const families = await this.searchFamilies(projectIdValue, query, limit, includeProjectIds);
-    return fuseRankedGroups([
-      families.exact,
-      families.bm25,
-      families.vector,
-      families.graph,
-    ], Math.min(Math.max(limit, 1), 20));
+    return (await this.searchBatch(
+      projectIdValue,
+      query,
+      [],
+      limit,
+      includeProjectIds,
+      undefined,
+      undefined,
+      false,
+    )).results;
   }
 
   async searchLexicalBaseline(
@@ -3190,7 +4757,7 @@ export class ResearchService {
         });
         await this.recordMetadataAssertions(project.project_id, id, entity, row);
         if (active && chunkSetId) {
-          await this.store.replaceDocumentChunks(id, chunkSetId, chunks.map((chunk) => ({
+          const stagedChunks = chunks.map((chunk) => ({
             chunk_id: `${id}_${chunkSetId.slice(0, 16)}_${chunk.chunk_index}`,
             document_id: id,
             chunk_set_id: chunkSetId,
@@ -3200,20 +4767,19 @@ export class ResearchService {
             text: chunk.text,
             content_hash: chunk.content_hash,
             updated_at: now,
-          })));
-          for (const chunk of chunks) {
-            await this.store.upsertExactItem({
-              item_id: `document:${id}:${chunk.chunk_index}`,
-              project_id: project.project_id,
-              source_family: 'document',
-              source_id: id,
-              title: row.title.slice(0, 1_000),
-              url: row.url,
-              content_hash: chunk.content_hash,
-              exact_terms: exactTerms(row.title, row.url, row.scholar_id),
-              text: chunk.text,
-            });
-          }
+          }));
+          await this.store.stageDocumentChunks(stagedChunks);
+          await this.store.publishDocumentChunkSet({
+            document_id: id,
+            content_hash: chunkSetId,
+            updated_at: now,
+          }, {
+            project_id: project.project_id,
+            document_id: id,
+            state: 'lexical_active',
+            added_at: now,
+            updated_at: now,
+          }, chunkSetId);
         }
         if (row.cited_by_count !== undefined) {
           await this.store.createMetadataObservation({

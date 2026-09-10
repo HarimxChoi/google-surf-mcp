@@ -26,6 +26,7 @@ const ONTOLOGY_KINDS = new Set<GraphNodeRecord['kind']>([
 const LINEAGE_KINDS = new Set<GraphNodeRecord['kind']>([
   'project', 'root', 'directory', 'source', 'document', 'snapshot', 'symbol',
   'evidence', 'assertion', 'session', 'intent', 'plan', 'experiment', 'decision',
+  'catalog_asset', 'task', 'method', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact',
 ]);
 
 function selectGraph(
@@ -83,9 +84,17 @@ function serializeDot(
     lines.push(`  ${dotValue(node.node_id)} [${attributes.join(', ')}];`);
   }
   for (const edge of edges) {
+    const attributes = [
+      `label=${dotValue(edge.type)}`,
+      `weight=${dotValue(String(edge.weight))}`,
+      ...(edge.evidence_ids?.length
+        ? [`evidence_ids=${dotValue(edge.evidence_ids.join(';'))}`] : []),
+      ...(edge.qualifiers ? [`qualifiers=${dotValue(JSON.stringify(edge.qualifiers))}`] : []),
+      ...(edge.effective_at ? [`effective_at=${dotValue(edge.effective_at)}`] : []),
+      ...(edge.recorded_at ? [`recorded_at=${dotValue(edge.recorded_at)}`] : []),
+    ];
     lines.push(
-      `  ${dotValue(edge.source)} -> ${dotValue(edge.target)} [`
-      + `label=${dotValue(edge.type)}, weight=${dotValue(String(edge.weight))}];`,
+      `  ${dotValue(edge.source)} -> ${dotValue(edge.target)} [${attributes.join(', ')}];`,
     );
   }
   lines.push('}');
@@ -100,7 +109,7 @@ function serializeD3(
   view: GraphVisualizationView,
 ): string {
   return `${JSON.stringify({
-    schema_version: 'surf-graph-visualization-v1',
+    schema_version: 'surf-graph-visualization-v2',
     view,
     projection_id: projection.projection_id,
     source_hash: projection.source_hash,
@@ -132,6 +141,9 @@ function serializeD3(
       type: edge.type,
       weight: edge.weight,
       ...(edge.evidence_ids?.length ? { evidence_ids: edge.evidence_ids } : {}),
+      ...(edge.qualifiers ? { qualifiers: edge.qualifiers } : {}),
+      ...(edge.effective_at ? { effective_at: edge.effective_at } : {}),
+      ...(edge.recorded_at ? { recorded_at: edge.recorded_at } : {}),
     })),
   }, null, 2)}\n`;
 }
@@ -180,7 +192,7 @@ export function exportNeo4jVisualization(
     ])),
   ];
   const relationshipLines = [
-    ':START_ID(SurfNode),:END_ID(SurfNode),:TYPE,edge_id,relation_type,project_id,weight:double,evidence_ids:string[]',
+    ':START_ID(SurfNode),:END_ID(SurfNode),:TYPE,edge_id,relation_type,project_id,weight:double,evidence_ids:string[],qualifiers_json,effective_at,recorded_at',
     ...edges.map((edge) => csvRow([
       edge.source,
       edge.target,
@@ -190,6 +202,9 @@ export function exportNeo4jVisualization(
       edge.project_id,
       edge.weight,
       edge.evidence_ids?.join(';'),
+      edge.qualifiers ? JSON.stringify(edge.qualifiers) : undefined,
+      edge.effective_at,
+      edge.recorded_at,
     ])),
   ];
   const constraints = [
@@ -212,11 +227,14 @@ export function exportNeo4jVisualization(
     'MERGE (source)-[edge:SURF_RELATION {edge_id: row.edge_id}]->(target)',
     "SET edge.type = row.relation_type, edge.project_id = row.project_id,",
     "    edge.weight = toFloat(row['weight:double']),",
-    "    edge.evidence_ids = CASE row['evidence_ids:string[]'] WHEN '' THEN [] ELSE split(row['evidence_ids:string[]'], ';') END;",
+    "    edge.evidence_ids = CASE row['evidence_ids:string[]'] WHEN '' THEN [] ELSE split(row['evidence_ids:string[]'], ';') END,",
+    "    edge.qualifiers_json = CASE row.qualifiers_json WHEN '' THEN null ELSE row.qualifiers_json END,",
+    "    edge.effective_at = CASE row.effective_at WHEN '' THEN null ELSE row.effective_at END,",
+    "    edge.recorded_at = CASE row.recorded_at WHEN '' THEN null ELSE row.recorded_at END;",
     '',
   ].join('\n');
   const manifest = `${JSON.stringify({
-    schema_version: 'surf-neo4j-export-v1',
+    schema_version: 'surf-neo4j-export-v2',
     view,
     projection_id: projection.projection_id,
     source_hash: projection.source_hash,

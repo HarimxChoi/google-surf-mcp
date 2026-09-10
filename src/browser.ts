@@ -184,7 +184,9 @@ export function killZombieChromium(profileDir: string): number {
         `Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('${needle.replace(/'/g, "''")}') } | ` +
         `Select-Object -ExpandProperty ProcessId`,
       ],
-      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+      {
+        encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+      },
     );
     const pids = out.split(/\r?\n/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
     let killed = 0;

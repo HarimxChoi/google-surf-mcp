@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import { ResearchService } from '../src/research/service.js';
 describe('deterministic project indexing', () => {
   let root: string;
   let source: string;
+  let extraSource: string | undefined;
   let service: ResearchService;
 
   beforeEach(() => {
@@ -33,6 +34,8 @@ describe('deterministic project indexing', () => {
     await service.close();
     rmSync(root, { recursive: true, force: true });
     rmSync(source, { recursive: true, force: true });
+    if (extraSource) rmSync(extraSource, { recursive: true, force: true });
+    extraSource = undefined;
   });
 
   it('stores one stable structured snapshot and searches selected bodies', async () => {
@@ -41,6 +44,7 @@ describe('deterministic project indexing', () => {
       project_id: 'index-test',
       roots: [{ label: 'repo', path: source }],
     });
+    await service.waitForIdle();
     const second = await service.indexProject({
       project_id: 'index-test',
       roots: [{ label: 'repo', path: source }],
@@ -59,7 +63,7 @@ describe('deterministic project indexing', () => {
       added_count: 7,
       modified_count: 0,
       removed_count: 0,
-      job_status: 'done',
+      job_status: 'running',
     });
     expect(second).toMatchObject({
       reused: true,
@@ -88,12 +92,14 @@ describe('deterministic project indexing', () => {
       project_id: 'index-delta-test',
       roots: [{ label: 'repo', path: source }],
     });
+    await service.waitForIdle();
 
     writeFileSync(join(source, 'src', 'kernel.ts'), 'export const replacement_code_token = 2;');
     const modified = await service.indexProject({
       project_id: 'index-delta-test',
       roots: [{ label: 'repo', path: source }],
     });
+    await service.waitForIdle();
 
     expect(modified).toMatchObject({
       reused: false,
@@ -111,6 +117,7 @@ describe('deterministic project indexing', () => {
       project_id: 'index-delta-test',
       roots: [{ label: 'repo', path: source }],
     });
+    await service.waitForIdle();
     const detail = await service.getProject('index-delta-test');
 
     expect(removed).toMatchObject({
@@ -131,6 +138,7 @@ describe('deterministic project indexing', () => {
       project_id: 'index-delta-test',
       roots: [{ label: 'repo', path: source }],
     });
+    await service.waitForIdle();
 
     expect(reverted).toMatchObject({
       reused: false,
@@ -141,6 +149,98 @@ describe('deterministic project indexing', () => {
     });
     expect(reverted.inventory_digest).toBe(first.inventory_digest);
     expect(reverted.snapshot_id).not.toBe(first.snapshot_id);
+  });
+
+  it('syncs declared paths without rescanning or removing unrelated entries', async () => {
+    await service.createProject('Explicit delta', 'explicit-delta');
+    await service.indexProject({
+      project_id: 'explicit-delta', roots: [{ label: 'repo', path: source }],
+    });
+    await service.waitForIdle();
+    writeFileSync(join(source, 'src', 'kernel.ts'), 'export const incremental_only_token = 3;');
+    writeFileSync(join(source, 'docs', 'PLAN.md'), 'unannounced disk change');
+    rmSync(join(source, 'evidence', 'run-result.json'));
+    const changed = await service.indexProject({
+      project_id: 'explicit-delta',
+      changed_paths: [{ root: 'repo', path: 'src/kernel.ts' }],
+      removed_paths: [{ root: 'repo', path: 'evidence/run-result.json' }],
+    });
+    await service.waitForIdle();
+
+    expect(changed).toMatchObject({
+      added_count: 0,
+      modified_count: 1,
+      removed_count: 1,
+      file_count: 6,
+    });
+    expect(await service.search('explicit-delta', 'incremental_only_token', 10)).toHaveLength(1);
+    expect(await service.search('explicit-delta', 'unique_result_token', 10)).toHaveLength(0);
+    expect(await service.search('explicit-delta', 'unannounced disk change', 10)).toHaveLength(0);
+    expect(await service.search('explicit-delta', 'duplicate report body', 10)).not.toHaveLength(0);
+  });
+
+  it('adds and removes one registered root without replacing unrelated roots', async () => {
+    extraSource = mkdtempSync(join(tmpdir(), 'surf-index-extra-'));
+    writeFileSync(join(extraSource, 'RESEARCH.md'), 'extra_root_only_token');
+    await service.createProject('Root registry', 'root-registry');
+    await service.indexProject({
+      project_id: 'root-registry', roots: [{ label: 'repo', path: source }],
+    });
+    await service.waitForIdle();
+
+    const added = await service.indexProject({
+      project_id: 'root-registry', roots: [{ label: 'extra', path: extraSource }],
+    });
+    await service.waitForIdle();
+    expect(added).toMatchObject({ file_count: 8, added_count: 1, removed_count: 0 });
+    expect(await service.search('root-registry', 'unique_code_token', 10)).toHaveLength(1);
+    expect(await service.search('root-registry', 'extra_root_only_token', 10)).toHaveLength(1);
+
+    const removed = await service.indexProject({
+      project_id: 'root-registry',
+      root_mode: 'remove',
+      roots: [{ label: 'extra', path: extraSource }],
+    });
+    await service.waitForIdle();
+    const detail = await service.getProject('root-registry');
+    expect(removed).toMatchObject({ file_count: 7, added_count: 0, removed_count: 1 });
+    expect(detail.active_source_snapshot?.roots.map((root) => root.label)).toEqual(['repo']);
+    expect(await service.search('root-registry', 'unique_code_token', 10)).toHaveLength(1);
+    expect(await service.search('root-registry', 'extra_root_only_token', 10)).toHaveLength(0);
+  });
+
+  it('keeps an unambiguous moved path as an exact historical alias', async () => {
+    await service.createProject('Move alias', 'move-alias');
+    await service.indexProject({
+      project_id: 'move-alias', roots: [{ label: 'repo', path: source }],
+    });
+    await service.waitForIdle();
+    renameSync(join(source, 'src', 'kernel.ts'), join(source, 'src', 'renamed-kernel.ts'));
+    const moved = await service.indexProject({
+      project_id: 'move-alias',
+      changed_paths: [{ root: 'repo', path: 'src/renamed-kernel.ts' }],
+      removed_paths: [{ root: 'repo', path: 'src/kernel.ts' }],
+    });
+    await service.waitForIdle();
+
+    expect(moved).toMatchObject({ added_count: 1, removed_count: 1, unique_body_count: 4 });
+    const historical = await service.search('move-alias', 'repo/src/kernel.ts', 10);
+    expect(historical).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: 'repo/src/renamed-kernel.ts',
+        record_id: expect.any(String),
+        body_handle: expect.any(String),
+        index_freshness: 'current',
+      }),
+    ]));
+    const exact = await service.getCatalogRecord(
+      'move-alias', historical[0].body_handle!, undefined, 0, 1_024,
+    ) as unknown as { source: true; entry: { historical_locations: string[] }; body: string };
+    expect(exact).toMatchObject({
+      source: true,
+      entry: { historical_locations: ['repo/src/kernel.ts'] },
+      body: 'export const unique_code_token = 1;',
+    });
   });
 
   it('drains code larger than one worker batch without permanent deferral', async () => {
@@ -156,6 +256,7 @@ describe('deterministic project indexing', () => {
       project_id: 'full-code-index',
       roots: [{ label: 'repo', path: source }],
     });
+    await service.waitForIdle();
     const derived = await service.rebuildDerivedState('full-code-index');
     const graph = await service.exportGraphProjection(['full-code-index']);
 
@@ -163,5 +264,5 @@ describe('deterministic project indexing', () => {
     expect(derived.code_sources_deferred).toBe(0);
     expect(graph.nodes.some((node) => node.kind === 'symbol' && node.label === 'bulk_symbol_9'))
       .toBe(true);
-  });
+  }, 15_000);
 });

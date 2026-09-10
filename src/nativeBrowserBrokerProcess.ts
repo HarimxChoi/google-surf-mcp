@@ -109,6 +109,7 @@ function serializeError(error: unknown): Record<string, unknown> {
 }
 
 const config = parseConfig();
+process.title = 'google-surf-browser-broker';
 const acquiredOwnership = await acquireOwner(config.profileDir);
 if (!acquiredOwnership) process.exit(0);
 const ownership = acquiredOwnership!;

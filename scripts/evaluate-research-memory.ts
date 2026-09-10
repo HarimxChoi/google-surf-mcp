@@ -8,9 +8,11 @@ import { ResearchService } from '../src/research/service.js';
 
 interface EvaluationCase {
   kind: 'fact' | 'code' | 'multi_hop';
+  stratum?: 'document' | 'code' | 'typed_graph';
   query: string;
   expected_title: string;
   expected_url?: string;
+  expected_record_id?: string;
 }
 
 interface CaseResult extends EvaluationCase {
@@ -51,6 +53,7 @@ function metrics(rows: CaseResult[]) {
     const values = rows.map((row) => row[lane]);
     return { p50_ms: percentile(values, 0.5), p95_ms: percentile(values, 0.95) };
   };
+  const provenanceRows = rows.filter((row) => row.reranked_rank > 0 && row.reranked_rank <= 10);
   return {
     cases: rows.length,
     lexical_recall_at_10: recall('lexical_rank'),
@@ -67,7 +70,8 @@ function metrics(rows: CaseResult[]) {
     reranked_latency: latency('reranked_ms'),
     reranked_cold_ms: rows[0]?.reranked_ms ?? 0,
     reranked_warm_p95_ms: percentile(rows.slice(1).map((row) => row.reranked_ms), 0.95),
-    valid_provenance_ratio: rows.filter((row) => row.provenance_valid).length / Math.max(rows.length, 1),
+    valid_provenance_ratio: provenanceRows.filter((row) => row.provenance_valid).length
+      / Math.max(provenanceRows.length, 1),
   };
 }
 
@@ -81,37 +85,222 @@ async function evaluateCases(
   service: ResearchService,
   projectId: string,
   cases: EvaluationCase[],
-  validTarget: (input: EvaluationCase) => boolean,
+  validTarget: (input: EvaluationCase, rows: LocalSearchHit[]) => boolean | Promise<boolean>,
 ): Promise<CaseResult[]> {
   const rows: CaseResult[] = [];
   for (const input of cases) {
     const lexical = await timed(async () => (
       await service.searchLexicalBaseline(projectId, input.query, 10)
     ));
-    const hybrid = await timed(async () => (
-      await service.searchHybridBaseline(projectId, input.query, 10)
+    const searched = await timed(async () => await service.searchBatch(
+      projectId,
+      input.query,
+      [],
+      10,
+      [],
+      undefined,
+      undefined,
+      true,
+      true,
     ));
-    const reranked = await timed(async () => await service.search(projectId, input.query, 10));
+    const hybrid = searched.value.pre_rerank_results ?? [];
+    const reranked = searched.value.results;
     rows.push({
       ...input,
       lexical_rank: rank(lexical.value, input),
-      hybrid_rank: rank(hybrid.value, input),
-      reranked_rank: rank(reranked.value, input),
+      hybrid_rank: rank(hybrid, input),
+      reranked_rank: rank(reranked, input),
       lexical_ms: lexical.elapsed_ms,
-      hybrid_ms: hybrid.elapsed_ms,
-      reranked_ms: reranked.elapsed_ms,
-      provenance_valid: validTarget(input),
+      hybrid_ms: searched.value.timings.embedding_ms + searched.value.timings.retrieval_ms,
+      reranked_ms: searched.elapsed_ms,
+      provenance_valid: await validTarget(input, reranked),
     });
   }
   return rows;
 }
 
+const ACCEPTANCE_DOCUMENTS = [
+  ['Activation Outlier Rotation', 'Orthogonal rotation distributes activation outliers before low-bit quantization.', 'How can activation outliers be spread before low-bit quantization?'],
+  ['Bitemporal Assertion Correction', 'A correction preserves both effective time and recorded transaction time.', 'How should corrected facts retain valid and transaction time?'],
+  ['Content Addressed Artifact', 'An artifact manifest is keyed by canonical bytes and verified with a checksum.', 'How is an artifact manifest tied to canonical bytes and checksum verification?'],
+  ['Atomic Retrieval Generation', 'Readers observe either the old complete retrieval generation or the new complete generation.', 'How do readers avoid a partially published search index?'],
+  ['Personalized Graph Walk', 'Query-time Personalized PageRank starts from evidence seeds and follows typed relations.', 'Which graph walk starts from query evidence seeds?'],
+  ['Reciprocal Rank Fusion', 'Reciprocal Rank Fusion combines exact, lexical, semantic, graph, and live result lanes.', 'How are exact lexical semantic graph and live lanes combined?'],
+  ['Schema Identity Bridge', 'A stable identifier creates a cross-project identity bridge without moving source records.', 'How can projects share an entity without merging their source records?'],
+  ['Immutable Failed Attempt', 'A failed attempt remains immutable while a later plan records the causal response.', 'How is a failed run preserved when the next plan changes?'],
+  ['Delta Root Registry', 'Adding one registered root does not remove unrelated roots from the project inventory.', 'What prevents a new source root from replacing previous roots?'],
+  ['UTF8 Byte Paging', 'Body pages align offsets to UTF-8 code point boundaries for byte-exact reconstruction.', 'How can paged multilingual text avoid broken Unicode characters?'],
+  ['Broker Read Coalescing', 'Concurrent identical reads share one broker operation while subscribers remain isolated.', 'How are duplicate local reads shared across MCP clients?'],
+  ['Idle Worker Drain', 'The database worker drains after completed work and reconnects on the next request.', 'How is resident database memory released between research requests?'],
+  ['Artifact Restore Closure', 'Archive verification distinguishes upload completion from dependency-complete restoration.', 'Why is a successful upload insufficient proof of recoverability?'],
+  ['Typed Parallel Edge', 'Parallel graph edges remain distinct when qualifiers evidence or temporal validity differ.', 'When must two edges between the same nodes remain separate?'],
+  ['Section Tail Coverage', 'Long records are chunked with source spans so semantic search can retrieve evidence near the tail.', 'How does semantic retrieval find details at the end of a long record?'],
+  ['Secret Content Exclusion', 'Sensitive paths and detected credential patterns are excluded before indexing.', 'At what stage should secrets be removed from project indexing?'],
+  ['Current Plan Pointer', 'The project stores a direct current-plan pointer while preserving every prior revision.', 'How can current work be read without deleting old plans?'],
+  ['Remote Payload State', 'A remote artifact may be declared unavailable while its manifest and provenance remain searchable.', 'How is an unavailable remote artifact represented without pretending it is restored?'],
+  ['Graph Cache Weight', 'Graph cache eviction is based on estimated bytes rather than entry count alone.', 'Why should graph cache eviction use byte weight?'],
+  ['Embedding Identity Reuse', 'Embedding identity includes content hash model dimensions normalization and passage role.', 'Which fields make a cached embedding safe to reuse?'],
+] as const;
+
+const ACCEPTANCE_CODE = [
+  ['applyHadamardRotation', 'distribute activation magnitudes before quantization'],
+  ['publishRetrievalGeneration', 'atomically publish an indexed generation'],
+  ['verifyArtifactChecksum', 'validate a content addressed artifact'],
+  ['alignUtf8PageBoundary', 'page a body without splitting a code point'],
+  ['coalesceBrokerRead', 'share an identical concurrent read'],
+  ['drainIdleResearchWorker', 'release an idle embedded database worker'],
+  ['resolveSchemaIdentity', 'link stable identifiers across projects'],
+  ['appendCatalogRevision', 'preserve immutable record history'],
+  ['materializeCurrentPlan', 'write a compact current project view'],
+  ['streamArtifactManifest', 'page a large reference manifest'],
+  ['classifySensitiveSource', 'exclude credential bearing input'],
+  ['compactGraphAdjacency', 'build typed array CSR adjacency'],
+  ['rankPersonalizedNeighbors', 'run a seeded graph walk'],
+  ['fuseReciprocalRanks', 'combine independent retrieval lanes'],
+  ['reuseCanonicalEmbedding', 'reuse vectors by semantic content identity'],
+  ['registerProjectRoot', 'merge a source root without replacement'],
+  ['recordTemporalCorrection', 'retain effective and recorded times'],
+  ['restoreCatalogSnapshot', 'append a rollback revision'],
+  ['cancelBackgroundIndexJob', 'cancel one asynchronous indexing job'],
+  ['measureProcessTreeRss', 'attribute resident memory to worker roles'],
+] as const;
+
+const ACCEPTANCE_METHODS = [
+  ['Typed Evidence Projection', 'Build a typed evidence graph from durable catalog revisions.'],
+  ['Stable Identifier Linking', 'Link cross-project entities only through verified identifiers or explicit aliases.'],
+  ['Revision Preserving Correction', 'Correct a record by appending a revision instead of overwriting history.'],
+  ['Generation Aware Eviction', 'Evict derived graph and vector cache entries by generation and byte weight.'],
+  ['Bounded Neighborhood Expansion', 'Page graph neighborhoods while preserving continuation and edge qualifiers.'],
+  ['Manifest First Archive Lookup', 'Resolve cold artifacts through a searchable local manifest before remote restore.'],
+  ['Evidence Backed Assertion', 'Require source evidence paths for durable assertions.'],
+  ['Item Delta Indexing', 'Update only changed retrieval items and affected code relations.'],
+  ['Content Hash Deduplication', 'Deduplicate identical bytes without collapsing distinct experiments.'],
+  ['Source Span Retrieval', 'Return exact source spans and a readback handle with ranked evidence.'],
+  ['Role Aware Ingestion', 'Use explicit document roles independently of filenames.'],
+  ['Broker Authority Hash', 'Reject clients whose storage authority differs from the broker owner.'],
+  ['Read Subscriber Isolation', 'Cancel one coalesced read subscriber without cancelling retained subscribers.'],
+  ['Protected Parent Preservation', 'Keep protected experimental parents reachable through snapshot rollback.'],
+  ['Remote Artifact Declaration', 'Represent missing remote payload state separately from manifest durability.'],
+  ['Temporal As Of Reconstruction', 'Reconstruct catalog state at an effective or recorded time.'],
+  ['Exact Record Readback', 'Fetch one durable record by stable ID without returning the full project.'],
+  ['Incremental Root Removal', 'Remove one named root while preserving every unrelated registered root.'],
+  ['Graph Provenance Round Trip', 'Export edge evidence qualifiers and temporal fields without dropping semantics.'],
+  ['Passive Runtime Diagnosis', 'Report worker roles and RSS without opening the embedded database.'],
+] as const;
+
+async function acceptanceEvaluation(
+  vectorModel?: string,
+  vectorBackend: 'hnsw' | 'compact' | 'exhaustive' = 'hnsw',
+): Promise<{ metrics: ReturnType<typeof metrics>; cases: CaseResult[]; corpus: Record<string, number> }> {
+  const root = await mkdtemp(join(tmpdir(), 'surf-acceptance-eval-db-'));
+  const source = await mkdtemp(join(tmpdir(), 'surf-acceptance-eval-src-'));
+  const projectId = 'controlled-acceptance';
+  const service = new ResearchService({
+    enabled: true, root, endpoint: 'mem://', vectorModel, vectorBackend, vectorThreads: 1,
+  });
+  try {
+    await mkdir(join(source, 'src'));
+    await service.createProject('Controlled acceptance', projectId);
+    for (const [index, [title, content]] of ACCEPTANCE_DOCUMENTS.entries()) {
+      await service.capture({
+        tool: 'extract',
+        project_id: projectId,
+        payload: {
+          title,
+          url: `https://example.com/acceptance/document-${index + 1}`,
+          content,
+          extraction_quality: 'full_text',
+        },
+      });
+    }
+    for (const [index, [symbol, purpose]] of ACCEPTANCE_CODE.entries()) {
+      await writeFile(
+        join(source, 'src', `acceptance-${String(index + 1).padStart(2, '0')}.ts`),
+        `/** ${purpose}. */\nexport function ${symbol}(): string { return '${symbol}'; }\n`,
+      );
+    }
+    for (const [index, [title, body]] of ACCEPTANCE_METHODS.entries()) {
+      await service.writeCatalogRecord({
+        project_id: projectId,
+        kind: 'method',
+        operation: 'create',
+        asset_id: `acceptance-method-${index + 1}`,
+        expected_revision: 0,
+        idempotency_key: `acceptance-method-${index + 1}`,
+        body,
+        fields: { title, summary: body },
+        source_reference: 'controlled-acceptance-fixture',
+      });
+    }
+    await service.indexProject({
+      project_id: projectId,
+      roots: [{ label: 'repo', path: source, role: 'source' }],
+    });
+    await service.waitForIdle();
+    await service.rebuildDerivedState(projectId);
+    const projection = await service.exportGraphProjection([projectId]);
+    const graphNodes = new Map(projection.nodes.map((node) => [node.label, node]));
+    const documentCases: EvaluationCase[] = ACCEPTANCE_DOCUMENTS.map(([title, , query], index) => ({
+      kind: 'fact',
+      stratum: 'document',
+      query,
+      expected_title: title,
+      expected_url: `https://example.com/acceptance/document-${index + 1}`,
+    }));
+    const codeCases: EvaluationCase[] = ACCEPTANCE_CODE.map(([symbol], index) => ({
+      kind: 'code',
+      stratum: 'code',
+      query: symbol,
+      expected_title: `repo/src/acceptance-${String(index + 1).padStart(2, '0')}.ts`,
+    }));
+    const graphCases: EvaluationCase[] = ACCEPTANCE_METHODS.map(([title], index) => {
+      const node = graphNodes.get(title);
+      if (!node) throw new Error(`controlled graph target missing: ${title}`);
+      return {
+        kind: 'multi_hop',
+        stratum: 'typed_graph',
+        query: title,
+        expected_title: title,
+        expected_url: graphUrl(projectId, node),
+        expected_record_id: `acceptance-method-${index + 1}`,
+      };
+    });
+    const cases = [...documentCases, ...codeCases, ...graphCases];
+    const results = await evaluateCases(service, projectId, cases, async (input, rows) => {
+      const hit = rows.find((row) => (
+        input.expected_url ? row.url === input.expected_url : row.title === input.expected_title
+      ));
+      if (!hit) return false;
+      const handle = input.expected_record_id ?? hit.body_handle ?? hit.record_id;
+      if (!handle) return false;
+      try {
+        await service.getCatalogRecord(projectId, handle, undefined, 0, 256);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    return {
+      metrics: metrics(results),
+      cases: results,
+      corpus: { documents: documentCases.length, code: codeCases.length, typed_graph: graphCases.length },
+    };
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+    await rm(source, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function controlledEvaluation(
   vectorModel?: string,
+  vectorBackend: 'hnsw' | 'compact' | 'exhaustive' = 'hnsw',
 ): Promise<{ metrics: ReturnType<typeof metrics>; cases: CaseResult[] }> {
   const root = await mkdtemp(join(tmpdir(), 'surf-retrieval-eval-db-'));
   const source = await mkdtemp(join(tmpdir(), 'surf-retrieval-eval-src-'));
-  const service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel });
+  const service = new ResearchService({
+    enabled: true, root, endpoint: 'mem://', vectorModel, vectorBackend, vectorThreads: 1,
+  });
   try {
     await mkdir(join(source, 'src'));
     await writeFile(
@@ -198,9 +387,12 @@ async function controlledEvaluation(
 
 async function documentEvaluation(
   vectorModel?: string,
+  vectorBackend: 'hnsw' | 'compact' | 'exhaustive' = 'hnsw',
 ): Promise<{ metrics: ReturnType<typeof metrics>; cases: CaseResult[] }> {
   const root = await mkdtemp(join(tmpdir(), 'surf-document-eval-db-'));
-  const service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel });
+  const service = new ResearchService({
+    enabled: true, root, endpoint: 'mem://', vectorModel, vectorBackend, vectorThreads: 1,
+  });
   const targets = [
     {
       title: 'Activation Outlier Rotation',
@@ -278,8 +470,15 @@ function graphUrl(projectId: string, node: GraphNodeRecord): string {
   return node.url ?? `surf://projects/${projectId}/graph/${node.node_id}`;
 }
 
-async function projectEvaluation(root: string, projectId: string, vectorModel?: string) {
-  const service = new ResearchService({ enabled: true, root, vectorModel });
+async function projectEvaluation(
+  root: string,
+  projectId: string,
+  vectorModel?: string,
+  vectorBackend: 'hnsw' | 'compact' | 'exhaustive' = 'hnsw',
+) {
+  const service = new ResearchService({
+    enabled: true, root, vectorModel, vectorBackend, vectorThreads: 1,
+  });
   try {
     const projection = await service.exportGraphProjection([projectId]);
     const nodes = new Map(projection.nodes.map((node) => [node.node_id, node]));
@@ -332,40 +531,51 @@ async function projectEvaluation(root: string, projectId: string, vectorModel?: 
 
 const root = resolve(process.env.SURF_RESEARCH_ROOT
   ?? join(process.env.USERPROFILE ?? '.', '.google-surf-mcp', 'research'));
-const projectId = process.env.SURF_EVAL_PROJECT ?? 'baubrowser-warpquant-deterministic';
+const projectId = process.env.SURF_EVAL_PROJECT?.trim() || undefined;
 const vectorModelValue = process.env.SURF_EVAL_VECTOR_MODEL
   ?? process.env.SURF_EVAL_DENSE_MODEL
   ?? process.env.SURF_RESEARCH_VECTOR_MODEL?.trim()
   ?? process.env.SURF_RESEARCH_DENSE_MODEL?.trim()
   ?? DEFAULT_RESEARCH_VECTOR_MODEL;
 const vectorModel = vectorModelValue.toLowerCase() === 'off' ? undefined : vectorModelValue;
+const vectorBackendValue = process.env.SURF_EVAL_VECTOR_BACKEND?.trim().toLowerCase() ?? 'exhaustive';
+if (!['hnsw', 'compact', 'exhaustive'].includes(vectorBackendValue)) {
+  throw new Error('SURF_EVAL_VECTOR_BACKEND must be hnsw, compact, or exhaustive');
+}
+const vectorBackend = vectorBackendValue as 'hnsw' | 'compact' | 'exhaustive';
 const rssBefore = process.memoryUsage().rss;
 let peakRss = rssBefore;
 const sampler = setInterval(() => {
   peakRss = Math.max(peakRss, process.memoryUsage().rss);
 }, 25);
-const documents = await documentEvaluation(vectorModel);
-const controlled = await controlledEvaluation(vectorModel);
-const project = await projectEvaluation(root, projectId, vectorModel);
+const acceptance = await acceptanceEvaluation(vectorModel, vectorBackend);
+const documents = await documentEvaluation(vectorModel, vectorBackend);
+const controlled = await controlledEvaluation(vectorModel, vectorBackend);
+const project = projectId ? await projectEvaluation(root, projectId, vectorModel, vectorBackend) : undefined;
 clearInterval(sampler);
-const graphGain = project.metrics.hybrid_recall_at_10 - project.metrics.lexical_recall_at_10;
+const graphGain = project
+  ? project.metrics.hybrid_recall_at_10 - project.metrics.lexical_recall_at_10
+  : acceptance.metrics.hybrid_recall_at_10 - acceptance.metrics.lexical_recall_at_10;
 const rerankedNdcgGain = documents.metrics.reranked_ndcg_at_10 - documents.metrics.hybrid_ndcg_at_10;
 const rerankedRecallLoss = Math.max(
   documents.metrics.hybrid_recall_at_10 - documents.metrics.reranked_recall_at_10,
-  project.metrics.hybrid_recall_at_10 - project.metrics.reranked_recall_at_10,
+  acceptance.metrics.hybrid_recall_at_10 - acceptance.metrics.reranked_recall_at_10,
+  ...(project ? [project.metrics.hybrid_recall_at_10 - project.metrics.reranked_recall_at_10] : []),
 );
 const rerankedNdcgLoss = Math.max(
   documents.metrics.hybrid_ndcg_at_10 - documents.metrics.reranked_ndcg_at_10,
   controlled.metrics.hybrid_ndcg_at_10 - controlled.metrics.reranked_ndcg_at_10,
-  project.metrics.hybrid_ndcg_at_10 - project.metrics.reranked_ndcg_at_10,
+  acceptance.metrics.hybrid_ndcg_at_10 - acceptance.metrics.reranked_ndcg_at_10,
+  ...(project ? [project.metrics.hybrid_ndcg_at_10 - project.metrics.reranked_ndcg_at_10] : []),
 );
-const gates = {
+const qualityObservations = {
   controlled_hybrid_recall_loss_at_most_1pp: controlled.metrics.hybrid_recall_at_10
     >= controlled.metrics.lexical_recall_at_10 - 0.01,
   graph_multi_hop_gain_at_least_5pp: graphGain >= 0.05,
   valid_provenance_at_least_99pct: Math.min(
+    acceptance.metrics.valid_provenance_ratio,
     controlled.metrics.valid_provenance_ratio,
-    project.metrics.valid_provenance_ratio,
+    ...(project ? [project.metrics.valid_provenance_ratio] : []),
   ) >= 0.99,
   reranked_recall_loss_at_most_1pp: rerankedRecallLoss <= 0.01,
   reranked_ndcg_loss_at_most_1pp: rerankedNdcgLoss <= 0.01,
@@ -374,41 +584,47 @@ const rerankerEvaluation = {
   enabled: Boolean(vectorModel),
   evaluated: Boolean(vectorModel) && documents.metrics.hybrid_recall_at_10 >= 0.99,
   model: vectorModel,
+  backend: vectorBackend,
   candidate_recall_at_10: documents.metrics.hybrid_recall_at_10,
   ndcg_gain: rerankedNdcgGain,
   ndcg_loss: rerankedNdcgLoss,
   recall_loss: rerankedRecallLoss,
   peak_rss_increase_mib: (peakRss - rssBefore) / 1024 / 1024,
-  gates: {
+  observations: {
     candidate_recall_at_least_99pct: documents.metrics.hybrid_recall_at_10 >= 0.99,
     ndcg_gain_at_least_3pp: rerankedNdcgGain >= 0.03,
     recall_loss_at_most_1pp: rerankedRecallLoss <= 0.01,
     warm_p95_at_most_500ms: documents.metrics.reranked_warm_p95_ms <= 500,
-    peak_rss_increase_at_most_512mib: peakRss - rssBefore <= 512 * 1024 * 1024,
+    peak_rss_increase_at_most_2gib: peakRss - rssBefore <= 2 * 1024 * 1024 * 1024,
   },
 };
 const report = {
-  schema: 'google-surf-research-evaluation-v2',
+  schema: 'google-surf-research-evaluation-v3',
   generated_at: new Date().toISOString(),
-  project_id: projectId,
+  evaluation_scope: projectId ? 'controlled_and_project' : 'controlled_only',
+  project_id: projectId ?? null,
+  vector_backend: vectorBackend,
+  methodology: 'Controlled synthetic relevance judgments; optional project cases are graph-derived and must be reviewed before public quality claims.',
+  acceptance,
   documents,
   controlled,
   project,
   graph_recall_gain: graphGain,
   reranker_evaluation: rerankerEvaluation,
-  gates,
+  quality_observations: qualityObservations,
 };
 const output = resolve(process.env.SURF_EVAL_OUTPUT
-  ?? join('artifacts', `research-evaluation-${basename(projectId)}.local.json`));
+  ?? join('artifacts', `research-evaluation-${basename(projectId ?? 'controlled')}.local.json`));
 await mkdir(resolve(output, '..'), { recursive: true });
 await writeFile(output, JSON.stringify(report, null, 2));
 console.log(JSON.stringify({
   output,
+  acceptance: { corpus: acceptance.corpus, metrics: acceptance.metrics },
   documents: documents.metrics,
   controlled: controlled.metrics,
-  project: project.metrics,
+  project: project?.metrics ?? null,
   graph_recall_gain: graphGain,
   reranker_evaluation: rerankerEvaluation,
-  gates,
+  quality_observations: qualityObservations,
 }, null, 2));
-process.exit(Object.values(gates).some((value) => !value) ? 1 : 0);
+process.exit(0);

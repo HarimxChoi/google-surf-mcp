@@ -4,7 +4,12 @@ import { platform } from 'node:os';
 function spawnDetached(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve) => {
     try {
-      const p = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      const p = spawn(cmd, args, {
+        detached: true,
+        stdio: 'ignore',
+        shell: false,
+        windowsHide: true,
+      });
       p.on('error', () => resolve());
       p.unref();
       resolve();

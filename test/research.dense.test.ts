@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { LocalSearchHit } from '../src/research/contracts.js';
 import {
   cosineSimilarity, DEFAULT_RESEARCH_VECTOR_MODEL, DEFAULT_RESEARCH_VECTOR_REVISION,
   LocalEmbeddingModel, type EmbeddingProvider,
@@ -13,6 +14,7 @@ function vector(first: number, second: number): number[] {
 }
 
 class FakeEmbeddings implements EmbeddingProvider {
+  lastPassageCount = 0;
   enabled(): boolean { return true; }
   modelId(): string { return 'fake/e5-384'; }
   dimensions(): number { return 384; }
@@ -20,6 +22,7 @@ class FakeEmbeddings implements EmbeddingProvider {
     return text.includes('conceptual') ? vector(1, 0) : vector(0, 1);
   }
   async embedPassages(texts: string[]): Promise<number[][]> {
+    this.lastPassageCount = texts.length;
     return texts.map((text) => text.includes('semantic target') ? vector(1, 0) : vector(0, 1));
   }
 }
@@ -75,11 +78,12 @@ describe('vector retrieval', () => {
   it('runs exact, BM25, and HNSW vector retrieval as independent families', async () => {
     const root = mkdtempSync(join(tmpdir(), 'surf-vector-'));
     roots.push(root);
+    const embeddings = new FakeEmbeddings();
     const service = new ResearchService({
       enabled: true,
       root,
       endpoint: 'mem://',
-      embeddingProvider: new FakeEmbeddings(),
+      embeddingProvider: embeddings,
     });
     try {
       await service.createProject('Vector project', 'vector-project');
@@ -103,6 +107,42 @@ describe('vector retrieval', () => {
       expect(bm25.bm25.map((row) => row.title)).toContain('Exact Vector Document');
       expect(semantic.bm25).toHaveLength(0);
       expect(semantic.vector.map((row) => row.title)).toContain('Exact Vector Document');
+    } finally {
+      await service.close();
+    }
+  });
+
+  it('preserves first-page HNSW candidates when the reranker requests a wider pool', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'surf-vector-page-'));
+    roots.push(root);
+    const service = new ResearchService({
+      enabled: true,
+      root,
+      endpoint: 'mem://',
+      embeddingProvider: new FakeEmbeddings(),
+    });
+    try {
+      await service.createProject('Vector page', 'vector-page');
+      for (let index = 0; index < 24; index++) {
+        await service.capture({
+          tool: 'extract',
+          project_id: 'vector-page',
+          payload: {
+            title: `Vector page ${index}`,
+            url: `https://example.com/vector-page-${index}`,
+            content: `semantic target ${index}`,
+            extraction_quality: 'full_text',
+          },
+        });
+      }
+      await service.waitForIdle();
+
+      const firstPage = await service.searchFamilies('vector-page', 'conceptual alias', 10);
+      const expanded = await service.searchFamilies('vector-page', 'conceptual alias', 20);
+      const expandedUrls = new Set(expanded.vector.map((row) => row.url));
+
+      expect(firstPage.vector).toHaveLength(10);
+      expect(firstPage.vector.every((row) => expandedUrls.has(row.url))).toBe(true);
     } finally {
       await service.close();
     }
@@ -135,6 +175,104 @@ describe('vector retrieval', () => {
 
       expect(ranked.map((row) => row.title)).toEqual(['Consensus result', 'Semantic result']);
       expect(ranked[0]).not.toHaveProperty('_rrf_score');
+    } finally {
+      await service.close();
+    }
+  });
+
+  it('reranks the bounded candidate pool instead of only the first page', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'surf-rerank-pool-'));
+    roots.push(root);
+    const embeddings = new FakeEmbeddings();
+    const service = new ResearchService({
+      enabled: true,
+      root,
+      endpoint: 'mem://',
+      embeddingProvider: embeddings,
+    });
+    try {
+      const candidates = Array.from({ length: 24 }, (_, index) => ({
+        title: index === 10 ? 'Semantic tail target' : `Lexical distractor ${index}`,
+        url: `https://example.com/candidate-${index}`,
+        content: index === 10 ? 'semantic target' : 'unrelated passage',
+        _rrf_score: 1 / (61 + index),
+      }));
+      const ranked = await service.rerankCandidates('conceptual query', candidates, 10);
+
+      expect(embeddings.lastPassageCount).toBe(12);
+      expect(ranked.map((row) => row.title)).toContain('Semantic tail target');
+    } finally {
+      await service.close();
+    }
+  });
+
+  it('preserves bounded lane consensus when expanded lanes add more candidates', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'surf-rerank-expanded-'));
+    roots.push(root);
+    const embeddings = new FakeEmbeddings();
+    const service = new ResearchService({
+      enabled: true,
+      root,
+      endpoint: 'mem://',
+      embeddingProvider: embeddings,
+    });
+    const hit = (title: string, family: LocalSearchHit['retrieval_family']): LocalSearchHit => ({
+      title,
+      url: `https://example.com/${title.toLowerCase().replaceAll(' ', '-')}`,
+      description: title,
+      document_id: title,
+      content: title === 'Bounded semantic target' ? 'semantic target' : 'unrelated passage',
+      score: 1,
+      project_ids: ['expanded-pool'],
+      source_family: 'document',
+      retrieval_family: family,
+    });
+    try {
+      await service.createProject('Expanded pool', 'expanded-pool');
+      const shared = Array.from({ length: 8 }, (_, index) => `Shared ${index}`);
+      const expanded = Array.from({ length: 10 }, (_, index) => `Expanded ${index}`);
+      vi.spyOn(service, 'searchFamilies').mockResolvedValue({
+        exact: [
+          hit('Bounded semantic target', 'exact'),
+          ...Array.from({ length: 19 }, (_, index) => hit(`Exact ${index}`, 'exact')),
+        ],
+        bm25: [
+          ...shared.map((title) => hit(title, 'bm25')),
+          hit('BM25 bounded 8', 'bm25'),
+          hit('BM25 bounded 9', 'bm25'),
+          ...expanded.map((title) => hit(title, 'bm25')),
+        ],
+        vector: [
+          ...shared.map((title) => hit(title, 'vector')),
+          hit('Vector bounded 8', 'vector'),
+          hit('Vector bounded 9', 'vector'),
+          ...expanded.map((title) => hit(title, 'vector')),
+        ],
+        graph: [],
+        degraded_lanes: [],
+      });
+
+      const baseline = await service.searchHybridBaseline(
+        'expanded-pool',
+        'conceptual query',
+        10,
+      );
+
+      expect(embeddings.lastPassageCount).toBe(0);
+      expect(baseline.map((row) => row.title)).toContain('Bounded semantic target');
+
+      const result = await service.searchBatch(
+        'expanded-pool',
+        'conceptual query',
+        [],
+        10,
+        [],
+        undefined,
+        { retrieval_lanes: ['exact', 'bm25', 'vector'] },
+      );
+
+      expect(embeddings.lastPassageCount).toBe(12);
+      expect(result.results.map((row) => row.title)).toContain('Bounded semantic target');
     } finally {
       await service.close();
     }

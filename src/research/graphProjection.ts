@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import type {
-  AssertionRecord, CodeRelationRecord, CodeSymbolRecord, DecisionRecord, EntityAliasRecord,
+  AssertionRecord, CatalogAssetRecord, CatalogRevisionRecord, CodeRelationRecord, CodeSymbolRecord,
+  DecisionRecord, EntityAliasRecord,
   EntityRecord, EvidenceRecord, ExperimentRunRecord, GraphEdgeRecord, GraphNodeRecord, GraphProjection,
   IntentRevisionRecord, MemorySessionRecord,
   OntologyTermRecord, PlanRevisionRecord, ProjectDocumentRecord, ProjectRecord,
@@ -26,6 +27,8 @@ export interface ProjectGraphSource {
   assertions: AssertionRecord[];
   symbols: CodeSymbolRecord[];
   code_relations: CodeRelationRecord[];
+  catalog_assets?: CatalogAssetRecord[];
+  catalog_revisions?: CatalogRevisionRecord[];
 }
 
 function hash(value: string): string {
@@ -34,6 +37,27 @@ function hash(value: string): string {
 
 function graphId(kind: string, projectId: string, sourceId: string): string {
   return `${kind}:${projectId}:${hash(sourceId)}`;
+}
+
+function canonicalRecord(value: Record<string, unknown> | undefined): string {
+  if (!value) return '';
+  return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))));
+}
+
+function catalogLabel(revision: CatalogRevisionRecord): string {
+  for (const key of ['title', 'name', 'metric', 'label']) {
+    const value = revision.fields[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return revision.asset_id;
+}
+
+function catalogSummary(revision: CatalogRevisionRecord): string | undefined {
+  const values = Object.entries(revision.fields)
+    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+    .slice(0, 12)
+    .map(([key, value]) => `${key}: ${String(value)}`);
+  return values.length ? values.join('\n') : undefined;
 }
 
 interface SchemaIndex {
@@ -126,9 +150,18 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
     target: string,
     type: string,
     weight = 1,
-    evidenceIds?: string[],
+    options: {
+      evidence_ids?: string[];
+      qualifiers?: Record<string, string | number | boolean | null>;
+      effective_at?: string;
+      recorded_at?: string;
+    } = {},
   ): void => {
-    const edgeId = hash(`${projectId}\0${source}\0${target}\0${type}`);
+    const evidenceIds = [...new Set(options.evidence_ids ?? [])].sort();
+    const edgeId = hash([
+      projectId, source, target, type, canonicalRecord(options.qualifiers),
+      options.effective_at ?? '', options.recorded_at ?? '', evidenceIds.join('\0'),
+    ].join('\0'));
     if (!edges.has(edgeId)) {
       edges.set(edgeId, {
         edge_id: edgeId,
@@ -138,6 +171,9 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
         type,
         weight,
         ...(evidenceIds?.length ? { evidence_ids: evidenceIds } : {}),
+        ...(options.qualifiers ? { qualifiers: options.qualifiers } : {}),
+        ...(options.effective_at ? { effective_at: options.effective_at } : {}),
+        ...(options.recorded_at ? { recorded_at: options.recorded_at } : {}),
       });
     }
   };
@@ -465,6 +501,164 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
       if (session) addEdge(projectId, session, node, 'HAS_INTENT', 1.5);
     }
 
+    const catalogAssetNodes = new Map<string, string>();
+    const catalogRevisionNodes = new Map<string, string>();
+    for (const asset of source.catalog_assets ?? []) {
+      const node = graphId('catalog_asset', projectId, asset.asset_id);
+      catalogAssetNodes.set(asset.asset_id, node);
+      addNode({
+        node_id: node,
+        project_id: projectId,
+        kind: 'catalog_asset',
+        label: asset.asset_id,
+        text: `${asset.kind} ${asset.status} ${asset.access_tier}`,
+        source_id: asset.asset_id,
+        record_id: asset.asset_id,
+      });
+      addEdge(projectId, projectNode, node, 'HAS_CATALOG_RECORD', 1);
+    }
+    for (const revision of source.catalog_revisions ?? []) {
+      const node = graphId('catalog_revision', projectId, revision.revision_id);
+      catalogRevisionNodes.set(revision.revision_id, node);
+      addNode({
+        node_id: node,
+        project_id: projectId,
+        kind: revision.kind,
+        label: catalogLabel(revision),
+        text: catalogSummary(revision),
+        source_id: revision.revision_id,
+        record_id: revision.asset_id,
+        revision_id: revision.revision_id,
+      });
+      addInstanceOf(projectId, node, revision.kind);
+    }
+    const resolveCatalogReference = (value: string): string => {
+      const resolved = catalogRevisionNodes.get(value)
+        ?? catalogAssetNodes.get(value)
+        ?? planNodes.get(value)
+        ?? experimentNodes.get(value)
+        ?? decisionNodes.get(value)
+        ?? sessionNodes.get(value);
+      if (resolved) return resolved;
+      const node = graphId('catalog_asset', projectId, value);
+      addNode({
+        node_id: node,
+        project_id: projectId,
+        kind: 'catalog_asset',
+        label: value,
+        source_id: value,
+      });
+      return node;
+    };
+    const catalogReferenceFields: Array<[string, string]> = [
+      ['plan_revision_id', 'USES_PLAN'], ['plan_id', 'USES_PLAN'],
+      ['task_id', 'IMPLEMENTS_TASK'], ['task_ids', 'IMPLEMENTS_TASK'],
+      ['method_revision_id', 'USES_METHOD'], ['method_id', 'USES_METHOD'],
+      ['experiment_id', 'BELONGS_TO_EXPERIMENT'], ['attempt_id', 'OBSERVED_IN_ATTEMPT'],
+      ['arm_id', 'MEASURES_ARM'], ['parent_arm_id', 'DERIVED_FROM_ARM'],
+      ['control_arm_id', 'COMPARES_TO_ARM'], ['parent_ids', 'DERIVED_FROM_PARENT'],
+    ];
+    for (const revision of source.catalog_revisions ?? []) {
+      const revisionNode = catalogRevisionNodes.get(revision.revision_id)!;
+      const assetNode = catalogAssetNodes.get(revision.asset_id)
+        ?? resolveCatalogReference(revision.asset_id);
+      const temporal = {
+        evidence_ids: revision.evidence_ids,
+        effective_at: revision.effective_at,
+        recorded_at: revision.recorded_at,
+      };
+      addEdge(projectId, assetNode, revisionNode, 'HAS_REVISION', 2, {
+        ...temporal,
+        qualifiers: {
+          revision: revision.revision,
+          operation: revision.operation,
+        },
+      });
+      const asset = (source.catalog_assets ?? []).find((item) => item.asset_id === revision.asset_id);
+      if (asset?.current_revision_id === revision.revision_id) {
+        addEdge(projectId, assetNode, revisionNode, 'CURRENT_REVISION', 2, temporal);
+      }
+      if (revision.parent_revision_id) {
+        addEdge(
+          projectId,
+          revisionNode,
+          resolveCatalogReference(revision.parent_revision_id),
+          'SUPERSEDES_REVISION',
+          2,
+          temporal,
+        );
+      }
+      for (const [field, relation] of catalogReferenceFields) {
+        const raw = revision.fields[field];
+        const values = Array.isArray(raw) ? raw : [raw];
+        for (const value of values) {
+          if (typeof value !== 'string' || !value.trim()) continue;
+          addEdge(projectId, revisionNode, resolveCatalogReference(value), relation, 2, {
+            ...temporal,
+            qualifiers: { field },
+          });
+        }
+      }
+      for (const evidenceId of revision.evidence_ids) {
+        let evidenceNode = evidenceNodes.get(evidenceId);
+        if (!evidenceNode) {
+          evidenceNode = graphId('evidence', projectId, evidenceId);
+          evidenceNodes.set(evidenceId, evidenceNode);
+          addNode({
+            node_id: evidenceNode,
+            project_id: projectId,
+            kind: 'evidence',
+            label: evidenceId,
+            source_id: evidenceId,
+          });
+        }
+        addEdge(projectId, revisionNode, evidenceNode, 'SUPPORTED_BY', 2, {
+          evidence_ids: [evidenceId],
+          effective_at: revision.effective_at,
+          recorded_at: revision.recorded_at,
+        });
+      }
+      if (revision.artifact_manifest_id) {
+        const manifestNode = graphId('artifact', projectId, `manifest:${revision.artifact_manifest_id}`);
+        addNode({
+          node_id: manifestNode,
+          project_id: projectId,
+          kind: 'artifact',
+          label: `Artifact manifest (${revision.artifact_reference_count ?? 0})`,
+          text: 'content-addressed artifact manifest',
+          source_id: revision.artifact_manifest_id,
+        });
+        addInstanceOf(projectId, manifestNode, 'artifact');
+        addEdge(projectId, revisionNode, manifestNode, 'REFERENCES_ARTIFACT_MANIFEST', 2, {
+          ...temporal,
+          qualifiers: { reference_count: revision.artifact_reference_count ?? 0 },
+        });
+      }
+      for (const artifact of revision.artifact_references) {
+        const artifactNode = graphId('artifact', projectId, artifact.artifact_id);
+        addNode({
+          node_id: artifactNode,
+          project_id: projectId,
+          kind: 'artifact',
+          label: artifact.member ?? artifact.path ?? artifact.artifact_id,
+          text: [artifact.role, artifact.media_type, artifact.verification].filter(Boolean).join(' '),
+          source_id: artifact.artifact_id,
+        });
+        addInstanceOf(projectId, artifactNode, 'artifact');
+        const qualifiers = Object.fromEntries(Object.entries({
+          role: artifact.role,
+          verification: artifact.verification,
+          available: artifact.available,
+          size: artifact.size,
+          media_type: artifact.media_type,
+        }).filter(([, value]) => value !== undefined)) as Record<string, string | number | boolean | null>;
+        addEdge(projectId, revisionNode, artifactNode, 'REFERENCES_ARTIFACT', 2, {
+          ...temporal,
+          qualifiers,
+        });
+      }
+    }
+
     const entityNodes = new Map<string, string>();
     const nameToEntity = new Map<string, string>();
     const aliasesByEntity = new Map<string, EntityAliasRecord[]>();
@@ -522,13 +716,25 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
         source_id: assertion.assertion_id,
       });
       addInstanceOf(projectId, node, 'assertion');
-      addEdge(projectId, resolveEntityNode(assertion.subject), node, 'ASSERTS', 2, assertion.evidence_ids);
+      addEdge(projectId, resolveEntityNode(assertion.subject), node, 'ASSERTS', 2, {
+        evidence_ids: assertion.evidence_ids,
+        effective_at: assertion.valid_from,
+        recorded_at: assertion.recorded_at,
+      });
       if (assertion.object !== undefined) {
-        addEdge(projectId, node, resolveEntityNode(assertion.object), assertion.predicate, 2, assertion.evidence_ids);
+        addEdge(projectId, node, resolveEntityNode(assertion.object), assertion.predicate, 2, {
+          evidence_ids: assertion.evidence_ids,
+          effective_at: assertion.valid_from,
+          recorded_at: assertion.recorded_at,
+        });
       }
       for (const evidenceId of assertion.evidence_ids) {
         const evidence = evidenceNodes.get(evidenceId);
-        if (evidence) addEdge(projectId, node, evidence, 'SUPPORTED_BY', 2, [evidenceId]);
+        if (evidence) addEdge(projectId, node, evidence, 'SUPPORTED_BY', 2, {
+          evidence_ids: [evidenceId],
+          effective_at: assertion.valid_from,
+          recorded_at: assertion.recorded_at,
+        });
       }
       const predicate = normalizeEntityName(assertion.predicate);
       const schemaKey = schemaIndex.label_keys.get(`relation\0${predicate}`)
@@ -592,6 +798,7 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
     ]),
     edges: sortedEdges.map((edge) => [
       edge.edge_id, edge.source, edge.target, edge.type, edge.weight, edge.evidence_ids,
+      edge.qualifiers, edge.effective_at, edge.recorded_at,
     ]),
   })).digest('hex');
   return {

@@ -20,13 +20,23 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'forgetAssertion',
   'forgetProject',
   'getAssertion',
+  'getCatalogRecord',
+  'getCatalogRecords',
   'getEntity',
   'getProject',
   'getProjectSummary',
+  'catalogDiff',
+  'catalogTimeline',
+  'exportCatalogSnapshot',
+  'importCatalogSnapshot',
   'indexProject',
   'linkEntity',
   'listProjects',
+  'materializeCurrentView',
+  'jobStatus',
+  'cancelJob',
   'mergeEntities',
+  'passiveStatus',
   'prepareRepositoryResults',
   'probe',
   'previewForgetAssertion',
@@ -35,44 +45,69 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'recordDecision',
   'recordOntologyTerm',
   'recordSessionIntent',
+  'requestDrain',
   'rerankCandidates',
   'researchSearchContext',
   'restoreAssertion',
   'restoreProject',
   'search',
   'searchBatch',
+  'searchGrouped',
   'searchFamilies',
   'splitEntity',
   'startExperiment',
+  'projectContext',
+  'updateProjectContext',
+  'verifyCatalogRecord',
+  'waitForJob',
+  'writeCatalogRecord',
 ]);
 
 export const RESEARCH_BROKER_READ_METHODS = new Set([
   'getAssertion',
+  'getCatalogRecord',
+  'getCatalogRecords',
   'getEntity',
   'getProject',
   'getProjectSummary',
+  'catalogDiff',
+  'catalogTimeline',
   'linkEntity',
   'listProjects',
+  'jobStatus',
+  'passiveStatus',
   'probe',
   'rerankCandidates',
   'researchSearchContext',
   'search',
   'searchBatch',
+  'searchGrouped',
   'searchFamilies',
+  'projectContext',
+  'verifyCatalogRecord',
+  'waitForJob',
 ]);
+
+export const RESEARCH_BROKER_CONTROL_METHODS = new Set(['cancelJob']);
 
 export interface ResearchBrokerConfig {
   enabled: boolean;
   root: string;
+  endpoint?: string;
+  databaseNamespace?: string;
+  databaseName?: string;
   vectorModel?: string;
   vectorLowMemory?: boolean;
   vectorThreads?: number;
+  vectorBackend?: 'hnsw' | 'exhaustive' | 'compact';
   repositoryAuto?: boolean;
   repositoryMaxSourceBytes?: number;
   repositoryMaxSourceFiles?: number;
   idleMs: number;
   readConcurrency: number;
   queryTimeoutMs: number;
+  graphCacheMaxBytes?: number;
+  workerSoftMemoryBytes?: number;
 }
 
 interface BrokerRequest {
@@ -103,6 +138,7 @@ export interface ResearchBrokerClientOptions {
   idleMs?: number;
   readConcurrency?: number;
   processPath?: string;
+  workerSoftMemoryBytes?: number;
 }
 
 function stableConfig(config: ResearchBrokerConfig): ResearchBrokerConfig {
@@ -115,7 +151,16 @@ function isAbortSignal(value: unknown): value is AbortSignal {
 }
 
 export function researchBrokerConfigHash(config: ResearchBrokerConfig): string {
-  return createHash('sha256').update(JSON.stringify(stableConfig(config))).digest('hex');
+  const stable = stableConfig(config);
+  return createHash('sha256').update(JSON.stringify({
+    enabled: stable.enabled,
+    root: stable.root,
+    endpoint: stable.endpoint ?? '',
+    databaseNamespace: stable.databaseNamespace ?? 'google_surf',
+    databaseName: stable.databaseName ?? 'research',
+    vectorModel: stable.vectorModel ?? '',
+    vectorBackend: stable.vectorBackend ?? 'hnsw',
+  })).digest('hex');
 }
 
 function rootHash(root: string): string {
@@ -208,8 +253,13 @@ class ResearchBrokerClient {
       root: config.root,
       vector: config.vectorModel === '' ? 'off' : 'on',
       external_sync: 'off',
+      database_open: false,
+      background_jobs: 0,
+      repository_jobs: 0,
+      scheduled_graph_jobs: 0,
       graph_projection_cache: 0,
       graph_artifact_cache: 0,
+      graph_cache_bytes: 0,
     };
   }
 
@@ -326,7 +376,6 @@ class ResearchBrokerClient {
       } catch (error) {
         lastError = error;
       }
-      if (attempt > 0 && attempt % 10 === 0) this.spawnBroker();
     }
     throw new Error(`research broker did not start: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   }
@@ -337,7 +386,12 @@ class ResearchBrokerClient {
       detached: true,
       windowsHide: true,
       stdio: 'ignore',
-      env: { ...process.env, SURF_RESEARCH_BROKER_CONFIG: encoded },
+      env: {
+        ...process.env,
+        SURF_PROCESS_CLASS: 'research-broker',
+        SURF_PARENT_PID: String(process.pid),
+        SURF_RESEARCH_BROKER_CONFIG: encoded,
+      },
     });
     child.once('error', () => {});
     child.unref();
@@ -405,21 +459,27 @@ export function createSharedResearchService(
   options: ResearchServiceOptions,
   clientOptions: ResearchBrokerClientOptions = {},
 ): ResearchService {
-  if (!options.enabled || options.endpoint || options.embeddingProvider || options.repositoryClient) {
+  if (!options.enabled || options.embeddingProvider || options.repositoryClient) {
     return new ResearchService(options);
   }
   const config: ResearchBrokerConfig = stableConfig({
     enabled: options.enabled,
     root: options.root,
+    endpoint: options.endpoint,
+    databaseNamespace: options.databaseNamespace,
+    databaseName: options.databaseName,
     vectorModel: options.vectorModel,
     vectorLowMemory: options.vectorLowMemory,
     vectorThreads: options.vectorThreads,
+    vectorBackend: options.vectorBackend,
     repositoryAuto: options.repositoryAuto,
     repositoryMaxSourceBytes: options.repositoryMaxSourceBytes,
     repositoryMaxSourceFiles: options.repositoryMaxSourceFiles,
+    graphCacheMaxBytes: options.graphCacheMaxBytes,
     queryTimeoutMs: options.queryTimeoutMs ?? DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,
     idleMs: clientOptions.idleMs ?? 60_000,
     readConcurrency: clientOptions.readConcurrency ?? 4,
+    workerSoftMemoryBytes: clientOptions.workerSoftMemoryBytes,
   });
   const client = new ResearchBrokerClient(config, clientOptions.processPath ?? defaultBrokerProcessPath());
   const target = {

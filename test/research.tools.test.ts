@@ -189,11 +189,25 @@ describe('project_memory tool', () => {
       title: 'Shared local evidence',
       project_ids: ['memory-a', 'memory-b'],
       source_family: 'document',
+      record_id: expect.any(String),
+      body_handle: expect.any(String),
+      index_freshness: 'current',
     });
     expect(rows[0].retrieval_families).toEqual(expect.arrayContaining(['bm25', 'graph']));
     expect(rows[0].description).toContain('localmemoryneedle');
     expect(rows[0].description.length).toBeLessThanOrEqual(1_200);
     expect(rows[0].content).toBeUndefined();
+    const exactBody = await projectMemoryTool({
+      action: 'get',
+      project_id: 'memory-a',
+      record_id: rows[0].body_handle,
+      body_bytes: 20_000,
+    }, service);
+    expect(exactBody.structuredContent?.record).toMatchObject({
+      document: true,
+      record: { project_id: 'memory-a', title: 'Shared local evidence' },
+    });
+    expect(exactBody.structuredContent?.record?.body).toContain('localmemoryneedle');
     expect(result.structuredContent?.meta).toMatchObject({
       query_count: 2,
       query_execution: 'single_broker_request',
@@ -222,6 +236,13 @@ describe('project_memory tool', () => {
     }, service);
     expect(alias.structuredContent?.results).toEqual(result.structuredContent?.results);
 
+    const isolated = await projectMemorySearchTool({
+      project_id: 'memory-a', query: 'localmemoryneedle', limit: 5,
+    }, service);
+    expect(isolated.structuredContent?.results).toEqual([
+      expect.objectContaining({ project_ids: ['memory-a'] }),
+    ]);
+
     const allProjects = await projectMemorySearchTool({
       all_projects: true,
       query: 'localmemoryneedle',
@@ -236,6 +257,85 @@ describe('project_memory tool', () => {
     }, service);
     expect(invalid.isError).toBe(true);
     expect(invalid.structuredContent?.error?.message).toContain('cannot be combined');
+  });
+
+  it('exposes exact, grouped, temporal, and job-aware memory operations', async () => {
+    await projectMemoryTool({
+      action: 'create',
+      project_id: 'typed-memory',
+      name: 'Typed memory',
+      purpose: 'Preserve exact research history.',
+      protected_parent_ids: ['parent-a'],
+    }, service);
+    const written = await projectMemoryTool({
+      action: 'record',
+      project_id: 'typed-memory',
+      asset_kind: 'decision',
+      operation: 'create',
+      asset_id: 'decision-one',
+      idempotency_key: 'decision-one-create',
+      title: 'ignored legacy title',
+      body: 'tail evidence marker',
+      fields: { title: 'Keep the parent', status: 'active' },
+      aliases: ['decision-alias'],
+    }, service);
+    const receipt = written.structuredContent?.receipt as Record<string, any>;
+    const exact = await projectMemoryTool({
+      action: 'get', project_id: 'typed-memory', record_id: 'decision-alias', body_bytes: 1_000,
+    }, service);
+    const context = await projectMemoryTool({
+      action: 'context', project_id: 'typed-memory', budget_bytes: 4_000,
+    }, service);
+    await service.waitForIdle();
+    const grouped = await projectMemorySearchTool({
+      project_id: 'typed-memory',
+      queries: [
+        { id: 'decision', query: 'tail evidence marker', limit: 3 },
+        { id: 'parent', query: 'parent-a', limit: 3 },
+      ],
+      response_budget_bytes: 1_000,
+      filters: { source_families: ['document'], retrieval_lanes: ['bm25'], kinds: ['decision'] },
+    }, service);
+    const timeline = await projectMemoryTool({
+      action: 'timeline', project_id: 'typed-memory', limit: 10,
+    }, service);
+
+    expect(JSON.stringify(written.structuredContent)).not.toContain('tail evidence marker');
+    expect(receipt).toMatchObject({ record_id: 'decision-one', durability: 'committed', revision: 1 });
+    expect(exact.structuredContent?.record).toMatchObject({ body: 'tail evidence marker' });
+    expect(context.structuredContent?.context).toMatchObject({
+      project: { purpose: 'Preserve exact research history.', protected_parent_ids: ['parent-a'] },
+    });
+    expect(grouped.structuredContent?.groups).toHaveLength(2);
+    expect(grouped.structuredContent?.meta).toMatchObject({
+      response_budget_bytes: 1_000,
+      response_result_bytes: expect.any(Number),
+    });
+    expect(grouped.structuredContent?.meta?.response_result_bytes).toBeLessThanOrEqual(1_000);
+    expect(timeline.structuredContent?.timeline?.events).toHaveLength(1);
+  });
+
+  it('cancels a background job through the public memory tool', async () => {
+    await service.createProject('Cancel tool', 'cancel-tool');
+    let job = await service.queueKnowledgeJob({
+      project_id: 'cancel-tool', kind: 'graph_analysis', source_hash: 'source-v1',
+      schema_version: 'schema-v1', algorithm_version: 'algorithm-v1',
+    });
+    job = await service.transitionKnowledgeJob({
+      project_id: 'cancel-tool', job_id: job.job_id, status: 'running',
+    });
+    const cancelled = await projectMemoryTool({
+      action: 'job_cancel', project_id: 'cancel-tool', job_id: job.job_id,
+      cancel_reason: 'user changed scope',
+    }, service);
+    const status = await projectMemoryTool({
+      action: 'job_status', project_id: 'cancel-tool', job_id: job.job_id,
+    }, service);
+
+    expect(cancelled.structuredContent?.job).toMatchObject({
+      status: 'cancelled', cancel_reason: 'user changed scope',
+    });
+    expect(status.structuredContent?.job).toMatchObject({ status: 'cancelled' });
   });
 
   it('exports one project or all named projects without node bodies', async () => {

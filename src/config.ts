@@ -13,6 +13,7 @@ export { detectChrome as detectChromePath } from './browser.js';
 export type SearchProviderMode = 'browser' | 'searchapi' | 'fallback';
 export type BrowserEngine = 'auto' | 'native' | 'playwright';
 export type ResearchRetrievalMode = 'live' | 'hybrid';
+export type ResearchVectorBackend = 'hnsw' | 'exhaustive' | 'compact';
 
 export interface Config {
   chromePath?: string;
@@ -36,15 +37,21 @@ export interface Config {
   researchEnabled: boolean;
   researchRetrievalMode: ResearchRetrievalMode;
   researchRoot: string;
+  researchDbEndpoint?: string;
+  researchDbNamespace: string;
+  researchDbDatabase: string;
   researchVectorModel?: string;
   researchVectorLowMemory: boolean;
   researchVectorThreads: number;
+  researchVectorBackend: ResearchVectorBackend;
   researchRepoAuto: boolean;
   researchRepoAutoMaxMb: number;
   researchRepoAutoMaxFiles: number;
   researchBrokerIdleMs: number;
   researchReadConcurrency: number;
   researchQueryTimeoutMs: number;
+  researchGraphCacheMaxMb: number;
+  researchWorkerSoftMemoryMb: number;
 
   // Composite cloud flag: enables insecureTls + noSandbox + pool disabled +
   // tier-3 fail-fast. Cascade itself runs unchanged in cloud mode.
@@ -119,6 +126,21 @@ function parseResearchVectorModel(v: string | undefined): string | undefined {
   return model?.toLowerCase() === 'off' ? undefined : model || DEFAULT_RESEARCH_VECTOR_MODEL;
 }
 
+function parseResearchVectorBackend(v: string | undefined): ResearchVectorBackend {
+  return v === 'exhaustive' || v === 'compact' ? v : 'hnsw';
+}
+
+function parseResearchDbEndpoint(v: string | undefined): string | undefined {
+  const value = v?.trim();
+  if (!value) return undefined;
+  const url = new URL(value);
+  const local = ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
+  if (!['wss:', 'https:'].includes(url.protocol) && !(local && ['ws:', 'http:'].includes(url.protocol))) {
+    throw new Error('SURF_RESEARCH_DB_ENDPOINT must use wss/https, or ws/http on localhost');
+  }
+  return value;
+}
+
 function parseChromePath(v: string | undefined): string | undefined {
   return v || undefined;
 }
@@ -153,16 +175,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     researchEnabled: parseBool(env.SURF_RESEARCH, true),
     researchRetrievalMode: parseResearchRetrievalMode(env.SURF_RETRIEVAL_MODE),
     researchRoot: resolve(env.SURF_RESEARCH_ROOT || join(profileRoot, 'research')),
+    researchDbEndpoint: parseResearchDbEndpoint(env.SURF_RESEARCH_DB_ENDPOINT),
+    researchDbNamespace: env.SURF_RESEARCH_DB_NAMESPACE?.trim() || 'google_surf',
+    researchDbDatabase: env.SURF_RESEARCH_DB_DATABASE?.trim() || 'research',
     researchVectorModel: parseResearchVectorModel(
       env.SURF_RESEARCH_VECTOR_MODEL ?? env.SURF_RESEARCH_DENSE_MODEL,
     ),
     researchVectorLowMemory: parseBool(env.SURF_RESEARCH_VECTOR_LOW_MEMORY, true),
     researchVectorThreads: parseInt0(env.SURF_RESEARCH_VECTOR_THREADS, 4, 1, 16),
+    researchVectorBackend: parseResearchVectorBackend(env.SURF_RESEARCH_VECTOR_BACKEND),
     researchRepoAuto: parseBool(env.SURF_RESEARCH_REPO_AUTO, true),
     researchRepoAutoMaxMb: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_MB, 20, 1, 500),
     researchRepoAutoMaxFiles: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_FILES, 2_000, 10, 20_000),
     researchBrokerIdleMs: parseInt0(env.SURF_RESEARCH_BROKER_IDLE_MS, 60_000, 100, 60 * 60_000),
     researchReadConcurrency: parseInt0(env.SURF_RESEARCH_READ_CONCURRENCY, 4, 1, 16),
+    researchGraphCacheMaxMb: parseInt0(env.SURF_RESEARCH_GRAPH_CACHE_MAX_MB, 64, 0, 4_096),
+    researchWorkerSoftMemoryMb: parseInt0(env.SURF_RESEARCH_WORKER_SOFT_MEMORY_MB, 2_048, 128, 65_536),
     researchQueryTimeoutMs: parseInt0(
       env.SURF_RESEARCH_QUERY_TIMEOUT_MS,
       DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,

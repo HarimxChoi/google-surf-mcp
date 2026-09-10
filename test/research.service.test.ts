@@ -123,6 +123,39 @@ describe('research project memory', () => {
     expect(await service.search('long-evidence', 'replacement body', 10)).toHaveLength(1);
   });
 
+  it('pages captured document bodies on valid UTF-8 byte boundaries', async () => {
+    await service.createProject('Unicode evidence', 'unicode-evidence');
+    const body = `시작🙂${'근거값🚀'.repeat(200)} unicode-tail-marker`;
+    await service.capture({
+      tool: 'extract',
+      project_id: 'unicode-evidence',
+      payload: {
+        title: 'Unicode Evidence',
+        url: 'https://example.com/unicode',
+        content: body,
+        extraction_quality: 'full_text',
+      },
+    });
+    await service.waitForIdle();
+    const [hit] = await service.search('unicode-evidence', 'unicode-tail-marker', 1);
+    expect(hit.body_handle).toBeTruthy();
+    const complete = await service.getCatalogRecord(
+      'unicode-evidence', hit.body_handle!, undefined, 0, 1024 * 1024,
+    );
+    if (!('document' in complete)) throw new Error('unexpected readback type');
+    let restored = '';
+    let offset = 0;
+    for (;;) {
+      const page = await service.getCatalogRecord('unicode-evidence', hit.body_handle!, undefined, offset, 17);
+      if (!('document' in page)) throw new Error('unexpected readback type');
+      restored += page.body ?? '';
+      if (page.next_body_offset === undefined) break;
+      offset = page.next_body_offset;
+    }
+    expect(restored).not.toContain('\uFFFD');
+    expect(Buffer.from(restored)).toEqual(Buffer.from(complete.body ?? ''));
+  });
+
   it('stores PDF metadata with abstract and full evidence', async () => {
     await service.createProject('PDF evidence', 'pdf-evidence');
     for (const extraction_quality of ['abstract', 'full_text']) {
@@ -681,6 +714,14 @@ describe('research project memory', () => {
       schema_version: 'schema-1',
       algorithm_version: 'algorithm-1',
     });
+    const pinnedModelIdentity = `exact-bm25-e5-hnsw-v1:${'pinned-model-revision-'.repeat(8)}`;
+    const versioned = await service.queueKnowledgeJob({
+      project_id: 'job-state',
+      kind: 'retrieval_index',
+      source_hash: 'source-2',
+      schema_version: 'retrieval-v2-document-384',
+      algorithm_version: pinnedModelIdentity,
+    });
     const running = await service.transitionKnowledgeJob({
       project_id: 'job-state', job_id: first.job_id, status: 'running',
     });
@@ -698,6 +739,7 @@ describe('research project memory', () => {
     });
 
     expect(duplicate.job_id).toBe(first.job_id);
+    expect(versioned.algorithm_version).toBe(pinnedModelIdentity);
     expect(running.attempts).toBe(1);
     expect(failed.status).toBe('failed');
     expect(queued.status).toBe('queued');
@@ -720,6 +762,7 @@ describe('research project memory', () => {
         extraction_quality: 'full_text',
       },
     });
+    await service.waitForIdle();
     const store = Reflect.get(service, 'store') as {
       searchProjectBm25: typeof service.search;
     };

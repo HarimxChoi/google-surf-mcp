@@ -1,4 +1,5 @@
 import { extname, basename, dirname } from 'node:path';
+import type { ProjectDocumentRole } from './contracts.js';
 
 export type ProjectFileKind =
   | 'prereg'
@@ -105,6 +106,15 @@ export function classifyProjectPath(path: string): ProjectFileKind {
   if (SOURCE_EXTENSIONS.has(extension)) return 'source';
   if (CONFIG_EXTENSIONS.has(extension)) return 'config';
   if (TEXT_EXTENSIONS.has(extension) || ['.parquet', '.csv'].includes(extension)) return 'data';
+  return 'other';
+}
+
+export function projectRoleKind(role: ProjectDocumentRole): ProjectFileKind {
+  if (role === 'experiment_record' || role === 'result') return 'result';
+  if (role === 'plan' || role === 'method' || role === 'paper' || role === 'report') return 'report';
+  if (role === 'source') return 'source';
+  if (role === 'config') return 'config';
+  if (role === 'log') return 'log';
   return 'other';
 }
 

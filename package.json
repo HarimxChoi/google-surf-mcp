@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "type": "module",
@@ -39,6 +39,8 @@
     "research:e2e-benchmark": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-research-e2e.js",
     "research:evaluate": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/evaluate-research-memory.js",
     "research:vector-smoke": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/smoke-vector-retrieval.js",
+    "research:vector-backends": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-vector-backends.js",
+    "research:memory-soak": "node scripts/soak-research-memory.mjs",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "smoke:hooks": "node scripts/smoke-host-hooks.mjs",
     "drift-check": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/repair/index.js"
@@ -89,7 +91,7 @@
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "sharp": "0.35.3",
+    "sharp": "^0.35.4",
     "surrealdb": "^2.0.8",
     "tree-sitter": "^0.21.1",
     "tree-sitter-cpp": "^0.22.3",

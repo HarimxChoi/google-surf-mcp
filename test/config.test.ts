@@ -129,6 +129,22 @@ describe('loadConfig', () => {
     expect(loadConfig({ SURF_RESEARCH_VECTOR_THREADS: '99' }).researchVectorThreads).toBe(16);
   });
 
+  it('accepts encrypted remote research storage and rejects insecure public endpoints', () => {
+    expect(loadConfig({ SURF_RESEARCH_DB_ENDPOINT: 'wss://db.example.test/rpc' }))
+      .toMatchObject({
+        researchDbEndpoint: 'wss://db.example.test/rpc',
+        researchDbNamespace: 'google_surf',
+        researchDbDatabase: 'research',
+      });
+    expect(loadConfig({
+      SURF_RESEARCH_DB_ENDPOINT: 'ws://127.0.0.1:8000/rpc',
+      SURF_RESEARCH_DB_NAMESPACE: 'team',
+      SURF_RESEARCH_DB_DATABASE: 'catalog',
+    })).toMatchObject({ researchDbNamespace: 'team', researchDbDatabase: 'catalog' });
+    expect(() => loadConfig({ SURF_RESEARCH_DB_ENDPOINT: 'ws://db.example.test/rpc' }))
+      .toThrow('must use wss/https');
+  });
+
   it('enables local research by default and supports an explicit opt-out', () => {
     const researchRoot = resolve('research', 'surf');
     const configured = loadConfig({

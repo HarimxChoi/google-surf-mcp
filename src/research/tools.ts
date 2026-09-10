@@ -1,7 +1,11 @@
 import type { CallToolResult } from '../response.js';
 import { formatToolResponse } from '../response.js';
 import { compactRankedResults } from './integration.js';
-import type { AssertionValue, ExperimentStatus } from './contracts.js';
+import type {
+  ArtifactReference, AssertionValue, CatalogAccessTier, CatalogAssetKind, CatalogWriteOperation,
+  ExperimentStatus, ProjectDocumentRole,
+  ResearchSearchFilters,
+} from './contracts.js';
 import { isTransactionConflict } from './errors.js';
 import { ResearchService } from './service.js';
 
@@ -12,10 +16,16 @@ export interface ProjectMemorySearchInput {
   query?: string;
   query_variants?: string[];
   limit?: number;
+  queries?: Array<{ id: string; query: string; query_variants?: string[]; limit?: number }>;
+  response_budget_bytes?: number;
+  filters?: ResearchSearchFilters;
 }
 
 export interface ProjectMemoryInput extends ProjectMemorySearchInput {
-  action: 'create' | 'show' | 'search' | 'record' | 'rebuild' | 'export' | 'forget';
+  action: 'create' | 'show' | 'search' | 'record' | 'record_batch' | 'get' | 'get_batch'
+    | 'context' | 'timeline' | 'diff' | 'sync' | 'job_status' | 'job_wait' | 'job_cancel' | 'verify'
+    | 'current' | 'snapshot' | 'snapshot_import' | 'snapshot_rollback'
+    | 'doctor' | 'rebuild' | 'export' | 'forget';
   detail_level?: 'summary' | 'full';
   export_format?: 'dot' | 'd3' | 'html' | 'neo4j';
   export_view?: 'graph' | 'ontology' | 'lineage';
@@ -25,6 +35,7 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
   intent?: string;
   title?: string;
   body?: string;
+  body_path?: string;
   change_reason?: string;
   based_on_experiment_id?: string;
   experiment_id?: string;
@@ -34,7 +45,14 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
   summary?: string;
   metrics?: Record<string, string | number | boolean | null>;
   artifacts?: string[];
-  roots?: Array<{ label: string; path: string }>;
+  roots?: Array<{
+    label: string;
+    path: string;
+    role?: ProjectDocumentRole;
+    manifest?: Array<{ path: string; role: ProjectDocumentRole; aliases?: string[] }>;
+  }>;
+  changed_paths?: Array<{ root: string; path: string }>;
+  removed_paths?: Array<{ root: string; path: string }>;
   git_root?: string;
   forget_mode?: 'preview' | 'apply' | 'restore';
   confirm_token?: string;
@@ -50,6 +68,67 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
   evidence_ids?: string[];
   valid_from?: string;
   valid_to?: string;
+  operation?: CatalogWriteOperation;
+  asset_kind?: CatalogAssetKind;
+  asset_id?: string;
+  record_id?: string;
+  record_ids?: string[];
+  records?: Array<{
+    kind: CatalogAssetKind;
+    operation: CatalogWriteOperation;
+    asset_id?: string;
+    expected_revision?: number;
+    idempotency_key: string;
+    body?: string;
+    body_path?: string;
+    fields?: Record<string, unknown>;
+    evidence_ids?: string[];
+    artifact_references?: ArtifactReference[];
+    aliases?: string[];
+    protected?: boolean;
+    access_tier?: CatalogAccessTier;
+    set_current?: boolean;
+    missing_fields?: string[];
+    effective_at?: string;
+    source_sequence?: number;
+    source_reference?: string;
+    correction_reason?: string;
+  }>;
+  expected_revision?: number;
+  idempotency_key?: string;
+  fields?: Record<string, unknown>;
+  artifact_references?: ArtifactReference[];
+  protected?: boolean;
+  access_tier?: CatalogAccessTier;
+  set_current?: boolean;
+  missing_fields?: string[];
+  effective_at?: string;
+  source_sequence?: number;
+  source_reference?: string;
+  correction_reason?: string;
+  revision?: number;
+  from_revision?: number;
+  to_revision?: number;
+  body_offset?: number;
+  body_bytes?: number;
+  artifact_offset?: number;
+  artifact_limit?: number;
+  budget_bytes?: number;
+  since_revision?: number;
+  after?: string;
+  before?: string;
+  as_of?: string;
+  job_id?: string;
+  after_revision?: number;
+  wait_timeout_ms?: number;
+  cancel_reason?: string;
+  verification_level?: 'declared' | 'present' | 'hash_verified' | 'restore_tested' | 'replayed';
+  root_mode?: 'merge' | 'replace' | 'remove';
+  snapshot_path?: string;
+  dry_run?: boolean;
+  purpose?: string;
+  user_constraints?: string[];
+  protected_parent_ids?: string[];
 }
 
 function toolError(error: unknown): CallToolResult {
@@ -65,13 +144,46 @@ function requireProject(input: ProjectMemoryInput): string {
   return input.project_id;
 }
 
+function utf8Prefix(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+function budgetRankedResults<T extends { description?: string }>(
+  rows: T[],
+  budgetBytes: number,
+): { rows: T[]; bytes: number; omitted: number; truncated: boolean } {
+  const selected: T[] = [];
+  for (const source of rows) {
+    let row = { ...source };
+    const baseBytes = Buffer.byteLength(JSON.stringify({ ...row, description: undefined }), 'utf8') + 2;
+    const used = Buffer.byteLength(JSON.stringify(selected), 'utf8');
+    const available = budgetBytes - used - baseBytes;
+    if (available <= 0) continue;
+    if (row.description) row = { ...row, description: utf8Prefix(row.description, available) };
+    if (Buffer.byteLength(JSON.stringify([...selected, row]), 'utf8') <= budgetBytes) selected.push(row);
+  }
+  const bytes = Buffer.byteLength(JSON.stringify(selected), 'utf8');
+  return {
+    rows: selected,
+    bytes,
+    omitted: rows.length - selected.length,
+    truncated: selected.length < rows.length
+      || selected.some((row, index) => row.description !== rows[index]?.description),
+  };
+}
+
 export async function projectMemorySearchTool(
   input: ProjectMemorySearchInput,
   service: ResearchService,
   signal?: AbortSignal,
 ): Promise<CallToolResult> {
   try {
-    if (!input.query) throw new Error('query required');
+    if (!input.query && !input.queries?.length) throw new Error('query or queries required');
+    if (input.query && input.queries?.length) throw new Error('query and queries cannot be combined');
     if ((input.query_variants?.length ?? 0) > 19) throw new Error('query_variants accepts at most 19 entries');
     if (input.all_projects && (input.project_id || input.include_project_ids?.length)) {
       throw new Error('all_projects cannot be combined with project_id or include_project_ids');
@@ -89,27 +201,90 @@ export async function projectMemorySearchTool(
         .sort()];
     if (!scope.length) throw new Error('project_id or all_projects=true required');
     const started = Date.now();
+    if (input.queries?.length) {
+      const groups = await service.searchGrouped(scope[0], input.queries, scope.slice(1), signal, input.filters);
+      const resultBudget = input.response_budget_bytes ?? 12_000;
+      const groupBudget = Math.max(1, Math.floor(resultBudget / groups.length));
+      const compactGroups = groups.map((group) => {
+        const compact = compactRankedResults(group.query, group.results.map((hit) => ({
+          title: hit.title,
+          url: hit.url,
+          description: hit.description,
+          content: hit.content,
+          document_id: hit.document_id,
+          record_id: hit.record_id,
+          revision_id: hit.revision_id,
+          body_handle: hit.body_handle,
+          source_span: hit.source_span,
+          index_freshness: hit.index_freshness,
+          project_ids: hit.project_ids,
+          source_family: hit.source_family,
+          retrieval_families: hit.retrieval_families
+            ?? (hit.retrieval_family ? [hit.retrieval_family] : []),
+          score: hit.score,
+        })));
+        const budgeted = budgetRankedResults(compact, groupBudget);
+        return {
+          id: group.id,
+          query: group.query,
+          results: budgeted.rows,
+          omitted_results: budgeted.omitted,
+          truncated: budgeted.truncated,
+          result_bytes: budgeted.bytes,
+          degraded_lanes: group.degraded_lanes,
+          timings: group.timings,
+          request_id: group.request_id,
+          candidate_counts: group.candidate_counts,
+        };
+      });
+      return formatToolResponse({
+        groups: compactGroups,
+        elapsed_ms: Date.now() - started,
+        meta: {
+          provider: 'local',
+          project_ids: scope,
+          grouped: true,
+          query_count: compactGroups.length,
+          query_execution: 'single_broker_request',
+          response_budget_bytes: resultBudget,
+          response_result_bytes: compactGroups.reduce((sum, group) => sum + group.result_bytes, 0),
+          omitted_results: compactGroups.reduce((sum, group) => sum + group.omitted_results, 0),
+          live_web_used: false,
+          browser_used: false,
+        },
+        memory: `Projects: ${scope.length} | Independent queries: ${compactGroups.length} | Live web: no | Status: ready`,
+      });
+    }
     const searched = await service.searchBatch(
       scope[0],
-      input.query,
+      input.query!,
       input.query_variants ?? [],
       input.limit ?? 10,
       scope.slice(1),
       signal,
+      input.filters,
     );
     const hits = searched.results;
-    const results = compactRankedResults(input.query, hits.map((hit) => ({
+    const compact = compactRankedResults(input.query!, hits.map((hit) => ({
       title: hit.title,
       url: hit.url,
       description: hit.description,
       content: hit.content,
       document_id: hit.document_id,
+      record_id: hit.record_id,
+      revision_id: hit.revision_id,
+      body_handle: hit.body_handle,
+      source_span: hit.source_span,
+      index_freshness: hit.index_freshness,
       project_ids: hit.project_ids,
       source_family: hit.source_family,
       retrieval_families: hit.retrieval_families
         ?? (hit.retrieval_family ? [hit.retrieval_family] : []),
       score: hit.score,
     })));
+    const resultBudget = input.response_budget_bytes ?? 12_000;
+    const budgeted = budgetRankedResults(compact, resultBudget);
+    const results = budgeted.rows;
     const vectorEnabled = service.status().vector === 'on';
     return formatToolResponse({
       query: input.query,
@@ -122,6 +297,10 @@ export async function projectMemorySearchTool(
         fusion: 'rrf',
         reranker: vectorEnabled ? 'local_vector' : 'rrf_only',
         response_format: 'ranked_summaries',
+        response_budget_bytes: resultBudget,
+        response_result_bytes: budgeted.bytes,
+        omitted_results: budgeted.omitted,
+        truncated: budgeted.truncated,
         live_web_used: false,
         browser_used: false,
         searchapi_used: false,
@@ -133,6 +312,8 @@ export async function projectMemorySearchTool(
         degraded_lanes: searched.degraded_lanes,
         partial: searched.degraded_lanes.length > 0,
         timings: searched.timings,
+        request_id: searched.request_id,
+        candidate_counts: searched.candidate_counts,
       },
       memory: `Projects: ${scope.length} | Queries: ${searched.queries.length} | Local RAG: ${results.length} results | Live web: no | Status: ${searched.degraded_lanes.length ? `partial (${searched.degraded_lanes.join(', ')})` : 'ready'}`,
     });
@@ -149,10 +330,207 @@ export async function projectMemoryTool(
   try {
     if (input.action === 'create') {
       if (!input.name) throw new Error('name required');
-      const project = await service.createProject(input.name, input.project_id);
+      let project = await service.createProject(input.name, input.project_id);
+      if (input.purpose !== undefined || input.user_constraints !== undefined
+        || input.protected_parent_ids !== undefined) {
+        project = await service.updateProjectContext({
+          project_id: project.project_id,
+          purpose: input.purpose,
+          user_constraints: input.user_constraints,
+          protected_parent_ids: input.protected_parent_ids,
+        });
+      }
       return formatToolResponse({
         project,
         memory: `Project: ${project.name} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'doctor') {
+      const doctor = await service.passiveStatus();
+      const adapterMemory = process.memoryUsage();
+      const separateAdapter = doctor.process.pid !== process.pid;
+      return formatToolResponse({
+        doctor: {
+          ...doctor,
+          adapter_process: separateAdapter ? {
+            pid: process.pid,
+            parent_pid: process.ppid,
+            rss_bytes: adapterMemory.rss,
+            heap_used_bytes: adapterMemory.heapUsed,
+          } : null,
+          observed_worker_rss_bytes: doctor.process.rss_bytes
+            + (separateAdapter ? adapterMemory.rss : 0),
+          private_bytes_note: 'Current private bytes are not exposed portably by Node.js and are not inferred from RSS.',
+        },
+        memory: 'Research doctor: passive | Database/model opened: no',
+      });
+    }
+
+    if (input.action === 'get') {
+      const projectId = requireProject(input);
+      const recordId = input.record_id ?? input.target_id;
+      if (!recordId) throw new Error('record_id required');
+      const record = await service.getCatalogRecord(
+        projectId,
+        recordId,
+        input.revision,
+        input.body_offset,
+        input.body_bytes,
+        input.artifact_offset,
+        input.artifact_limit,
+      );
+      return formatToolResponse({
+        record,
+        memory: `Project: ${projectId} | Exact record: ${recordId} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'get_batch') {
+      const projectId = requireProject(input);
+      if (!input.record_ids?.length) throw new Error('record_ids required');
+      const records = await service.getCatalogRecords(projectId, input.record_ids, {
+        body_offset: input.body_offset,
+        body_bytes: input.body_bytes,
+        artifact_offset: input.artifact_offset,
+        artifact_limit: input.artifact_limit,
+      });
+      return formatToolResponse({
+        records,
+        memory: `Project: ${projectId} | Exact records: ${records.length} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'context') {
+      const projectId = requireProject(input);
+      const context = await service.projectContext(
+        projectId,
+        input.budget_bytes,
+        input.since_revision,
+        input.as_of,
+      );
+      return formatToolResponse({
+        context,
+        memory: `Project: ${projectId} | Current context | Status: ready`,
+      });
+    }
+
+    if (input.action === 'current') {
+      const projectId = requireProject(input);
+      const current = await service.materializeCurrentView(projectId);
+      return formatToolResponse({
+        current,
+        memory: `Project: ${projectId} | CURRENT view: generation ${current.catalog_generation} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'timeline') {
+      const projectId = requireProject(input);
+      const timeline = await service.catalogTimeline(projectId, {
+        after: input.after,
+        before: input.before,
+        limit: input.limit,
+      });
+      return formatToolResponse({
+        timeline,
+        memory: `Project: ${projectId} | Timeline: ${timeline.events.length} events | Status: ready`,
+      });
+    }
+
+    if (input.action === 'diff') {
+      const projectId = requireProject(input);
+      const recordId = input.record_id ?? input.target_id;
+      if (!recordId || input.from_revision === undefined) {
+        throw new Error('record_id and from_revision required');
+      }
+      const diff = await service.catalogDiff(projectId, recordId, input.from_revision, input.to_revision);
+      return formatToolResponse({
+        diff,
+        memory: `Project: ${projectId} | Record diff: ${recordId} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'job_status' || input.action === 'job_wait' || input.action === 'job_cancel') {
+      const projectId = requireProject(input);
+      if (!input.job_id) throw new Error('job_id required');
+      const job = input.action === 'job_status'
+        ? await service.jobStatus(projectId, input.job_id)
+        : input.action === 'job_cancel'
+          ? await service.cancelJob(projectId, input.job_id, input.cancel_reason)
+          : await service.waitForJob(
+          projectId,
+          input.job_id,
+          input.after_revision,
+          input.wait_timeout_ms,
+        );
+      return formatToolResponse({
+        job,
+        memory: `Project: ${projectId} | Job: ${input.job_id} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'verify') {
+      const projectId = requireProject(input);
+      const recordId = input.record_id ?? input.target_id;
+      if (!recordId) throw new Error('record_id required');
+      const verification = await service.verifyCatalogRecord(
+        projectId,
+        recordId,
+        input.verification_level,
+      );
+      return formatToolResponse({
+        verification,
+        memory: `Project: ${projectId} | Verification: ${recordId} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'snapshot') {
+      const projectId = requireProject(input);
+      const snapshot = await service.exportCatalogSnapshot(projectId);
+      return formatToolResponse({
+        snapshot,
+        memory: `Project: ${projectId} | Catalog snapshot: ${snapshot.record_count} records | Status: ready`,
+      });
+    }
+
+    if (input.action === 'snapshot_import' || input.action === 'snapshot_rollback') {
+      const projectId = requireProject(input);
+      if (!input.snapshot_path) throw new Error('snapshot_path required');
+      const imported = await service.importCatalogSnapshot({
+        project_id: projectId,
+        path: input.snapshot_path,
+        expected_generation: input.expected_revision,
+        dry_run: input.dry_run,
+        rollback: input.action === 'snapshot_rollback',
+      });
+      return formatToolResponse({
+        imported,
+        memory: `Project: ${projectId} | Catalog ${input.action === 'snapshot_rollback' ? 'rollback' : 'import'}: ${input.dry_run === false ? 'applied' : 'preview'} | Status: ready`,
+      });
+    }
+
+    if (input.action === 'record_batch') {
+      const projectId = requireProject(input);
+      if (!input.records?.length) throw new Error('records required');
+      if (input.records.length > 100) throw new Error('records accepts at most 100 entries');
+      const results: Array<{ index: number; receipt?: unknown; error?: string }> = [];
+      for (let index = 0; index < input.records.length; index++) {
+        try {
+          results.push({
+            index,
+            receipt: await service.writeCatalogRecord({ ...input.records[index], project_id: projectId }),
+          });
+        } catch (error) {
+          results.push({ index, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      const committed = results.filter((result) => result.receipt).length;
+      return formatToolResponse({
+        results,
+        committed,
+        failed: results.length - committed,
+        partial: committed !== results.length,
+        memory: `Project: ${projectId} | Durable writes: ${committed}/${results.length} | Status: ${committed === results.length ? 'committed' : 'partial'}`,
       });
     }
 
@@ -269,8 +647,8 @@ export async function projectMemoryTool(
       });
     }
 
-    if (input.action === 'rebuild') {
-      if (!input.roots?.length) {
+    if (input.action === 'rebuild' || input.action === 'sync') {
+      if (!input.roots?.length && !input.changed_paths?.length && !input.removed_paths?.length) {
         const derived = await service.rebuildDerivedState(projectId);
         return formatToolResponse({
           index: derived,
@@ -281,8 +659,43 @@ export async function projectMemoryTool(
         project_id: projectId,
         roots: input.roots,
         git_root: input.git_root,
+        root_mode: input.root_mode,
+        changed_paths: input.changed_paths,
+        removed_paths: input.removed_paths,
       });
       return formatToolResponse({ index, memory: `${index.summary} | Status: ready` });
+    }
+
+    if (input.asset_kind || input.operation || input.idempotency_key) {
+      if (!input.asset_kind || !input.operation || !input.idempotency_key) {
+        throw new Error('asset_kind, operation and idempotency_key required for typed record writes');
+      }
+      const receipt = await service.writeCatalogRecord({
+        project_id: projectId,
+        kind: input.asset_kind,
+        operation: input.operation,
+        asset_id: input.asset_id ?? input.record_id,
+        expected_revision: input.expected_revision,
+        idempotency_key: input.idempotency_key,
+        body: input.body,
+        body_path: input.body_path,
+        fields: input.fields,
+        evidence_ids: input.evidence_ids,
+        artifact_references: input.artifact_references,
+        aliases: input.aliases,
+        protected: input.protected,
+        access_tier: input.access_tier,
+        set_current: input.set_current,
+        missing_fields: input.missing_fields,
+        effective_at: input.effective_at,
+        source_sequence: input.source_sequence,
+        source_reference: input.source_reference,
+        correction_reason: input.correction_reason,
+      });
+      return formatToolResponse({
+        receipt,
+        memory: `Project: ${projectId} | Durable record: ${receipt.record_id} v${receipt.revision} | Status: committed`,
+      });
     }
 
     if (!input.record_type) throw new Error('record_type required');
@@ -315,6 +728,11 @@ export async function projectMemoryTool(
         body: input.body,
         change_reason: input.change_reason,
         based_on_experiment_id: input.based_on_experiment_id,
+        effective_at: input.effective_at,
+        source_sequence: input.source_sequence,
+        source_reference: input.source_reference,
+        missing_fields: input.missing_fields,
+        idempotency_key: input.idempotency_key,
       }, detail.plan_count > 0);
       return formatToolResponse({
         record: {
@@ -337,8 +755,14 @@ export async function projectMemoryTool(
           experiment_id: input.experiment_id,
           status: input.status,
           summary: input.summary,
+          body: input.body,
           metrics: input.metrics,
           artifacts: input.artifacts,
+          effective_at: input.effective_at,
+          source_sequence: input.source_sequence,
+          source_reference: input.source_reference,
+          missing_fields: input.missing_fields,
+          idempotency_key: input.idempotency_key,
         });
         return formatToolResponse({
           record: {
@@ -355,8 +779,14 @@ export async function projectMemoryTool(
         project_id: projectId,
         name: input.title,
         hypothesis: input.hypothesis,
+        body: input.body,
         plan_revision_id: input.plan_revision_id,
         artifacts: input.artifacts,
+        effective_at: input.effective_at,
+        source_sequence: input.source_sequence,
+        source_reference: input.source_reference,
+        missing_fields: input.missing_fields,
+        idempotency_key: input.idempotency_key,
       });
       return formatToolResponse({
         record: {
@@ -468,8 +898,14 @@ export async function projectMemoryTool(
       project_id: projectId,
       title: input.title,
       summary: input.summary,
+      body: input.body,
       plan_revision_id: input.plan_revision_id,
       experiment_id: input.experiment_id,
+      effective_at: input.effective_at,
+      source_sequence: input.source_sequence,
+      source_reference: input.source_reference,
+      missing_fields: input.missing_fields,
+      idempotency_key: input.idempotency_key,
     });
     return formatToolResponse({
       record: {

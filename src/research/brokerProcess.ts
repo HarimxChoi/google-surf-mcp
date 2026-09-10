@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { resolve } from 'node:path';
 import {
+  RESEARCH_BROKER_CONTROL_METHODS,
   RESEARCH_BROKER_METHODS,
   RESEARCH_BROKER_PROTOCOL,
   RESEARCH_BROKER_READ_METHODS,
@@ -104,6 +105,7 @@ function parseConfig(): ResearchBrokerConfig {
 }
 
 const config = parseConfig();
+process.title = 'google-surf-research-broker';
 const acquiredOwnership = await acquireOwner(config.root);
 if (!acquiredOwnership) process.exit(0);
 const ownership = acquiredOwnership!;
@@ -114,16 +116,29 @@ const service = new ResearchService(config);
 const endpoint = researchBrokerEndpoint(config.root);
 const clients = new Set<Socket>();
 const coalescedReads = new Set([
-  'getAssertion', 'getEntity', 'getProject', 'linkEntity', 'listProjects', 'probe',
+  'getAssertion', 'getCatalogRecord', 'getCatalogRecords', 'getEntity', 'getProject',
+  'getProjectSummary', 'jobStatus', 'linkEntity', 'listProjects', 'projectContext',
+  'passiveStatus', 'probe', 'search', 'searchBatch', 'searchGrouped', 'searchFamilies',
 ]);
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let writeTail: Promise<unknown> = Promise.resolve();
 let activeReads = 0;
 const readWaiters: Array<() => void> = [];
 const readInflight = new Map<string, Promise<unknown>>();
-const requestControllers = new Map<string, { controller: AbortController; socket: Socket }>();
+const requestControllers = new Map<string, {
+  controller: AbortController;
+  socket: Socket;
+  read: boolean;
+  coalesced: boolean;
+}>();
 let stopping = false;
 let activeRequests = 0;
+let acceptedRequests = 0;
+let completedRequests = 0;
+let coalescedReadHits = 0;
+let activeWrites = 0;
+let queuedWrites = 0;
+let lastCompletedWorkAt: string | undefined;
 
 if (process.platform !== 'win32' && process.platform !== 'linux') {
   await rm(endpoint, { force: true });
@@ -143,6 +158,10 @@ function invocationArgs(request: BrokerRequest, signal: AbortSignal): unknown[] 
     while (args.length < 5) args.push(undefined);
     return [...args, signal];
   }
+  if (request.method === 'searchGrouped') {
+    while (args.length < 3) args.push(undefined);
+    return [...args, signal];
+  }
   if (request.method === 'searchFamilies') {
     while (args.length < 5) args.push(undefined);
     if (args.length < 6) args.push(true);
@@ -156,15 +175,45 @@ function invocationArgs(request: BrokerRequest, signal: AbortSignal): unknown[] 
 }
 
 async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unknown> {
+  if (request.method === 'passiveStatus') {
+    return {
+      ...service.passiveStatus('research_broker'),
+      broker: {
+        lifecycle: stopping ? 'draining' : 'ready',
+        connected_clients: clients.size,
+        accepted_requests: acceptedRequests,
+        completed_requests: completedRequests,
+        coalesced_read_hits: coalescedReadHits,
+        active_requests: Math.max(0, activeRequests - 1),
+        active_reads: activeReads,
+        active_writes: activeWrites,
+        queued_reads: readWaiters.length,
+        queued_writes: queuedWrites,
+        last_completed_work_at: lastCompletedWorkAt ?? null,
+        idle_ms: config.idleMs,
+        read_concurrency: config.readConcurrency,
+        query_timeout_ms: config.queryTimeoutMs,
+        worker_soft_memory_bytes: config.workerSoftMemoryBytes ?? null,
+        resource_pressure: Boolean(
+          config.workerSoftMemoryBytes && process.memoryUsage().rss >= config.workerSoftMemoryBytes
+        ),
+      },
+    };
+  }
   const method = (service as unknown as Record<string, (...args: unknown[]) => unknown>)[request.method];
   if (typeof method !== 'function') throw new Error(`unsupported research broker method: ${request.method}`);
-  const operation = async () => await method.apply(service, invocationArgs(request, signal));
+  const sharedSignal = coalescedReads.has(request.method) ? new AbortController().signal : signal;
+  const operation = async () => await method.apply(service, invocationArgs(request, sharedSignal));
+  if (RESEARCH_BROKER_CONTROL_METHODS.has(request.method)) return await operation();
   if (RESEARCH_BROKER_READ_METHODS.has(request.method)) {
     const key = coalescedReads.has(request.method)
       ? `${request.method}\0${JSON.stringify(request.args)}`
       : request.id;
     const existing = readInflight.get(key);
-    if (existing) return await existing;
+    if (existing) {
+      coalescedReadHits++;
+      return await existing;
+    }
     const current = (async () => {
       if (activeReads >= config.readConcurrency) {
         await new Promise<void>((resolveSlot) => readWaiters.push(resolveSlot));
@@ -184,7 +233,17 @@ async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unkn
       if (readInflight.get(key) === current) readInflight.delete(key);
     }
   }
-  const current = writeTail.then(operation, operation);
+  queuedWrites++;
+  const writeOperation = async () => {
+    queuedWrites--;
+    activeWrites++;
+    try {
+      return await operation();
+    } finally {
+      activeWrites--;
+    }
+  };
+  const current = writeTail.then(writeOperation, writeOperation);
   writeTail = current.then(() => undefined, () => undefined);
   return await current;
 }
@@ -192,6 +251,7 @@ async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unkn
 async function handle(socket: Socket, line: string): Promise<void> {
   let request: BrokerRequest | undefined;
   let controller: AbortController | undefined;
+  let accepted = false;
   activeRequests++;
   try {
     request = JSON.parse(line) as BrokerRequest;
@@ -203,15 +263,24 @@ async function handle(socket: Socket, line: string): Promise<void> {
     }
     if (request.method === '$cancel') {
       const target = typeof request.args[0] === 'string' ? request.args[0] : '';
-      requestControllers.get(target)?.controller.abort();
+      const pending = requestControllers.get(target);
+      if (pending?.read && !pending.coalesced) pending.controller.abort();
       response(socket, { id: request.id, ok: true });
       return;
     }
     if (!RESEARCH_BROKER_METHODS.has(request.method)) throw new Error('invalid research broker request');
+    acceptedRequests++;
+    accepted = true;
     controller = new AbortController();
-    requestControllers.set(request.id, { controller, socket });
+    requestControllers.set(request.id, {
+      controller,
+      socket,
+      read: RESEARCH_BROKER_READ_METHODS.has(request.method),
+      coalesced: coalescedReads.has(request.method),
+    });
     const result = await invoke(request, controller.signal);
     response(socket, { id: request.id, ok: true, result, status: service.status() });
+    if (request.method === 'requestDrain') setTimeout(() => void stop(), 25).unref();
   } catch (error) {
     response(socket, {
       id: request?.id ?? '',
@@ -221,15 +290,31 @@ async function handle(socket: Socket, line: string): Promise<void> {
     });
   } finally {
     if (request?.id && controller) requestControllers.delete(request.id);
+    if (accepted) completedRequests++;
+    if (accepted && request?.method !== 'passiveStatus') {
+      lastCompletedWorkAt = new Date().toISOString();
+    }
     activeRequests--;
     scheduleIdle();
   }
 }
 
 function scheduleIdle(): void {
-  if (clients.size || activeRequests || stopping) return;
+  if (activeRequests || activeReads || activeWrites || queuedWrites || readWaiters.length || stopping) return;
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => void stop(), config.idleMs);
+  const underPressure = Boolean(
+    config.workerSoftMemoryBytes && process.memoryUsage().rss >= config.workerSoftMemoryBytes
+  );
+  idleTimer = setTimeout(() => {
+    const status = service.status();
+    if (activeRequests || activeReads || activeWrites || queuedWrites || readWaiters.length
+      || status.background_jobs || status.repository_jobs || status.scheduled_graph_jobs) {
+      scheduleIdle();
+      return;
+    }
+    void stop();
+  }, underPressure ? 100 : config.idleMs);
+  idleTimer.unref();
 }
 
 async function stop(): Promise<void> {
@@ -245,7 +330,7 @@ async function stop(): Promise<void> {
 
 const server = createServer((socket) => {
   clients.add(socket);
-  clearTimeout(idleTimer);
+  scheduleIdle();
   let buffer = '';
   socket.setNoDelay(true);
   socket.on('data', (chunk: Buffer) => {
@@ -264,7 +349,7 @@ const server = createServer((socket) => {
   });
   socket.on('close', () => {
     for (const pending of requestControllers.values()) {
-      if (pending.socket === socket) pending.controller.abort();
+      if (pending.socket === socket && pending.read && !pending.coalesced) pending.controller.abort();
     }
     clients.delete(socket);
     scheduleIdle();
