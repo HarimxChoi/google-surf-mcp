@@ -101,6 +101,28 @@ describe('research broker', () => {
     expect(owner.pid).toBeGreaterThan(0);
   }, 30_000);
 
+  it('reclaims its read slot after a real native query outlives the partial response', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-native-deadline-'));
+    const service = createSharedResearchService({ enabled: true, root, vectorModel: '' }, {
+      idleMs: 100, readConcurrency: 1,
+      processPath: resolve('test/fixtures/research-delayed-broker.mjs'),
+    });
+    services.push(service);
+    await service.createProject('Native deadline', 'native-deadline');
+    const result = await service.searchBatch('native-deadline', 'native-deadline-fixture', [], 5, [], undefined,
+      { retrieval_lanes: ['exact', 'bm25'] }, false, false, 'native-timeout', 1_000);
+    expect(result).toMatchObject({ partial: true, completed_lanes: ['bm25'], degraded_lanes: ['exact'] });
+    const status = await service.passiveStatus();
+    expect(status.broker).toMatchObject({ active_reads: 1 });
+    expect(status.background_jobs).toBeGreaterThan(0);
+    const next = await service.searchBatch('native-deadline', 'next-query', [], 5, [], undefined,
+      { retrieval_lanes: ['exact'] }, false, false, 'after-native');
+    expect(next).toMatchObject({ partial: false, completed_lanes: ['exact'] });
+    const drained = await service.passiveStatus();
+    expect(drained.broker).toMatchObject({ active_reads: 0 });
+    expect(drained.background_jobs).toBe(0);
+  }, 20_000);
+
   it('keeps a coalesced search alive when one subscriber cancels', async () => {
     root = await mkdtemp(resolve(tmpdir(), 'surf-broker-coalesce-'));
     const options = { enabled: true, root, vectorModel: '' };

@@ -109,6 +109,8 @@ export type ErrorCode =
   | 'CAPTCHA_RECOVER_FAIL'
   | 'BLOCKED_BY_GOOGLE'
   | 'NAV_TIMEOUT'
+  | 'QUERY_TIMEOUT'
+  | 'QUERY_CANCELLED'
   | 'EXTRACT_FAILED'
   | 'PRIVATE_ADDRESS'
   | 'PROFILE_MISSING'
@@ -124,6 +126,9 @@ export interface ErrorInfo {
   retryable: boolean;
   retry_after_ms?: number;
   user_action?: string;
+  request_id?: string;
+  phase?: string;
+  cancel_reason?: string;
 }
 
 export interface CallToolMeta {

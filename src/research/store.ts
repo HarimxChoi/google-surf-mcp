@@ -1533,7 +1533,8 @@ export class ResearchStore {
 
   async markGraphDirty(projectId: string, marker: string): Promise<void> {
     const db = await this.open();
-    await db.update(new RecordId('project', projectId)).merge({ graph_dirty_at: marker });
+    await db.update(new RecordId('project', projectId)).merge({ graph_dirty_at: marker })
+      .retry({ attempts: 5, retryable: isTransactionConflict });
   }
 
   async currentGraph(projectId: string): Promise<{ projection_id?: string; current: boolean }> {

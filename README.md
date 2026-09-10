@@ -139,7 +139,7 @@ Google Surf can install an opt-in [Codex hook](https://developers.openai.com/cod
 npx -y google-surf-mcp@latest hooks install --host codex
 ```
 
-Restart Codex, then open `/hooks` to review and trust the definitions. Shell output larger than 6,000 characters is reranked and capped per result, without a cumulative per-turn command or output limit. Two identical or near-duplicate searches and explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
+Restart Codex, then open `/hooks` to review and trust the definitions. Shell output is reranked from 2,000 characters, with a default 2,000-character display budget that expands up to 6,000 for distinct query-matching evidence blocks. An explicit override may exceed 6,000; there is no cumulative per-turn output limit. Two identical or near-duplicate searches and explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -362,6 +362,8 @@ Graphology builds a typed graph projection from SurrealDB and computes PageRank,
 
 Local multi-query retrieval batches query embeddings, keeps exact, BM25, and vector lanes independent through RRF, expands the graph once, hydrates selected chunks once, and reranks once. Graph-only all-project searches use a lightweight memory-node index and verified identity aliases to select at most four graph scopes instead of constructing every project graph at query time.
 
+If query embedding fails or returns no vector, local search returns its lexical/graph ranking without retrying the model in reranking. Timing fields are non-overlapping wall-clock partitions: `embedding_ms` plus `retrieval_ms` reaches the end of retrieval, and `rerank_ms` covers the remaining response work. Retrieval may overlap embedding, so `retrieval_ms` is not standalone database execution time. A supplied `response_deadline_ms` starts after broker admission; the transport watchdog retains its five-minute queue/IPC allowance in addition to that deadline. Native queries that outlive a partial response retain their broker read slot until they settle.
+
 #### Research retrieval check
 
 The 60-query regression fixture compares the lexical baseline with the complete local RAG path. To separate retrieval changes from HNSW approximation, the check pins one embedding thread and uses exhaustive vector scoring. The table reports the median of three fresh-process runs:
@@ -508,6 +510,8 @@ npx google-surf-mcp daemon drain --json
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | timeout per embedded SurrealDB query, clamped to 1-600 seconds; a timed-out retrieval lane is reported as partial while other lanes still return |
 | `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | byte budget for in-process graph projections and analysis artifacts |
 | `SURF_RESEARCH_WORKER_SOFT_MEMORY_MB` | `2048` | RSS threshold that requests an immediate idle drain after active work completes |
+| `SURF_RERANK_TRIGGER_CHARS` | `2000` | shell-output interception threshold (inclusive); sensitive output is sanitized even below this threshold |
+| `SURF_RERANK_MAX_CHARS` | adaptive: 2000–6000 | optional explicit shell-summary limit, including values above 6000; default expansion uses distinct query-matching blocks, not repeated output volume |
 | `GITHUB_TOKEN` | unset | optional GitHub token that raises API limits for repository inspection |
 | `SURF_RESEARCH_CODE_WORKERS` | auto, max 4 | Tree-sitter worker count for initial code structure indexing |
 | `SURF_LOCALE` | `en-US` | browser locale |

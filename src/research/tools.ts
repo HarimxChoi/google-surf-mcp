@@ -1,5 +1,7 @@
 import type { CallToolResult } from '../response.js';
-import { formatToolResponse } from '../response.js';
+import { formatToolResponse, toErrorInfo } from '../response.js';
+import { ResearchQueryInterrupted } from './queryControl.js';
+import { adaptiveResponseBudget } from '../responseBudget.js';
 import { compactRankedResults } from './integration.js';
 import type {
   ArtifactReference, AssertionValue, CatalogAccessTier, CatalogAssetKind, CatalogWriteOperation,
@@ -135,6 +137,9 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
 }
 
 function toolError(error: unknown): CallToolResult {
+  if (error instanceof ResearchQueryInterrupted || (error instanceof Error && error.message === 'research search cancelled')) {
+    return formatToolResponse(null, toErrorInfo(error, { cloudMode: false }));
+  }
   return formatToolResponse(null, {
     code: 'INTERNAL',
     message: error instanceof Error ? error.message : String(error),
@@ -160,22 +165,30 @@ function budgetRankedResults<T extends { description?: string }>(
   budgetBytes: number,
 ): { rows: T[]; bytes: number; omitted: number; truncated: boolean } {
   const selected: T[] = [];
+  let truncated = false;
   for (const source of rows) {
     let row = { ...source };
-    const baseBytes = Buffer.byteLength(JSON.stringify({ ...row, description: undefined }), 'utf8') + 2;
-    const used = Buffer.byteLength(JSON.stringify(selected), 'utf8');
-    const available = budgetBytes - used - baseBytes;
-    if (available <= 0) continue;
-    if (row.description) row = { ...row, description: utf8Prefix(row.description, available) };
-    if (Buffer.byteLength(JSON.stringify([...selected, row]), 'utf8') <= budgetBytes) selected.push(row);
+    const fits = (candidate: T) => Buffer.byteLength(JSON.stringify([...selected, candidate]), 'utf8') <= budgetBytes;
+    if (!fits(row) && row.description) {
+      let low = 0;
+      let high = Math.min(Buffer.byteLength(row.description, 'utf8'), budgetBytes);
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (fits({ ...source, description: utf8Prefix(source.description!, middle) })) low = middle;
+        else high = middle - 1;
+      }
+      row = { ...source, description: utf8Prefix(source.description!, low) };
+    }
+    if (fits(row)) selected.push(row);
+    else truncated = true;
+    if (row.description !== source.description) truncated = true;
   }
   const bytes = Buffer.byteLength(JSON.stringify(selected), 'utf8');
   return {
     rows: selected,
     bytes,
     omitted: rows.length - selected.length,
-    truncated: selected.length < rows.length
-      || selected.some((row, index) => row.description !== rows[index]?.description),
+    truncated,
   };
 }
 
@@ -209,7 +222,11 @@ export async function projectMemorySearchTool(
         throw new Error('request_id and response_deadline_ms apply to one query; use separate IDs for grouped queries');
       }
       const groups = await service.searchGrouped(scope[0], input.queries, scope.slice(1), signal, input.filters);
-      const resultBudget = input.response_budget_bytes ?? 12_000;
+      const resultBudget = input.response_budget_bytes ?? adaptiveResponseBudget(
+        new Set(groups.flatMap((group) => group.results.map((hit) => hit.url || hit.document_id))).size,
+        groups.length,
+        new Set(groups.flatMap((group) => group.results.map((hit) => hit.source_family))).size,
+      );
       const groupBudget = Math.max(1, Math.floor(resultBudget / groups.length));
       const compactGroups = groups.map((group) => {
         const compact = compactRankedResults(group.query, group.results.map((hit) => ({
@@ -253,6 +270,7 @@ export async function projectMemorySearchTool(
           query_count: compactGroups.length,
           query_execution: 'single_broker_request',
           response_budget_bytes: resultBudget,
+          response_budget_policy: input.response_budget_bytes === undefined ? 'adaptive_evidence_breadth' : 'caller',
           response_result_bytes: compactGroups.reduce((sum, group) => sum + group.result_bytes, 0),
           omitted_results: compactGroups.reduce((sum, group) => sum + group.omitted_results, 0),
           live_web_used: false,
@@ -292,7 +310,10 @@ export async function projectMemorySearchTool(
         ?? (hit.retrieval_family ? [hit.retrieval_family] : []),
       score: hit.score,
     })));
-    const resultBudget = input.response_budget_bytes ?? 12_000;
+    const resultBudget = input.response_budget_bytes ?? adaptiveResponseBudget(
+      new Set(hits.map((hit) => hit.url || hit.document_id)).size, 1,
+      new Set(hits.map((hit) => hit.source_family)).size,
+    );
     const budgeted = budgetRankedResults(compact, resultBudget);
     const results = budgeted.rows;
     const vectorEnabled = service.status().vector === 'on';
@@ -303,11 +324,12 @@ export async function projectMemorySearchTool(
       meta: {
         provider: 'local',
         project_ids: scope,
-        retrieval_lanes: ['exact', 'bm25', ...(vectorEnabled ? ['vector'] : []), 'graph'],
+        retrieval_lanes: input.filters?.retrieval_lanes ?? ['exact', 'bm25', ...(vectorEnabled ? ['vector'] : []), 'graph'],
         fusion: 'rrf',
-        reranker: searched.partial ? 'not_completed' : vectorEnabled ? 'local_vector' : 'rrf_only',
+        reranker: searched.reranker,
         response_format: 'ranked_summaries',
         response_budget_bytes: resultBudget,
+        response_budget_policy: input.response_budget_bytes === undefined ? 'adaptive_evidence_breadth' : 'caller',
         response_result_bytes: budgeted.bytes,
         omitted_results: budgeted.omitted,
         truncated: budgeted.truncated,

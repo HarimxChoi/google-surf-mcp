@@ -1,3 +1,5 @@
+import { adaptiveOutputBudget } from './responseBudget.js';
+
 type OutputBlock = {
   index: number;
   text: string;
@@ -21,13 +23,13 @@ export interface RerankedOutput {
     retrieval_lanes: ['source_order', 'exact', 'bm25'];
     fusion: 'rrf';
     stored: false;
+    response_budget_chars: number;
+    response_budget_policy: 'adaptive_evidence_breadth' | 'caller';
   };
 }
 
 const RRF_K = 20;
 const BLOCK_CHARS = 3_000;
-const DEFAULT_MAX_CHARS = 6_000;
-const DEFAULT_MAX_BLOCKS = 8;
 const QUERY_STOPWORDS = new Set([
   'batchmode', 'cat', 'command', 'connecttimeout', 'content', 'convertfrom-json',
   'find', 'format', 'get-childitem', 'get-content', 'head', 'json', 'literalpath',
@@ -167,19 +169,23 @@ function exactScores(query: string, blocks: OutputBlock[]): number[] {
 function bm25Scores(query: string, blocks: OutputBlock[]): number[] {
   const selectedTerms = queryTerms(query);
   if (!selectedTerms.length || !blocks.length) return blocks.map(() => 0);
-  const documents = blocks.map((block) => terms(block.text));
+  const vocabulary = new Set(selectedTerms);
+  const documentFrequency = new Map(selectedTerms.map((term) => [term, 0]));
+  const documents = blocks.map((block) => {
+    const tokens = terms(block.text);
+    const frequencies = new Map<string, number>();
+    for (const token of tokens) {
+      if (vocabulary.has(token)) frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+    }
+    for (const term of frequencies.keys()) documentFrequency.set(term, documentFrequency.get(term)! + 1);
+    return { length: tokens.length, frequencies };
+  });
   const averageLength = documents.reduce((sum, document) => sum + document.length, 0)
     / Math.max(documents.length, 1);
-  const documentFrequency = new Map(selectedTerms.map((term) => [
-    term,
-    documents.filter((document) => document.includes(term)).length,
-  ]));
   return documents.map((document) => {
-    const frequencies = new Map<string, number>();
-    for (const term of document) frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
     let score = 0;
     for (const term of selectedTerms) {
-      const frequency = frequencies.get(term) ?? 0;
+      const frequency = document.frequencies.get(term) ?? 0;
       if (!frequency) continue;
       const df = documentFrequency.get(term) ?? 0;
       const idf = Math.log(1 + (documents.length - df + 0.5) / (df + 0.5));
@@ -225,8 +231,11 @@ export function rerankOutput(
       + (exactRank.has(index) ? 1 / (RRF_K + exactRank.get(index)!) : 0)
       + (bm25Rank.has(index) ? 1 / (RRF_K + bm25Rank.get(index)!) : 0),
   })).sort((a, b) => b.score - a.score || a.block.index - b.block.index);
-  const maxChars = Math.min(Math.max(options.max_chars ?? DEFAULT_MAX_CHARS, 500), 12_000);
-  const maxBlocks = Math.min(Math.max(options.max_blocks ?? DEFAULT_MAX_BLOCKS, 1), 20);
+  const explicitBudget = Number.isFinite(options.max_chars) && options.max_chars! > 0;
+  const evidenceBlocks = new Set([...exactRank.keys(), ...bm25Rank.keys()]).size;
+  const maxChars = explicitBudget ? Math.floor(options.max_chars!) : adaptiveOutputBudget(evidenceBlocks);
+  const maxBlocks = Number.isFinite(options.max_blocks) && options.max_blocks! > 0
+    ? Math.floor(options.max_blocks!) : Math.max(8, Math.ceil(maxChars / 1_000));
   const selected: RankedOutputBlock[] = [];
   let returnedChars = 0;
   for (const entry of ordered) {
@@ -245,7 +254,11 @@ export function rerankOutput(
     total_blocks: blocks.length,
     returned_blocks: selected.length,
     truncated: returnedChars < text.length || selected.length < blocks.length,
-    meta: { retrieval_lanes: ['source_order', 'exact', 'bm25'], fusion: 'rrf', stored: false },
+    meta: {
+      retrieval_lanes: ['source_order', 'exact', 'bm25'], fusion: 'rrf', stored: false,
+      response_budget_chars: maxChars,
+      response_budget_policy: explicitBudget ? 'caller' : 'adaptive_evidence_breadth',
+    },
   };
 }
 

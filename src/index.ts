@@ -617,6 +617,9 @@ const ErrorInfoShape = z.object({
   retryable: z.boolean(),
   retry_after_ms: z.number().optional(),
   user_action: z.string().optional(),
+  request_id: z.string().optional(),
+  phase: z.string().optional(),
+  cancel_reason: z.string().optional(),
 });
 const MetaShape = z.record(z.string(), z.unknown());
 const ResearchContextShape = z.object({
@@ -785,9 +788,9 @@ const ProjectMemorySearchSchema = {
     query_variants: z.array(z.string().min(1).max(400)).max(19).optional(),
     limit: z.number().int().min(1).max(20).optional(),
   })).min(1).max(20).optional().describe('Independent questions returned as separate ranked groups inside one broker request.'),
-  response_budget_bytes: z.number().int().min(1_000).max(1_000_000).optional().describe('Maximum requested response budget. Retrieval work and stored bodies remain separate.'),
+  response_budget_bytes: z.number().int().min(1_000).max(1_000_000).optional().describe('Explicit result-array byte budget. Without an override, summaries adapt to unique result, question and source-family counts. Stored bodies and retrieval scope are not truncated by this budget; envelope metadata is separate.'),
   request_id: z.string().min(1).max(200).optional().describe('Caller-chosen ID for one local query. Supply it before a long request so project_memory query_status/query_cancel can inspect or cancel the same operation.'),
-  response_deadline_ms: z.number().int().min(1_000).max(300_000).optional().describe('Cooperative 1-300 second response deadline for one local query. Completed writes are unaffected; native work stops at the next cancellation boundary.'),
+  response_deadline_ms: z.number().int().min(1_000).max(300_000).optional().describe('Caller-selected 1-300 second response deadline. Returns available lane results or QUERY_TIMEOUT with request_id. Native reads remain tracked until they settle; stored evidence and writes are unaffected.'),
   filters: z.object({
     source_families: z.array(z.enum(['document', 'code', 'graph'])).max(3).optional(),
     retrieval_lanes: z.array(z.enum(['exact', 'bm25', 'vector', 'graph'])).max(4).optional(),

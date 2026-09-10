@@ -231,7 +231,9 @@ describe('vector retrieval', () => {
       await service.createProject('Expanded pool', 'expanded-pool');
       const shared = Array.from({ length: 8 }, (_, index) => `Shared ${index}`);
       const expanded = Array.from({ length: 10 }, (_, index) => `Expanded ${index}`);
-      vi.spyOn(service, 'searchFamilies').mockResolvedValue({
+      vi.spyOn(service, 'searchFamilies').mockImplementation(async (...args) => {
+        await args[4];
+        return {
         exact: [
           hit('Bounded semantic target', 'exact'),
           ...Array.from({ length: 19 }, (_, index) => hit(`Exact ${index}`, 'exact')),
@@ -250,6 +252,7 @@ describe('vector retrieval', () => {
         ],
         graph: [],
         degraded_lanes: [],
+        };
       });
 
       const baseline = await service.searchHybridBaseline(

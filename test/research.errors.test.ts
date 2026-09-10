@@ -3,6 +3,17 @@ import { isRetryableTransactionError, isTransactionConflict } from '../src/resea
 import { ResearchStore } from '../src/research/store.js';
 
 describe('research transaction errors', () => {
+  it('uses bounded conflict-only retries for graph invalidation', async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const merge = vi.fn().mockReturnValue({ retry });
+    const store = new ResearchStore('unused');
+    vi.spyOn(store, 'open').mockResolvedValue({ update: () => ({ merge }) } as never);
+    await store.markGraphDirty('project', 'stable-marker');
+    expect(merge).toHaveBeenCalledWith({ graph_dirty_at: 'stable-marker' });
+    expect(retry).toHaveBeenCalledWith({ attempts: 5, retryable: isTransactionConflict });
+    expect(isTransactionConflict(new Error('permission denied'))).toBe(false);
+  });
+
   it('recognizes retryable embedded database conflicts', () => {
     expect(isTransactionConflict(new Error(
       'Transaction conflict: Resource busy: . This transaction can be retried',

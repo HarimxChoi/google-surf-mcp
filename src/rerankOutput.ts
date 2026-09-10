@@ -46,19 +46,20 @@ export async function processOutputHook(
   if (!raw) return undefined;
   const safe = sanitizeOutputText(raw);
   const triggerChars = options.trigger_chars
-    ?? positiveInteger(process.env.SURF_RERANK_TRIGGER_CHARS, 6_000);
-  const maxChars = options.max_chars
-    ?? positiveInteger(process.env.SURF_RERANK_MAX_CHARS, 6_000);
-  if (safe === raw && raw.length <= triggerChars) return undefined;
+    ?? positiveInteger(process.env.SURF_RERANK_TRIGGER_CHARS, 2_000);
+  const configuredMax = options.max_chars ?? positiveInteger(process.env.SURF_RERANK_MAX_CHARS, 0);
+  const maxChars = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.floor(configuredMax) : undefined;
+  if (safe === raw && raw.length < triggerChars) return undefined;
 
+  const ranked = rerankOutput(commandFrom(input), safe, { max_chars: maxChars });
+  const result = input.tool_response && typeof input.tool_response === 'object'
+    ? input.tool_response as Record<string, unknown> : {};
+  const exitCode = typeof result.exit_code === 'number' && Number.isFinite(result.exit_code)
+    ? ` Exit code: ${result.exit_code}.` : '';
   const replacement = safe !== raw && safe.length <= triggerChars
-    ? `[Google Surf output guard] Sensitive values and control sequences were removed. Source output was not stored.\n${safe}`
-    : `[Google Surf output guard]\n${formatRerankedOutput(rerankOutput(
-      commandFrom(input),
-      safe,
-      { max_chars: maxChars },
-    ))}`;
-  return { decision: 'block', reason: replacement.slice(0, maxChars) };
+    ? `[Google Surf output guard]${exitCode} Sensitive values and control sequences were removed. Source output was not stored.\n${safe}`
+    : `[Google Surf output guard]${exitCode}\n${formatRerankedOutput(ranked)}`;
+  return { decision: 'block', reason: replacement.slice(0, maxChars ?? ranked.meta.response_budget_chars) };
 }
 
 async function main(): Promise<void> {

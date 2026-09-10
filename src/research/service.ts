@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createReadStream } from 'node:fs';
 import { createRequire } from 'node:module';
 import { mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
@@ -37,6 +38,7 @@ import {
   type ProjectPathChange, type ProjectRootInput,
 } from './projectInventory.js';
 import { ResearchStore, type CodeSourceManifestEntry } from './store.js';
+import { queryResponseDeadlineMs, ResearchQueryInterrupted, waitForQuery } from './queryControl.js';
 import {
   exportGraphVisualization, exportNeo4jVisualization,
   type GraphVisualizationFormat, type GraphVisualizationView,
@@ -326,7 +328,7 @@ function cleanText(value: string, name: string, max: number): string {
 }
 
 function ensureNotAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error('research search cancelled');
+  if (signal?.aborted) throw new ResearchQueryInterrupted();
 }
 
 function cleanTime(value: string | undefined, name: string): string | undefined {
@@ -799,6 +801,8 @@ export class ResearchService {
   private readonly graphArtifacts = new Map<string, GraphArtifact>();
   private graphCacheBytes = 0;
   private readonly backgroundJobs = new Set<Promise<unknown>>();
+  private readonly searchReads = new Map<string, Promise<unknown>>();
+  private readonly searchReadLease = new AsyncLocalStorage<{ closed: boolean; reads: Set<Promise<unknown>> }>();
   private readonly scheduledJobIds = new Set<string>();
   private readonly graphTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly embeddings: EmbeddingProvider;
@@ -1061,6 +1065,44 @@ export class ResearchService {
       () => this.backgroundJobs.delete(job),
       () => this.backgroundJobs.delete(job),
     );
+  }
+
+  private async searchRead<T>(key: unknown[], operation: () => Promise<T>, signal?: AbortSignal, coalesce = true): Promise<T> {
+    ensureNotAborted(signal);
+    const lease = this.searchReadLease.getStore();
+    if (lease?.closed) throw new ResearchQueryInterrupted();
+    const id = coalesce ? createHash('sha256').update(JSON.stringify(key)).digest('hex') : randomUUID();
+    let work = this.searchReads.get(id) as Promise<T> | undefined;
+    if (!work) {
+      work = Promise.resolve().then(operation);
+      this.searchReads.set(id, work);
+      // A returned partial response must not release ownership of native reads.
+      this.backgroundJobs.add(work);
+      const cleanup = () => {
+        this.searchReads.delete(id);
+        this.backgroundJobs.delete(work!);
+      };
+      void work.then(cleanup, cleanup);
+    }
+    if (lease) {
+      lease.reads.add(work);
+      const settled = () => { lease.reads.delete(work!); };
+      void work.then(settled, settled);
+    }
+    return await waitForQuery(work, signal);
+  }
+
+  async withSearchReadLease<T>(operation: () => Promise<T>, release: () => void): Promise<T> {
+    const lease = { closed: false, reads: new Set<Promise<unknown>>() };
+    return await this.searchReadLease.run(lease, async () => {
+      try {
+        return await operation();
+      } finally {
+        lease.closed = true;
+        // Return the response promptly but retain the broker slot for native work.
+        void Promise.allSettled([...lease.reads]).then(release);
+      }
+    });
   }
 
   private async checkpointKnowledgeJobForDrain(
@@ -4411,55 +4453,78 @@ export class ResearchService {
     query: string,
     limit: number,
     includeProjectIds: string[] = [],
-    preparedQueryVector?: number[],
+    preparedQueryVector?: number[] | Promise<number[] | undefined>,
     includeGraph = true,
     signal?: AbortSignal,
     filters?: ResearchSearchFilters,
+    onLane?: (lane: RetrievalLane, rows: LocalSearchHit[], complete: boolean, degraded: boolean) => void,
   ): Promise<LocalSearchFamilies> {
     ensureNotAborted(signal);
     const degradedLanes = new Set<RetrievalLane>();
     const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
-    const projects = await Promise.all(projectIds.map((projectId) => this.ensureProject(projectId)));
+    const projects = await Promise.all(projectIds.map((projectId) => this.searchRead(
+      ['project', projectId], () => this.ensureProject(projectId), signal, false,
+    )));
     const cleanedQuery = cleanText(query, 'query', 400);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const lanes = new Set(filters?.retrieval_lanes ?? ['exact', 'bm25', 'vector', 'graph']);
-    const [exactGroups, bm25Groups, queryVector] = await Promise.all([
-      lanes.has('exact') ? mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
-        'exact',
-        degradedLanes,
-        async () => await this.store.searchProjectExact(
-          project.project_id,
-          normalizeEntityName(cleanedQuery),
-          cappedLimit,
-        ),
-      )) : Promise.resolve(projects.map(() => [] as LocalSearchHit[])),
-      lanes.has('bm25') ? mapConcurrent(projects, 1, async (project) => await runRetrievalLane(
-        'bm25',
-        degradedLanes,
-        async () => await this.store.searchProjectBm25(project.project_id, cleanedQuery, cappedLimit),
-      )) : Promise.resolve(projects.map(() => [] as LocalSearchHit[])),
-      lanes.has('vector') && preparedQueryVector
-        ? Promise.resolve(preparedQueryVector)
-        : lanes.has('vector') && this.embeddings.enabled()
-        ? this.embeddings.embedQuery(cleanedQuery).catch(() => undefined)
-        : Promise.resolve(undefined),
+    const collect = async (
+      lane: RetrievalLane,
+      operation: (project: ProjectRecord) => Promise<LocalSearchHit[]>,
+      context?: unknown,
+    ): Promise<LocalSearchHit[][]> => {
+      const groups: LocalSearchHit[][] = [];
+      for (const project of projects) {
+        ensureNotAborted(signal);
+        groups.push(await runRetrievalLane(lane, degradedLanes, async () => {
+          try {
+            return await this.searchRead(
+              [lane, project, cleanedQuery, cappedLimit, context], () => operation(project), signal,
+            );
+          } catch (error) {
+            ensureNotAborted(signal);
+            if (lane !== 'vector') throw error;
+            degradedLanes.add(lane);
+            return [];
+          }
+        }));
+        ensureNotAborted(signal);
+        onLane?.(lane, filterSearchHits(fuseRankedGroups(groups, cappedLimit, lane), filters),
+          groups.length === projects.length, degradedLanes.has(lane));
+      }
+      return groups;
+    };
+    const vector = async (): Promise<LocalSearchHit[][]> => {
+      if (!lanes.has('vector') || !this.embeddings.enabled()) return [];
+      const model = this.embeddings.modelId();
+      let queryVector: number[] | undefined;
+      try {
+        queryVector = preparedQueryVector
+          ? await waitForQuery(Promise.resolve(preparedQueryVector), signal)
+          : await this.searchRead(['embedding', cleanedQuery], () => this.embeddings.embedQuery(cleanedQuery), signal);
+      } catch (error) {
+        ensureNotAborted(signal);
+        degradedLanes.add('vector');
+      }
+      ensureNotAborted(signal);
+      if (!queryVector || !model) {
+        degradedLanes.add('vector');
+        onLane?.('vector', [], true, true);
+        return [];
+      }
+      return await collect('vector', (project) => this.store.searchProjectVector(
+        project.project_id, model, queryVector, cappedLimit,
+      ), [model, queryVector]);
+    };
+    const [exactGroups, bm25Groups, vectorGroups] = await Promise.all([
+      lanes.has('exact') ? collect('exact', (project) => this.store.searchProjectExact(
+        project.project_id, normalizeEntityName(cleanedQuery), cappedLimit,
+      )) : Promise.resolve([]),
+      lanes.has('bm25') ? collect('bm25', (project) => this.store.searchProjectBm25(
+        project.project_id, cleanedQuery, cappedLimit,
+      )) : Promise.resolve([]),
+      vector(),
     ]);
-    const model = this.embeddings.modelId();
-    const vectorGroups = queryVector && model
-      ? await mapConcurrent(projects, 1, async (project) => {
-        try {
-          return await this.store.searchProjectVector(
-            project.project_id,
-            model,
-            queryVector,
-            cappedLimit,
-          );
-        } catch {
-          degradedLanes.add('vector');
-          return [];
-        }
-      })
-      : [];
     ensureNotAborted(signal);
     const seedGroups = projects.map((_project, index) => fuseRankedGroups([
       exactGroups[index] ?? [],
@@ -4470,22 +4535,16 @@ export class ResearchService {
       ? [await runRetrievalLane(
         'graph',
         degradedLanes,
-        async () => await this.searchCombinedGraph(
-          projects,
-          cleanedQuery,
-          cappedLimit,
-          seedGroups.flat(),
-        ),
+        async () => await this.searchRead(['graph', projects, cleanedQuery, cappedLimit,
+          seedGroups.map((group) => group.map((hit) => [hit.document_id, hit.url]))],
+          () => this.searchCombinedGraph(projects, cleanedQuery, cappedLimit, seedGroups.flat()), signal),
       )]
       : await mapConcurrent(projects, 1, async (project, index) => await runRetrievalLane(
         'graph',
         degradedLanes,
-        async () => await this.searchMaterializedGraph(
-          project,
-          cleanedQuery,
-          cappedLimit,
-          seedGroups[index],
-        ),
+        async () => await this.searchRead(['graph', project, cleanedQuery, cappedLimit,
+          seedGroups[index].map((hit) => [hit.document_id, hit.url])],
+          () => this.searchMaterializedGraph(project, cleanedQuery, cappedLimit, seedGroups[index]), signal),
       ));
     ensureNotAborted(signal);
     return {
@@ -4533,6 +4592,7 @@ export class ResearchService {
     queries: string[];
     results: LocalSearchHit[];
     pre_rerank_results?: LocalSearchHit[];
+    reranker: 'rrf_only' | 'local_vector' | 'not_completed';
     partial: boolean;
     completed_lanes: RetrievalLane[];
     incomplete_reason?: string;
@@ -4548,20 +4608,43 @@ export class ResearchService {
     const candidateLimit = Math.min(40, cappedLimit * 3);
     const queries = tuneLocalQueries(query, queryVariants);
     const candidateCounts = { exact: 0, bm25: 0, vector: 0, graph: 0, fused: 0 };
+    const lanes = new Set<RetrievalLane>(filters?.retrieval_lanes ?? ['exact', 'bm25', 'vector', 'graph']);
+    const baseLanes = [...lanes].filter((lane) => lane !== 'graph'
+      && (lane !== 'vector' || this.embeddings.enabled()));
+    const laneRows = queries.map(() => new Map<RetrievalLane, LocalSearchHit[]>());
+    const finishedLanes = queries.map(() => new Set<RetrievalLane>());
     let partialResults: LocalSearchHit[] = [];
     let graphProjectCount = 0;
     let embeddingFinishedAt = started;
+    let embeddingPending = false;
     let retrievalFinishedAt = started;
+    let retrievalComplete = false;
+    let reranker: 'rrf_only' | 'local_vector' = 'rrf_only';
+    const queryTimings = (stopped: number) => {
+      const retrievalEnd = retrievalComplete ? retrievalFinishedAt : stopped;
+      const embeddingEnd = Math.min(embeddingPending ? retrievalEnd : embeddingFinishedAt, retrievalEnd);
+      // Non-overlapping wall-clock partitions; retrieval can run during embedding.
+      return {
+        embedding_ms: embeddingEnd - started,
+        retrieval_ms: retrievalEnd - embeddingEnd,
+        rerank_ms: stopped - retrievalEnd,
+      };
+    };
     const existingState = this.queryStates.get(requestId);
     if (existingState?.status === 'running' || existingState?.status === 'cancel_requested') {
       throw new Error(`query request_id already active: ${requestId}`);
     }
     const controller = new AbortController();
-    const cancelFromCaller = () => controller.abort();
+    const cancelFromCaller = () => {
+      const state = this.queryStates.get(requestId);
+      if (state?.status === 'running') this.setQueryState({
+        ...state, status: 'cancel_requested', cancel_reason: 'caller_cancelled', updated_at: new Date().toISOString(),
+      });
+      controller.abort();
+    };
     signal?.addEventListener('abort', cancelFromCaller, { once: true });
     if (signal?.aborted) controller.abort();
-    const deadlineMs = responseDeadlineMs === undefined
-      ? undefined : Math.min(Math.max(responseDeadlineMs, 1_000), 300_000);
+    const deadlineMs = queryResponseDeadlineMs(responseDeadlineMs);
     const deadlineTimer = deadlineMs === undefined ? undefined : setTimeout(() => {
       const state = this.queryStates.get(requestId);
       if (state?.status === 'running') {
@@ -4583,43 +4666,65 @@ export class ResearchService {
       project_ids: projectIds,
       query_hash: createHash('sha256').update(query).digest('hex'),
       status: 'running',
-      phase: 'embedding',
+      phase: 'retrieval',
       completed_lanes: [],
       degraded_lanes: [],
       started_at: startedAt,
       updated_at: startedAt,
       ...(deadlineMs !== undefined ? { deadline_ms: deadlineMs } : {}),
     });
+    const publishLane = (index: number, lane: RetrievalLane, rows: LocalSearchHit[], complete: boolean, degraded: boolean) => {
+      if (controller.signal.aborted) return;
+      laneRows[index].set(lane, rows);
+      if (complete) finishedLanes[index].add(lane);
+      if (degraded) degradedLanes.add(lane);
+      for (const family of baseLanes) {
+        candidateCounts[family] = laneRows.reduce((sum, group) => sum + (group.get(family)?.length ?? 0), 0);
+      }
+      const groups = laneRows.flatMap((group) => baseLanes.map((family) => group.get(family) ?? []));
+      const expanded = fuseRankedGroups(groups, candidateLimit);
+      partialResults = preserveBoundedCandidates(
+        fuseRankedGroups(groups.map((rows) => rows.slice(0, cappedLimit)), cappedLimit), expanded, candidateLimit,
+      ).slice(0, cappedLimit);
+      candidateCounts.fused = expanded.length;
+      this.setQueryState({
+        ...this.queryStates.get(requestId)!,
+        completed_lanes: baseLanes.filter((family) => !degradedLanes.has(family)
+          && finishedLanes.every((group) => group.has(family))),
+        degraded_lanes: [...degradedLanes].sort(), updated_at: new Date().toISOString(),
+      });
+    };
     try {
     ensureNotAborted(controller.signal);
     let vectors: Array<number[] | undefined> = queries.map(() => undefined);
-    if (this.embeddings.enabled()) {
-      try {
-        const generated = this.embeddings.embedQueries
-          ? await this.embeddings.embedQueries(queries)
-          : await Promise.all(queries.map(async (value) => await this.embeddings.embedQuery(value)));
-        vectors = generated;
-      } catch {}
-    }
-    ensureNotAborted(controller.signal);
-    const embedded = performance.now();
-    embeddingFinishedAt = embedded;
-    this.setQueryState({ ...this.queryStates.get(requestId)!, phase: 'retrieval', updated_at: new Date().toISOString() });
+    embeddingPending = lanes.has('vector') && this.embeddings.enabled();
+    const vectorWork = embeddingPending
+      ? this.searchRead(['query-embeddings', queries], async () => this.embeddings.embedQueries
+        ? await this.embeddings.embedQueries(queries)
+        : await Promise.all(queries.map((value) => this.embeddings.embedQuery(value))), controller.signal)
+        .then((generated) => { if (!controller.signal.aborted) vectors = generated; return generated; })
+        .catch(() => vectors)
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            embeddingFinishedAt = performance.now();
+            embeddingPending = false;
+          }
+        })
+      : Promise.resolve(vectors);
     const queryGroups = await mapConcurrent(queries, 2, async (value, index) => {
-      const families = await this.searchFamilies(
+      ensureNotAborted(controller.signal);
+      const families = await waitForQuery(this.searchFamilies(
         projectIdValue,
         value,
         candidateLimit,
         includeProjectIds,
-        vectors[index],
+        vectorWork.then((generated) => generated[index]),
         false,
         controller.signal,
         filters,
-      );
-      candidateCounts.exact += families.exact.length;
-      candidateCounts.bm25 += families.bm25.length;
-      candidateCounts.vector += families.vector.length;
-      for (const lane of families.degraded_lanes) degradedLanes.add(lane);
+        (lane, rows, complete, degraded) => publishLane(index, lane, rows, complete, degraded),
+      ), controller.signal);
+      for (const lane of baseLanes) publishLane(index, lane, families[lane], true, families.degraded_lanes.includes(lane));
       const groups = [families.exact, families.bm25, families.vector, families.graph];
       return {
         bounded: groups.map((rows) => rows.slice(0, cappedLimit)),
@@ -4634,45 +4739,46 @@ export class ResearchService {
       queryGroups.flatMap((group) => group.expanded),
       candidateLimit,
     );
-    partialResults = baseFused.slice(0, cappedLimit);
+    partialResults = preserveBoundedCandidates(boundedBaseFused, baseFused, candidateLimit).slice(0, cappedLimit);
     ensureNotAborted(controller.signal);
     this.setQueryState({
       ...this.queryStates.get(requestId)!,
-      phase: 'graph',
-      completed_lanes: ['exact', 'bm25', ...(vectors.some(Boolean) ? ['vector' as const] : [])],
+      phase: lanes.has('graph') ? 'graph' : 'retrieval',
       degraded_lanes: [...degradedLanes].sort(),
       updated_at: new Date().toISOString(),
     });
     let projects: ProjectRecord[] = [];
     let graph: LocalSearchHit[] = [];
-    try {
+    if (lanes.has('graph')) try {
       const seededProjects = new Set(baseFused.flatMap((row) => row.project_ids));
       if (!seededProjects.size) {
-        await this.store.ensureGraphSearchIndexes(projectIds);
-        const graphSeeds = await this.store.searchGraphSeeds(projectIds, queries, candidateLimit);
+        await this.searchRead(['graph-indexes', projectIds], () => this.store.ensureGraphSearchIndexes(projectIds), controller.signal, false);
+        const graphSeeds = await this.searchRead(['graph-seeds', projectIds, queries, candidateLimit],
+          () => this.store.searchGraphSeeds(projectIds, queries, candidateLimit), controller.signal, false);
         for (const seed of graphSeeds) {
           seededProjects.add(seed.project_id);
           if (seededProjects.size >= 4) break;
         }
         if (!seededProjects.size) {
-          for (const projectId of await this.store.searchMemorySeedProjects(projectIds, queries, 4)) {
+          for (const projectId of await this.searchRead(['memory-seeds', projectIds, queries],
+            () => this.store.searchMemorySeedProjects(projectIds, queries, 4), controller.signal, false)) {
             seededProjects.add(projectId);
           }
         }
       }
       const selectedProjects = projectIds.filter((projectId) => seededProjects.has(projectId)).slice(0, 4);
-      const linkedProjects = await this.store.linkedProjectIds(
-        selectedProjects,
-        projectIds,
-        Math.max(0, 4 - selectedProjects.length),
-      );
+      const linkedProjects = await this.searchRead(['linked-projects', selectedProjects, projectIds],
+        () => this.store.linkedProjectIds(selectedProjects, projectIds, Math.max(0, 4 - selectedProjects.length)), controller.signal, false);
       const graphProjectIds = [...selectedProjects, ...linkedProjects].slice(0, 4);
-      projects = await Promise.all(graphProjectIds.map((projectId) => this.ensureProject(projectId)));
+      projects = await Promise.all(graphProjectIds.map((projectId) => this.searchRead(
+        ['project', projectId], () => this.ensureProject(projectId), controller.signal, false,
+      )));
       graphProjectCount = projects.length;
-      graph = !projects.length || (filters?.retrieval_lanes?.length
-        && !filters.retrieval_lanes.includes('graph')) ? [] : projects.length > 1
-        ? await this.searchCombinedGraph(projects, query, candidateLimit, boundedBaseFused)
-        : await this.searchMaterializedGraph(projects[0], query, candidateLimit, boundedBaseFused);
+      graph = !projects.length ? [] : await this.searchRead(['batch-graph', projects, query, candidateLimit,
+        boundedBaseFused.map((hit) => [hit.document_id, hit.url])],
+        () => projects.length > 1
+          ? this.searchCombinedGraph(projects, query, candidateLimit, boundedBaseFused)
+          : this.searchMaterializedGraph(projects[0], query, candidateLimit, boundedBaseFused), controller.signal);
     } catch (error) {
       if (!isResearchQueryTimeout(error)) throw error;
       degradedLanes.add('graph');
@@ -4697,8 +4803,10 @@ export class ResearchService {
     partialResults = fused.slice(0, cappedLimit);
     const retrieved = performance.now();
     retrievalFinishedAt = retrieved;
+    retrievalComplete = true;
     const completedLanes: RetrievalLane[] = [
-      'exact', 'bm25', ...(vectors.some(Boolean) ? ['vector' as const] : []), 'graph',
+      ...this.queryStates.get(requestId)!.completed_lanes,
+      ...(lanes.has('graph') && !degradedLanes.has('graph') ? ['graph' as const] : []),
     ];
     this.setQueryState({
       ...this.queryStates.get(requestId)!,
@@ -4707,24 +4815,24 @@ export class ResearchService {
       degraded_lanes: [...degradedLanes].sort(),
       updated_at: new Date().toISOString(),
     });
-    const results = rerank
-      ? await this.rerankCandidates(query, fused, cappedLimit, vectors[0], controller.signal)
+    const shouldRerank = rerank && lanes.has('vector') && Boolean(vectors[0]?.length) && fused.length >= 2;
+    if (shouldRerank) reranker = 'local_vector';
+    const results = shouldRerank
+      ? await this.searchRead(['rerank'],
+        () => this.rerankCandidates(query, fused, cappedLimit, vectors[0]), controller.signal, false)
       : fused.slice(0, cappedLimit);
     const reranked = performance.now();
     const result = {
       request_id: requestId,
       queries,
       results,
+      reranker,
       ...(includePreRerank ? { pre_rerank_results: fused.slice(0, cappedLimit) } : {}),
       partial: false,
       completed_lanes: completedLanes,
       graph_project_count: projects.length,
       degraded_lanes: [...degradedLanes].sort(),
-      timings: {
-        embedding_ms: embedded - started,
-        retrieval_ms: retrieved - embedded,
-        rerank_ms: reranked - retrieved,
-      },
+      timings: queryTimings(reranked),
       candidate_counts: candidateCounts,
     };
     this.setQueryState({
@@ -4739,10 +4847,12 @@ export class ResearchService {
     } catch (error) {
       const state = this.queryStates.get(requestId)!;
       const cancelled = controller.signal.aborted;
-      if (cancelled && partialResults.length) {
-        const incompleteLanes = (['exact', 'bm25', 'vector', 'graph'] as RetrievalLane[])
+      if (cancelled) {
+        const incompleteLanes = [...lanes]
           .filter((lane) => !state.completed_lanes.includes(lane));
         for (const lane of incompleteLanes) degradedLanes.add(lane);
+      }
+      if (cancelled && (partialResults.length || state.completed_lanes.length)) {
         const updatedAt = new Date().toISOString();
         this.setQueryState({
           ...state,
@@ -4756,27 +4866,27 @@ export class ResearchService {
           request_id: requestId,
           queries,
           results: partialResults,
+          reranker: reranker === 'local_vector' ? 'not_completed' : 'rrf_only',
           partial: true,
           completed_lanes: [...state.completed_lanes],
           incomplete_reason: state.cancel_reason ?? 'caller_cancelled',
           graph_project_count: graphProjectCount,
           degraded_lanes: [...degradedLanes].sort(),
-          timings: {
-            embedding_ms: embeddingFinishedAt - started,
-            retrieval_ms: Math.max(0, retrievalFinishedAt - embeddingFinishedAt),
-            rerank_ms: Math.max(0, stopped - Math.max(retrievalFinishedAt, embeddingFinishedAt)),
-          },
-          candidate_counts: candidateCounts,
+          timings: queryTimings(stopped),
+          candidate_counts: { ...candidateCounts },
         };
       }
       this.setQueryState({
         ...state,
         status: cancelled ? 'cancelled' : 'failed',
+        degraded_lanes: [...degradedLanes].sort(),
         updated_at: new Date().toISOString(),
         ...(cancelled ? {} : { error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) }),
       });
+      if (cancelled) throw new ResearchQueryInterrupted(state.cancel_reason ?? 'caller_cancelled', requestId, state.phase);
       throw error;
     } finally {
+      controller.abort();
       signal?.removeEventListener('abort', cancelFromCaller);
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (this.queryControllers.get(requestId) === controller) this.queryControllers.delete(requestId);

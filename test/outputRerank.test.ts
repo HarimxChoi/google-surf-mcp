@@ -33,4 +33,36 @@ describe('stateless output reranking', () => {
     expect(formatRerankedOutput(result)).toContain('API_KEY=[REDACTED]');
     expect(formatRerankedOutput(result)).not.toContain('secret-value');
   });
+
+  it('grows the default budget with distinct evidence instead of repeated raw volume', () => {
+    const small = rerankOutput('evidence', [{ evidence: 'one' }]);
+    const diverse = rerankOutput('evidence', Array.from({ length: 100 }, (_, id) => ({ evidence: `record-${id}` })));
+    const repeated = rerankOutput('status', 'still running\n'.repeat(100_000));
+    const unrelated = rerankOutput('perplexity', Array.from({ length: 100 }, (_, id) => ({ diagnostic: `record-${id}` })));
+    expect(small.meta.response_budget_chars).toBe(2_000);
+    expect(diverse.meta.response_budget_chars).toBeGreaterThan(small.meta.response_budget_chars);
+    expect(diverse.meta.response_budget_chars).toBe(6_000);
+    expect(repeated.meta.response_budget_chars).toBe(2_000);
+    expect(unrelated.meta.response_budget_chars).toBe(2_000);
+    expect(repeated.returned_chars).toBeLessThan(200);
+    expect(repeated.meta.response_budget_policy).toBe('adaptive_evidence_breadth');
+  });
+
+  it('expands gradually for multiple query-matching blocks and handles empty output', () => {
+    const pair = rerankOutput('evidence', [{ evidence: 'one' }, { evidence: 'two' }]);
+    expect(pair.meta.response_budget_chars).toBe(3_000);
+    const empty = rerankOutput('evidence', '');
+    expect(empty.results).toEqual([]);
+    expect(empty.meta.response_budget_chars).toBe(2_000);
+  });
+
+  it('honors explicit budgets above the default cap and below the default minimum', () => {
+    const rows = Array.from({ length: 40 }, (_, id) => ({ evidence: `record-${id} ${'x'.repeat(1_000)}` }));
+    const wide = rerankOutput('evidence', rows, { max_chars: 24_000, max_blocks: 30 });
+    const tiny = rerankOutput('evidence', rows, { max_chars: 100 });
+    expect(wide.returned_chars).toBeGreaterThan(12_000);
+    expect(wide.returned_chars).toBeLessThanOrEqual(24_000);
+    expect(tiny.returned_chars).toBeLessThanOrEqual(100);
+    expect(wide.meta.response_budget_policy).toBe('caller');
+  });
 });

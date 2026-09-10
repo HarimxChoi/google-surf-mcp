@@ -138,7 +138,7 @@ Google Surf는 큰 Bash 출력이 모델에 도달하기 전에 재랭킹하는 
 npx -y google-surf-mcp@latest hooks install --host codex
 ```
 
-Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. Shell 출력은 결과별로 6,000자를 넘으면 재랭킹해 제한하며, 턴 전체의 명령 수나 출력량에는 누적 제한을 두지 않습니다. 동일하거나 유사한 검색 2회와 명시적인 foreground polling loop는 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
+Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. Shell 출력은 2,000자부터 재랭킹하며, 기본 표시 예산은 2,000자입니다. 서로 다른 query-matching evidence block이 있으면 최대 6,000자까지 확장합니다. 명시적인 override는 6,000자 초과도 허용하며, 턴 전체 출력량에는 누적 제한을 두지 않습니다. 동일하거나 유사한 검색 2회와 명시적인 foreground polling loop는 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -333,6 +333,8 @@ Graphology는 SurrealDB의 원본에서 typed graph projection을 만들고 Page
 
 로컬 multi-query 검색은 query embedding을 batch 처리하고 exact, BM25, vector lane을 독립적으로 RRF에 반영한 뒤 graph 확장, 선택 chunk hydrate, 최종 rerank를 각각 한 번만 수행합니다. Graph-only 전체 프로젝트 검색은 query 시점에 모든 프로젝트 graph를 만들지 않고 가벼운 memory-node index와 검증된 identity alias로 최대 4개 graph scope를 선택합니다.
 
+Query embedding이 실패하거나 vector가 없으면 rerank에서 모델을 재호출하지 않고 lexical/graph 순위를 반환합니다. 시간 필드는 중복 없는 wall-clock 구간입니다. `embedding_ms`와 `retrieval_ms`의 합은 검색 종료까지의 시간이고, `rerank_ms`는 그 이후 응답 처리 시간입니다. 검색과 embedding이 동시에 진행될 수 있으므로 `retrieval_ms`는 독립적인 DB 실행 시간이 아닙니다. `response_deadline_ms`는 broker admission 이후 시작하며, transport watchdog에는 해당 deadline 외에 기존 5분의 queue/IPC 여유 시간이 유지됩니다. Partial 응답 이후에도 실행 중인 native query는 종료될 때까지 broker read slot을 보유합니다.
+
 #### 로컬 RAG 검색 검증
 
 60개 query 회귀 fixture로 lexical baseline과 전체 로컬 RAG 경로를 비교합니다. HNSW 근사 탐색의 변동과 검색 로직 변경을 분리하기 위해 embedding thread를 1개로 고정하고 exhaustive vector scoring을 사용했습니다. 아래 표는 fresh process에서 세 번 실행한 중앙값입니다.
@@ -479,6 +481,8 @@ npx google-surf-mcp daemon drain --json
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | embedded SurrealDB 쿼리별 timeout. 1-600초 범위이며 한 검색 lane이 timeout이면 partial로 표시하고 나머지 결과는 반환 |
 | `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | process 내부 graph projection과 분석 artifact의 byte budget |
 | `SURF_RESEARCH_WORKER_SOFT_MEMORY_MB` | `2048` | 진행 중인 작업 완료 후 즉시 idle drain을 요청하는 RSS 기준 |
+| `SURF_RERANK_TRIGGER_CHARS` | `2000` | 셸 출력 요약을 시작하는 길이 기준(해당 길이 포함). 이보다 짧아도 민감한 값은 제거 |
+| `SURF_RERANK_MAX_CHARS` | adaptive: 2000–6000 | 셸 요약의 명시적 길이 제한으로 6000자 초과도 허용. 기본 확장은 반복 출력량이 아니라 서로 다른 query-matching block 수에 기반 |
 | `GITHUB_TOKEN` | 미설정 | 저장소 확인을 위한 GitHub API 한도를 높이는 선택 token |
 | `SURF_RESEARCH_CODE_WORKERS` | 자동, 최대 4 | 최초 코드 구조 색인에 사용하는 Tree-sitter worker 수 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |

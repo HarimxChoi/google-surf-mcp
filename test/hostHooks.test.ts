@@ -14,7 +14,7 @@ function fixture() {
   const sourceDir = join(root, 'build');
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(sourceDir, { recursive: true });
-  for (const name of ['codexShellGuard.js', 'shellGuard.js', 'rerankOutput.js', 'outputRerank.js']) {
+  for (const name of ['codexShellGuard.js', 'shellGuard.js', 'rerankOutput.js', 'outputRerank.js', 'responseBudget.js']) {
     writeFileSync(join(sourceDir, name), `// ${name}\n`, 'utf8');
   }
   writeFileSync(join(codexHome, 'config.toml'), '[features]\nhooks = true\n\n[mcp_servers.example]\ncommand = "example"\n', 'utf8');
@@ -36,6 +36,7 @@ describe('host hook installer', () => {
     const options = fixture();
     const first = await installCodexHooks(options);
     expect(first).toMatchObject({ installed: true, files_valid: true, stores_command_output: false });
+    expect(existsSync(join(first.install_dir!, 'responseBudget.js'))).toBe(true);
     const once = readFileSync(join(options.codex_home, 'config.toml'), 'utf8');
     expect(once).toContain('[mcp_servers.example]');
     expect(once.match(/BEGIN google-surf host output hooks/g)).toHaveLength(1);
@@ -56,5 +57,13 @@ describe('host hook installer', () => {
     expect(config).toContain('[mcp_servers.example]');
     expect(config).not.toContain('google-surf host output hooks');
     expect(existsSync(join(options.surf_home, 'hooks', 'codex'))).toBe(false);
+  });
+
+  it('detects and repairs a missing transitive output-hook dependency', async () => {
+    const options = fixture();
+    const installed = await installCodexHooks(options);
+    rmSync(join(installed.install_dir!, 'responseBudget.js'));
+    expect(await codexHooksStatus(options)).toMatchObject({ installed: true, files_valid: false });
+    expect(await installCodexHooks(options)).toMatchObject({ installed: true, files_valid: true });
   });
 });

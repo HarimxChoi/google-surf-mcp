@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { formatToolResponse, toErrorInfo, fenceUntrustedContent, isErrorCode } from '../src/response.js';
+import { ResearchQueryInterrupted } from '../src/research/queryControl.js';
+
+it('keeps query deadline and cancellation diagnostics distinct from browser navigation failures', () => {
+  const error = new ResearchQueryInterrupted('response_deadline', 'query-123', 'retrieval');
+  const wire = JSON.parse(JSON.stringify({ reason: error.reason, request_id: error.request_id, phase: error.phase }));
+  const restored = new ResearchQueryInterrupted(wire.reason, wire.request_id, wire.phase);
+  expect(toErrorInfo(restored, { cloudMode: false })).toMatchObject({
+    code: 'QUERY_TIMEOUT', request_id: 'query-123', phase: 'retrieval', cancel_reason: 'response_deadline', retryable: false,
+  });
+  expect(toErrorInfo(new ResearchQueryInterrupted(), { cloudMode: false }).code).toBe('QUERY_CANCELLED');
+  expect(isErrorCode('QUERY_TIMEOUT')).toBe(true);
+  expect(isErrorCode('QUERY_CANCELLED')).toBe(true);
+});
 import { CaptchaError } from '../src/search.js';
 
 describe('formatToolResponse', () => {

@@ -15,6 +15,7 @@ import {
   type ResearchBrokerConfig,
 } from './broker.js';
 import { ResearchService } from './service.js';
+import { ResearchQueryInterrupted } from './queryControl.js';
 import {
   MAX_RESEARCH_QUERY_TIMEOUT_MS,
   MIN_RESEARCH_QUERY_TIMEOUT_MS,
@@ -252,12 +253,14 @@ async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unkn
         await new Promise<void>((resolveSlot) => readWaiters.push(resolveSlot));
       }
       activeReads++;
-      try {
-        return await operation(coalescedReads.has(request.method) ? sharedController.signal : signal);
-      } finally {
-        activeReads--;
-        readWaiters.shift()?.();
-      }
+      return await service.withSearchReadLease(
+        () => operation(coalescedReads.has(request.method) ? sharedController.signal : signal),
+        () => {
+          activeReads--;
+          readWaiters.shift()?.();
+          scheduleIdle();
+        },
+      );
     })();
     const shared = {
       promise: current,
@@ -331,6 +334,9 @@ async function handle(socket: Socket, line: string): Promise<void> {
       id: request?.id ?? '',
       ok: false,
       error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof ResearchQueryInterrupted ? {
+        query_error: { reason: error.reason, request_id: error.request_id, phase: error.phase },
+      } : {}),
       status: service.status(),
     });
   } finally {

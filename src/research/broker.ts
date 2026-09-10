@@ -8,8 +8,18 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ResearchService, type ResearchServiceOptions } from './service.js';
 import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
+import { queryResponseDeadlineMs, ResearchQueryInterrupted } from './queryControl.js';
 
 export const RESEARCH_BROKER_PROTOCOL = 1;
+
+export function researchBrokerTimeoutMs(method: string, args: unknown[]): number {
+  if (['exportVisualization', 'indexProject', 'rebuildDerivedState'].includes(method)) return 60 * 60_000;
+  const deadline = method === 'searchBatch' && typeof args[10] === 'number'
+    ? queryResponseDeadlineMs(args[10]) : undefined;
+  // Keep the transport/queue allowance separate from the service execution deadline.
+  return 5 * 60_000 + (deadline ?? 0);
+}
+
 export const RESEARCH_BROKER_METHODS = new Set([
   'capture',
   'correctAssertion',
@@ -144,6 +154,7 @@ interface BrokerResponse {
   ok: boolean;
   result?: unknown;
   error?: string;
+  query_error?: { reason: string; request_id?: string; phase?: string };
   status?: ReturnType<ResearchService['status']>;
 }
 
@@ -312,9 +323,7 @@ class ResearchBrokerClient {
       method,
       args: encodeResearchBrokerArgs(args),
     };
-    const timeoutMs = ['exportVisualization', 'indexProject', 'rebuildDerivedState'].includes(method)
-      ? 60 * 60_000
-      : 5 * 60_000;
+    const timeoutMs = researchBrokerTimeoutMs(method, args);
     return await new Promise((resolveCall, reject) => {
       const timer = setTimeout(() => {
         const pending = this.pending.get(id);
@@ -455,7 +464,9 @@ class ResearchBrokerClient {
       this.pending.delete(response.id);
       pending.cleanup?.();
       if (response.ok) pending.resolve(response.result);
-      else pending.reject(new Error(response.error ?? 'research broker request failed'));
+      else pending.reject(response.query_error
+        ? new ResearchQueryInterrupted(response.query_error.reason, response.query_error.request_id, response.query_error.phase)
+        : new Error(response.error ?? 'research broker request failed'));
     }
   }
 

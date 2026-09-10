@@ -361,7 +361,7 @@ describe('project_memory tool', () => {
       action: 'query_status', request_id: 'profile-tool-cancelled-query',
     }, service);
     expect(status.structuredContent?.query_status).toMatchObject({
-      request_id: 'profile-tool-cancelled-query', status: 'cancelled', phase: 'embedding',
+      request_id: 'profile-tool-cancelled-query', status: 'cancelled', phase: 'retrieval',
     });
   });
 

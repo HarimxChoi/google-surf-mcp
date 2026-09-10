@@ -1,5 +1,6 @@
 import type { ErrorInfo, ErrorCode, CallToolMeta } from './types.js';
 import { CaptchaError } from './search.js';
+import { ResearchQueryInterrupted } from './research/queryControl.js';
 
 export type CallToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -13,6 +14,19 @@ export function toErrorInfo(
   ctx: { cloudMode: boolean },
 ): ErrorInfo {
   const message = e instanceof Error ? e.message : String(e);
+
+  if (e instanceof ResearchQueryInterrupted || message === 'research search cancelled') {
+    const interrupted = e instanceof ResearchQueryInterrupted ? e : new ResearchQueryInterrupted();
+    return {
+      code: interrupted.code, message: interrupted.message, retryable: false,
+      ...(interrupted.request_id ? { request_id: interrupted.request_id } : {}),
+      ...(interrupted.phase ? { phase: interrupted.phase } : {}),
+      cancel_reason: interrupted.reason,
+      user_action: interrupted.code === 'QUERY_TIMEOUT'
+        ? 'Inspect query_status using request_id. Narrow retrieval_lanes or explicitly allow a longer response deadline; do not repeat automatically.'
+        : 'The query was cancelled. Start another query only if it is still needed.',
+    };
+  }
 
   if (e instanceof CaptchaError) {
     if (ctx.cloudMode) {
@@ -100,6 +114,7 @@ export function isErrorCode(s: string): s is ErrorCode {
     'INVALID_ARGUMENT',
     'CAPTCHA_REQUIRED', 'CAPTCHA_RECOVER_FAIL', 'BLOCKED_BY_GOOGLE',
     'NAV_TIMEOUT', 'EXTRACT_FAILED', 'PRIVATE_ADDRESS', 'PROFILE_MISSING',
+    'QUERY_TIMEOUT', 'QUERY_CANCELLED',
     'PARSER_STALE', 'RATE_LIMITED', 'API_KEY_MISSING', 'SEARCH_API_ERROR', 'INTERNAL',
   ].includes(s);
 }
