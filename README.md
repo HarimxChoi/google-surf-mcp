@@ -220,11 +220,15 @@ Local clone variant:
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.
   - Response: content fields plus available document metadata. Failures return `{ error }`, never throw.
-- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - searches stored local knowledge only. Up to 19 optional variants run inside one broker request with batched query embeddings, RRF fusion, evidence-seeded graph expansion, and one final rerank against `query`. The response contains only bounded query-focused summaries from the final ranking; stored bodies stay in the database. Exact identifiers and quoted phrases are added deterministically. Use this instead of repeated terminal calls. It never opens a browser or calls Google or SearchApi.
+- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?, request_id?, response_deadline_ms?)` - searches stored local knowledge only. Up to 19 optional variants run inside one broker request with batched query embeddings, RRF fusion, evidence-seeded graph expansion, and one final rerank against `query`. The response contains only bounded query-focused summaries from the final ranking; stored bodies stay in the database. A caller-supplied `request_id` makes a long query observable and cooperatively cancellable through `project_memory`. If a deadline arrives after retrieval has produced candidates, the completed lanes return as an explicitly partial result instead of being discarded. It never opens a browser or calls Google or SearchApi.
 - `project_memory(action, ...)` - manages durable project knowledge when `SURF_RESEARCH=true`.
   - `action="search"`: compatibility alias for `project_memory_search`.
+  - `action="project_update"`: updates an existing project name, purpose, constraints, or protected parents as a revision-checked profile revision.
+  - `action="context"`: separates the durable project purpose, confirmed session intent, provisional recent query, current plan, scientific experiment state, and observed process liveness.
+  - `action="get"`: returns exact typed or legacy records through bounded UTF-8 byte spans. Set `body_bytes=0` for metadata only and use `next_body_offset` for lossless paging.
   - `action="show"`: always returns a bounded summary with counts and active record IDs. `detail_level="full"` is accepted for compatibility but never dumps every record body. Use `project_memory_search` for relevant bodies or `target_id` for one assertion or entity.
-  - `action="record"`: stores the submitted body and returns only its ID, revision, and status.
+  - `action="record"`: stores the submitted body and returns only its ID, revision, and status. Receipts distinguish the original application from an idempotent replay.
+  - `action="query_status"` / `action="query_cancel"`: inspects or cooperatively stops a local retrieval identified before execution by `request_id`.
   - `action="export"`: writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`.
 - `health()` - server status, including the local research runtime.
 
@@ -336,9 +340,9 @@ A single local research broker owns the embedded RocksDB connection. Multiple MC
 
 ### Durable records and incremental indexing
 
-`project_memory` writes plans, experiments, attempts, measurements, artifacts, documents, decisions, and sessions as typed records. A stable asset ID receives revisions; an idempotency key makes an uncertain retry resolve to the same committed revision. `body_path` streams bodies up to 256 MiB, artifact manifests are paginated instead of sliced, and `get`/`get_batch` return exact records or bounded body spans. Compact write receipts report accepted bytes, references, revision, and the exact readback handle without echoing the submitted body.
+`project_memory` writes project profiles, plans, experiments, attempts, measurements, artifacts, documents, decisions, and sessions as typed records. A stable asset ID receives revisions; an uncertain retry with the same idempotency key returns the committed revision with `idempotent_replay=true` and `applied_this_request=false`. `body_path` streams bodies up to 256 MiB, artifact manifests are paginated instead of sliced, and `get`/`get_batch` return exact typed or legacy records through bounded body spans. Compact write receipts report accepted bytes, references, revision, and the exact readback handle without echoing the submitted body.
 
-`sync` accepts registered roots or explicit changed and removed paths. Unchanged roots and parent identities remain intact, a no-op does not rewrite derived indexes, and a one-file change publishes only the affected generation. Code, retrieval, and graph publication run under one durable job ID. `job_wait` uses a revision cursor, `job_cancel` stops at a safe stage boundary, and unfinished jobs resume after process restart.
+`sync` accepts registered roots or explicit changed and removed paths. Unchanged roots and parent identities remain intact, a no-op does not rewrite derived indexes, and a one-file change publishes only the affected generation. Code, retrieval, and graph publication run under one durable job ID. `job_wait` uses a revision cursor, `job_cancel` stops at a safe stage boundary, and unfinished jobs resume after process restart. Under the worker soft-memory limit, foreground requests finish first; rebuildable index jobs checkpoint at a durable stage boundary and resume in the replacement worker without cancelling the committed record.
 
 ### Ontology and cross-project links
 
@@ -472,7 +476,7 @@ npx google-surf-mcp job cancel --project PROJECT --id JOB --reason "operator req
 npx google-surf-mcp daemon drain --json
 ```
 
-`doctor` is passive: it reports process identity, versions, capabilities, queue counters, memory counters, cache bytes, and current lifecycle state without opening the database, vector model, or graph. The broker drains after meaningful work is idle even if an MCP client remains connected; active requests, commits, and background jobs postpone the drain. The next request reconnects transparently.
+`doctor` is passive: it reports process identity, versions, capabilities, queue counters, memory counters, cache bytes, current lifecycle state, foreground/background ownership, checkpoint-drain state, and the exact blockers preventing worker recycling without opening the database, vector model, or graph. The broker drains after meaningful work is idle even if an MCP client remains connected; active requests and commits postpone the drain, while rebuildable background jobs checkpoint at safe stage boundaries under memory pressure. The next request reconnects transparently.
 
 ## Env vars
 

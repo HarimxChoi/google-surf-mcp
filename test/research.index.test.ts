@@ -86,6 +86,25 @@ describe('deterministic project indexing', () => {
     expect(await service.search('index-test', 'untracked_data_token', 10)).toHaveLength(0);
   });
 
+  it('checkpoints rebuildable indexing at a durable drain boundary', async () => {
+    await service.createProject('Drain checkpoint', 'drain-checkpoint');
+    await service.requestDrain();
+    const indexed = await service.indexProject({
+      project_id: 'drain-checkpoint',
+      roots: [{ label: 'repo', path: source }],
+    });
+    await service.waitForIdle();
+
+    expect(await service.jobStatus('drain-checkpoint', indexed.job_id)).toMatchObject({
+      status: 'queued',
+      stage: 'code',
+      completed_items: 0,
+      total_items: 3,
+    });
+    expect((await service.getProject('drain-checkpoint')).active_source_snapshot)
+      .toMatchObject({ snapshot_id: indexed.snapshot_id, status: 'active' });
+  });
+
   it('stores only deterministic changes and updates the active projection', async () => {
     await service.createProject('Index delta test', 'index-delta-test');
     const first = await service.indexProject({

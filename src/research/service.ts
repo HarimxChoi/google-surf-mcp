@@ -8,7 +8,7 @@ import { MAX_RESEARCH_CAPTURE_CHARS } from '../searchLimits.js';
 import { VERSION } from '../version.js';
 import type {
   ArtifactReference, CatalogAccessTier, CatalogAssetKind, CatalogRecordReadback, CatalogTimelineEvent,
-  CatalogWriteOperation, DurableWriteReceipt,
+  CatalogWriteOperation, DurableWriteReceipt, LegacyRecordReadback,
   AssertionCorrectionRecord, AssertionRecord, AssertionValue, CaptureResult, DecisionRecord, DocumentRecordReadback,
   EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord,
   ExperimentRunRecord, ExperimentStatus, GraphAnalysis, GraphArtifact, GraphProjection,
@@ -71,9 +71,25 @@ export interface ResearchServiceStatus {
   background_jobs: number;
   repository_jobs: number;
   scheduled_graph_jobs: number;
+  drain_requested: boolean;
   graph_projection_cache: number;
   graph_artifact_cache: number;
   graph_cache_bytes: number;
+}
+
+export interface ResearchQueryState {
+  request_id: string;
+  project_ids: string[];
+  query_hash: string;
+  status: 'running' | 'cancel_requested' | 'completed' | 'partial' | 'cancelled' | 'failed';
+  phase: 'embedding' | 'retrieval' | 'graph' | 'rerank' | 'complete';
+  completed_lanes: RetrievalLane[];
+  degraded_lanes: RetrievalLane[];
+  started_at: string;
+  updated_at: string;
+  deadline_ms?: number;
+  cancel_reason?: string;
+  error?: string;
 }
 
 export interface ResearchPassiveStatus extends ResearchServiceStatus {
@@ -439,6 +455,19 @@ function normalizeCatalogFields(
   missingFields: string[],
 ): Record<string, unknown> {
   const fields = { ...(input ?? {}) };
+  if (kind === 'project') {
+    if (fields.name !== undefined) fields.name = cleanText(String(fields.name), 'name', 120);
+    if (fields.purpose !== undefined) fields.purpose = cleanText(String(fields.purpose), 'purpose', 10_000);
+    for (const key of ['user_constraints', 'protected_parent_ids'] as const) {
+      if (fields[key] === undefined) continue;
+      if (!Array.isArray(fields[key]) || fields[key].some((value) => typeof value !== 'string')) {
+        throw new Error(`${key} must be an array of strings`);
+      }
+      const limit = key === 'user_constraints' ? 2_000 : 500;
+      fields[key] = [...new Set((fields[key] as string[])
+        .map((value) => cleanText(value, key.slice(0, -1), limit)))];
+    }
+  }
   const required = kind === 'measurement'
     ? MEASUREMENT_CONTRACT_FIELDS
     : kind === 'byte_ledger' ? BYTE_LEDGER_FIELDS : [];
@@ -775,6 +804,9 @@ export class ResearchService {
   private readonly embeddings: EmbeddingProvider;
   private readonly repositoryClient: RepositoryClient;
   private readonly repositoryJobs = new Set<string>();
+  private readonly queryStates = new Map<string, ResearchQueryState>();
+  private readonly queryControllers = new Map<string, AbortController>();
+  private drainRequested = false;
   private recoveredDirtyProjects = false;
   private state: 'disabled' | 'idle' | 'ready' | 'unavailable';
 
@@ -841,6 +873,7 @@ export class ResearchService {
       background_jobs: this.backgroundJobs.size,
       repository_jobs: this.repositoryJobs.size,
       scheduled_graph_jobs: this.graphTimers.size,
+      drain_requested: this.drainRequested,
       graph_projection_cache: this.graphCache.size,
       graph_artifact_cache: this.graphArtifacts.size,
       graph_cache_bytes: this.graphCacheBytes,
@@ -892,8 +925,48 @@ export class ResearchService {
     return this.status();
   }
 
-  async requestDrain(): Promise<{ accepted: true; background_jobs: number }> {
-    return { accepted: true, background_jobs: this.backgroundJobs.size };
+  async requestDrain(): Promise<{ accepted: true; background_jobs: number; cancelled_graph_timers: number }> {
+    this.drainRequested = true;
+    const cancelledGraphTimers = this.graphTimers.size;
+    for (const timer of this.graphTimers.values()) clearTimeout(timer);
+    this.graphTimers.clear();
+    return {
+      accepted: true,
+      background_jobs: this.backgroundJobs.size,
+      cancelled_graph_timers: cancelledGraphTimers,
+    };
+  }
+
+  queryStatus(requestId: string): ResearchQueryState {
+    const state = this.queryStates.get(cleanText(requestId, 'request_id', 200));
+    if (!state) throw new Error('query request_id not found; provide the caller-supplied request_id');
+    return { ...state, project_ids: [...state.project_ids], completed_lanes: [...state.completed_lanes], degraded_lanes: [...state.degraded_lanes] };
+  }
+
+  cancelQuery(requestId: string, reason?: string): ResearchQueryState {
+    const id = cleanText(requestId, 'request_id', 200);
+    const state = this.queryStates.get(id);
+    if (!state) throw new Error('query request_id not found; provide the caller-supplied request_id');
+    if (state.status !== 'running' && state.status !== 'cancel_requested') return this.queryStatus(id);
+    const updated: ResearchQueryState = {
+      ...state,
+      status: 'cancel_requested',
+      updated_at: new Date().toISOString(),
+      cancel_reason: reason?.trim().slice(0, 500) || 'caller_requested',
+    };
+    this.queryStates.set(id, updated);
+    this.queryControllers.get(id)?.abort();
+    return this.queryStatus(id);
+  }
+
+  private setQueryState(state: ResearchQueryState): void {
+    this.queryStates.set(state.request_id, state);
+    if (this.queryStates.size <= 100) return;
+    for (const [requestId, candidate] of this.queryStates) {
+      if (candidate.status === 'running' || candidate.status === 'cancel_requested') continue;
+      this.queryStates.delete(requestId);
+      if (this.queryStates.size <= 100) break;
+    }
   }
 
   async close(): Promise<void> {
@@ -990,6 +1063,30 @@ export class ResearchService {
     );
   }
 
+  private async checkpointKnowledgeJobForDrain(
+    projectId: string,
+    jobId: string,
+    stage: string,
+    completedItems: number,
+    totalItems: number,
+  ): Promise<boolean> {
+    if (!this.drainRequested) return false;
+    await this.locked(`job-state:${jobId}`, async () => {
+      const job = await this.store.getKnowledgeJob(jobId);
+      if (!job || job.project_id !== projectId || job.status !== 'running') return;
+      await this.store.putKnowledgeJob({
+        ...job,
+        status: 'queued',
+        stage,
+        completed_items: completedItems,
+        total_items: totalItems,
+        revision: (job.revision ?? 1) + 1,
+        updated_at: new Date().toISOString(),
+      });
+    });
+    return true;
+  }
+
   private scheduleCatalogIndex(job: KnowledgeJobRecord): void {
     if (this.scheduledJobIds.has(job.job_id)) return;
     this.scheduledJobIds.add(job.job_id);
@@ -1007,6 +1104,9 @@ export class ResearchService {
         await this.updateKnowledgeJobProgress(
           current.project_id, current.job_id, 'indexing', 0, current.affected_source_ids.length,
         );
+        if (await this.checkpointKnowledgeJobForDrain(
+          current.project_id, current.job_id, 'indexing', 0, current.affected_source_ids.length,
+        )) return;
         for (let index = 0; index < current.affected_source_ids.length; index++) {
           const assetId = current.affected_source_ids[index];
           if (await this.knowledgeJobCancelled(current.job_id)) return;
@@ -1015,12 +1115,19 @@ export class ResearchService {
           await this.updateKnowledgeJobProgress(
             current.project_id, current.job_id, 'indexing', index + 1, current.affected_source_ids.length,
           );
+          if (await this.checkpointKnowledgeJobForDrain(
+            current.project_id, current.job_id, 'indexing', index + 1,
+            current.affected_source_ids.length,
+          )) return;
         }
         if (await this.knowledgeJobCancelled(current.job_id)) return;
         await this.updateKnowledgeJobProgress(
           current.project_id, current.job_id, 'retrieval_publish', 0, 1,
         );
         await this.materializeRetrievalIndex(current.project_id, 'document');
+        if (await this.checkpointKnowledgeJobForDrain(
+          current.project_id, current.job_id, 'retrieval_publish', 1, 1,
+        )) return;
         if (await this.knowledgeJobCancelled(current.job_id)) return;
         await this.invalidateGraph(current.project_id, false);
         await this.materializeGraph([current.project_id]);
@@ -1065,12 +1172,21 @@ export class ResearchService {
           });
         }
         await this.updateKnowledgeJobProgress(current.project_id, current.job_id, 'code', 0, 3);
+        if (await this.checkpointKnowledgeJobForDrain(
+          current.project_id, current.job_id, 'code', 0, 3,
+        )) return;
         await this.materializeCodeStructure(current.project_id, current.source_hash);
         if (await this.knowledgeJobCancelled(current.job_id)) return;
         await this.updateKnowledgeJobProgress(current.project_id, current.job_id, 'retrieval', 1, 3);
+        if (await this.checkpointKnowledgeJobForDrain(
+          current.project_id, current.job_id, 'retrieval', 1, 3,
+        )) return;
         await this.materializeRetrievalIndex(current.project_id, 'code');
         if (await this.knowledgeJobCancelled(current.job_id)) return;
         await this.updateKnowledgeJobProgress(current.project_id, current.job_id, 'graph', 2, 3);
+        if (await this.checkpointKnowledgeJobForDrain(
+          current.project_id, current.job_id, 'graph', 2, 3,
+        )) return;
         const graph = await this.materializeGraph([current.project_id]);
         if (await this.knowledgeJobCancelled(current.job_id)) return;
         await this.transitionKnowledgeJob({
@@ -1267,21 +1383,60 @@ export class ResearchService {
 
   async updateProjectContext(input: {
     project_id: string;
+    name?: string;
     purpose?: string;
     user_constraints?: string[];
     protected_parent_ids?: string[];
+    expected_revision?: number;
+    idempotency_key?: string;
   }): Promise<ProjectRecord> {
     const project = await this.ensureProject(input.project_id);
-    return await this.store.updateProjectContext(project.project_id, {
-      ...(input.purpose !== undefined
-        ? { purpose: cleanText(input.purpose, 'purpose', 10_000) } : {}),
-      ...(input.user_constraints !== undefined
-        ? { user_constraints: [...new Set(input.user_constraints.map((item) => cleanText(item, 'user_constraint', 2_000)))] }
-        : {}),
-      ...(input.protected_parent_ids !== undefined
-        ? { protected_parent_ids: [...new Set(input.protected_parent_ids.map((item) => cleanText(item, 'protected_parent_id', 500)))] }
-        : {}),
+    const currentRevision = project.project_profile_revision_id
+      ? Number(project.project_profile_revision_id.match(/:v(\d+)$/)?.[1] ?? 0)
+      : 0;
+    await this.updateProjectProfile({
+      ...input,
+      expected_revision: input.expected_revision ?? currentRevision,
+      idempotency_key: input.idempotency_key ?? `project-profile:${project.project_id}:${randomUUID()}`,
     });
+    return await this.ensureProject(project.project_id);
+  }
+
+  async updateProjectProfile(input: {
+    project_id: string;
+    name?: string;
+    purpose?: string;
+    user_constraints?: string[];
+    protected_parent_ids?: string[];
+    expected_revision: number;
+    idempotency_key: string;
+  }): Promise<{ project: ProjectRecord; receipt: DurableWriteReceipt }> {
+    const project = await this.ensureProject(input.project_id);
+    const fields = {
+      ...(input.expected_revision === 0 ? {
+        name: project.name,
+        ...(project.purpose ? { purpose: project.purpose } : {}),
+        ...(project.user_constraints?.length ? { user_constraints: project.user_constraints } : {}),
+        ...(project.protected_parent_ids?.length ? { protected_parent_ids: project.protected_parent_ids } : {}),
+      } : {}),
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      ...(input.user_constraints !== undefined ? { user_constraints: input.user_constraints } : {}),
+      ...(input.protected_parent_ids !== undefined ? { protected_parent_ids: input.protected_parent_ids } : {}),
+    };
+    if (!Object.keys(fields).length) throw new Error('project_update requires at least one profile field');
+    const receipt = await this.writeCatalogRecord({
+      project_id: project.project_id,
+      kind: 'project',
+      operation: input.expected_revision === 0 ? 'create' : 'patch',
+      asset_id: project.project_id,
+      expected_revision: input.expected_revision,
+      idempotency_key: input.idempotency_key,
+      fields,
+      protected: true,
+      access_tier: 'hot',
+    });
+    return { project: await this.ensureProject(project.project_id), receipt };
   }
 
   async exportCatalogSnapshot(projectIdValue: string): Promise<{
@@ -1520,6 +1675,7 @@ export class ResearchService {
   async writeCatalogRecord(input: CatalogWriteInput): Promise<DurableWriteReceipt> {
     const project = await this.ensureProject(input.project_id);
     const assetIdValue = input.asset_id?.trim()
+      || (input.kind === 'project' ? project.project_id : undefined)
       || `${project.project_id}:${input.kind}:${randomUUID()}`;
     if (input.operation !== 'create' && !input.asset_id) throw new Error('asset_id required');
     if (!input.idempotency_key.trim()) throw new Error('idempotency_key required');
@@ -1587,14 +1743,14 @@ export class ResearchService {
     bodyBytes = 64 * 1024,
     artifactOffset = 0,
     artifactLimit = 200,
-  ): Promise<CatalogRecordReadback | SourceRecordReadback | DocumentRecordReadback | { legacy: true; record: unknown }> {
+  ): Promise<CatalogRecordReadback | SourceRecordReadback | DocumentRecordReadback | LegacyRecordReadback> {
     const project = await this.ensureProject(projectIdValue);
     const catalog = await this.store.getCatalogRecord(
       project.project_id,
       cleanText(recordId, 'record_id', 500),
       revision,
       bodyOffset,
-      Math.min(Math.max(bodyBytes, 1), 1024 * 1024),
+      Math.min(Math.max(bodyBytes, 0), 1024 * 1024),
       Math.max(0, artifactOffset),
       Math.min(Math.max(artifactLimit, 1), 1_000),
     );
@@ -1603,14 +1759,14 @@ export class ResearchService {
       project.project_id,
       cleanText(recordId, 'record_id', 500),
       bodyOffset,
-      Math.min(Math.max(bodyBytes, 1), 1024 * 1024),
+      Math.min(Math.max(bodyBytes, 0), 1024 * 1024),
     );
     if (source) return source;
     const document = await this.store.getProjectDocumentRecord(
       project.project_id,
       cleanText(recordId, 'record_id', 500),
       bodyOffset,
-      Math.min(Math.max(bodyBytes, 1), 1024 * 1024),
+      Math.min(Math.max(bodyBytes, 0), 1024 * 1024),
     );
     if (document) return document;
     const [plan, experiment, decision, assertion, entity, ontology] = await Promise.all([
@@ -1621,10 +1777,30 @@ export class ResearchService {
       this.store.getEntity(recordId),
       this.store.getOntologyTerm(recordId),
     ]);
-    const record = [plan, experiment, decision, assertion, entity, ontology]
-      .find((value) => value?.project_id === project.project_id);
-    if (!record) throw new Error(`record not found in project: ${recordId}`);
-    return { legacy: true, record };
+    const matched = [
+      ['plan', plan], ['experiment', experiment], ['decision', decision],
+      ['assertion', assertion], ['entity', entity], ['ontology', ontology],
+    ].find(([, value]) => value && (value as { project_id?: string }).project_id === project.project_id);
+    if (!matched) throw new Error(`record not found in project: ${recordId}`);
+    const [recordType, record] = matched as [string, Record<string, unknown>];
+    const encoded = stableJson(record);
+    const bytes = Buffer.from(encoded, 'utf8');
+    let start = Math.max(0, Math.min(bodyOffset, bytes.length));
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+    let end = Math.min(bytes.length, start + Math.min(Math.max(bodyBytes, 0), 1024 * 1024));
+    while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+    const completeInline = start === 0 && end === bytes.length && bodyBytes > 0;
+    return {
+      legacy: true,
+      record_type: recordType,
+      record_id: recordId,
+      ...(completeInline ? { record } : {}),
+      ...(!completeInline && bodyBytes > 0
+        ? { body: bytes.subarray(start, end).toString('utf8') } : {}),
+      body_span: { start, end, total_bytes: bytes.length },
+      ...(bodyBytes > 0 && end < bytes.length ? { next_body_offset: end } : {}),
+      omitted_fields: completeInline ? [] : bodyBytes === 0 ? ['record', 'body'] : ['record'],
+    };
   }
 
   async getCatalogRecords(
@@ -1666,7 +1842,7 @@ export class ResearchService {
   ): Promise<Record<string, unknown>> {
     const project = await this.ensureProject(projectIdValue);
     const cutoff = asOf ? cleanTime(asOf, 'as_of') : undefined;
-    const [summary, plans, timeline, catalogPlan, planAssets, intents, experiments] = await Promise.all([
+    const [summary, plans, timeline, catalogPlan, planAssets, intents, experiments, catalogExperiments] = await Promise.all([
       this.getProjectSummary(project.project_id),
       this.store.listPlans(project.project_id),
       this.store.listCatalogTimeline(project.project_id, { before: cutoff, limit: 200 }),
@@ -1678,6 +1854,7 @@ export class ResearchService {
       this.store.listCatalogAssets(project.project_id, { kind: 'plan', limit: 200 }),
       this.store.listProjectIntents(project.project_id),
       this.store.listExperiments(project.project_id),
+      this.store.listCurrentCatalogRevisions(project.project_id, 'experiment', 200),
     ]);
     const legacyPlan = cutoff
       ? [...plans].filter((plan) => (plan.effective_at ?? plan.recorded_at ?? plan.created_at) <= cutoff)
@@ -1721,6 +1898,51 @@ export class ResearchService {
       && latestPlanAsset.current_revision_id !== project.current_plan_revision_id
       ? `A newer plan revision exists but is not the selected current plan: ${latestPlanAsset.current_revision_id}`
       : undefined;
+    const latestConfirmedIntent = intents.filter((intent) => intent.status === 'confirmed').at(-1);
+    const latestQueryIntent = intents.filter((intent) => intent.status === 'provisional').at(-1);
+    const legacyExperiments = new Map(experiments.map((experiment) => [experiment.experiment_id, experiment]));
+    const typedExperimentIds = new Set(catalogExperiments.map((revision) => revision.asset_id));
+    const workHistory = [
+      ...catalogExperiments.map((revision) => {
+        const legacy = legacyExperiments.get(revision.asset_id);
+        const state = typeof revision.fields.status === 'string'
+          ? revision.fields.status : legacy?.status ?? 'unknown';
+        const liveness = typeof revision.fields.process_liveness === 'string'
+          ? revision.fields.process_liveness : 'unknown';
+        const observedAtValue = revision.fields.process_observed_at ?? revision.fields.observed_at;
+        const observedAt = typeof observedAtValue === 'string' && !Number.isNaN(new Date(observedAtValue).getTime())
+          ? new Date(observedAtValue).toISOString() : revision.recorded_at;
+        return {
+          experiment_id: revision.asset_id,
+          plan_revision_id: revision.fields.plan_revision_id ?? legacy?.plan_revision_id,
+          name: revision.fields.name ?? legacy?.name ?? revision.asset_id,
+          hypothesis: revision.fields.hypothesis ?? legacy?.hypothesis,
+          historical_status: legacy?.status ?? null,
+          latest_scientific_state: state,
+          process_liveness: liveness,
+          process_observed_at: observedAt,
+          observation_age_ms: Math.max(0, Date.now() - new Date(observedAt).getTime()),
+          status_source: `catalog:${revision.revision_id}`,
+          schedulable: state === 'running' && liveness === 'running',
+        };
+      }),
+      ...experiments.filter((experiment) => !typedExperimentIds.has(experiment.experiment_id)).map((experiment) => ({
+        experiment_id: experiment.experiment_id,
+        plan_revision_id: experiment.plan_revision_id,
+        name: experiment.name,
+        hypothesis: experiment.hypothesis,
+        historical_status: experiment.status,
+        latest_scientific_state: experiment.status,
+        process_liveness: 'unknown',
+        process_observed_at: experiment.recorded_at ?? experiment.finished_at ?? experiment.started_at,
+        observation_age_ms: Math.max(0, Date.now() - new Date(
+          experiment.recorded_at ?? experiment.finished_at ?? experiment.started_at,
+        ).getTime()),
+        status_source: `legacy:${experiment.experiment_id}`,
+        schedulable: false,
+      })),
+    ].slice(-40);
+    const activeWork = workHistory.filter((work) => work.schedulable).slice(-20);
     const context = {
       project: {
         project_id: project.project_id,
@@ -1739,19 +1961,33 @@ export class ResearchService {
         effective_at: activePlan.effective_at,
         recorded_at: activePlan.recorded_at,
       } : null,
-      current_intent: intents.at(-1) ? {
-        intent_revision_id: intents.at(-1)!.intent_revision_id,
-        intent: intents.at(-1)!.intent,
-        status: intents.at(-1)!.status,
-        recorded_at: intents.at(-1)!.created_at,
+      project_intent: project.purpose ? {
+        intent: project.purpose,
+        source: 'project_profile',
+        revision_id: project.project_profile_revision_id ?? null,
       } : null,
-      active_work: experiments.filter((experiment) => experiment.status === 'running').slice(-20).map((experiment) => ({
-        experiment_id: experiment.experiment_id,
-        plan_revision_id: experiment.plan_revision_id,
-        name: experiment.name,
-        hypothesis: experiment.hypothesis,
-        started_at: experiment.started_at,
-      })),
+      session_intent: latestConfirmedIntent ? {
+        intent_revision_id: latestConfirmedIntent.intent_revision_id,
+        intent: latestConfirmedIntent.intent,
+        source: latestConfirmedIntent.source,
+        status: latestConfirmedIntent.status,
+        recorded_at: latestConfirmedIntent.created_at,
+      } : null,
+      current_intent: latestConfirmedIntent ? {
+        intent_revision_id: latestConfirmedIntent.intent_revision_id,
+        intent: latestConfirmedIntent.intent,
+        source: latestConfirmedIntent.source,
+        status: latestConfirmedIntent.status,
+        recorded_at: latestConfirmedIntent.created_at,
+      } : null,
+      recent_query_intent: latestQueryIntent ? {
+        intent_revision_id: latestQueryIntent.intent_revision_id,
+        intent: latestQueryIntent.intent,
+        status: latestQueryIntent.status,
+        recorded_at: latestQueryIntent.created_at,
+      } : null,
+      active_work: activeWork,
+      work_history: workHistory,
       protected_parents: protectedParents,
       counts: summary,
       changes,
@@ -1770,7 +2006,11 @@ export class ResearchService {
         body_handle: activePlan.plan_revision_id,
       } : null,
       current_intent: context.current_intent,
+      project_intent: context.project_intent,
+      session_intent: context.session_intent,
+      recent_query_intent: context.recent_query_intent,
       active_work: context.active_work.slice(-5),
+      work_history: context.work_history.slice(-5),
       counts: summary,
       protected_parents: protectedParents,
       changes: changes.slice(-5),
@@ -4286,24 +4526,72 @@ export class ResearchService {
     filters?: ResearchSearchFilters,
     rerank = true,
     includePreRerank = false,
+    requestIdValue?: string,
+    responseDeadlineMs?: number,
   ): Promise<{
     request_id: string;
     queries: string[];
     results: LocalSearchHit[];
     pre_rerank_results?: LocalSearchHit[];
+    partial: boolean;
+    completed_lanes: RetrievalLane[];
+    incomplete_reason?: string;
     graph_project_count: number;
     degraded_lanes: RetrievalLane[];
     timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
     candidate_counts: { exact: number; bm25: number; vector: number; graph: number; fused: number };
   }> {
     const started = performance.now();
-    const requestId = randomUUID();
-    ensureNotAborted(signal);
+    const requestId = requestIdValue ? cleanText(requestIdValue, 'request_id', 200) : randomUUID();
     const degradedLanes = new Set<RetrievalLane>();
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
     const candidateLimit = Math.min(40, cappedLimit * 3);
     const queries = tuneLocalQueries(query, queryVariants);
     const candidateCounts = { exact: 0, bm25: 0, vector: 0, graph: 0, fused: 0 };
+    let partialResults: LocalSearchHit[] = [];
+    let graphProjectCount = 0;
+    let embeddingFinishedAt = started;
+    let retrievalFinishedAt = started;
+    const existingState = this.queryStates.get(requestId);
+    if (existingState?.status === 'running' || existingState?.status === 'cancel_requested') {
+      throw new Error(`query request_id already active: ${requestId}`);
+    }
+    const controller = new AbortController();
+    const cancelFromCaller = () => controller.abort();
+    signal?.addEventListener('abort', cancelFromCaller, { once: true });
+    if (signal?.aborted) controller.abort();
+    const deadlineMs = responseDeadlineMs === undefined
+      ? undefined : Math.min(Math.max(responseDeadlineMs, 1_000), 300_000);
+    const deadlineTimer = deadlineMs === undefined ? undefined : setTimeout(() => {
+      const state = this.queryStates.get(requestId);
+      if (state?.status === 'running') {
+        this.setQueryState({
+          ...state,
+          status: 'cancel_requested',
+          updated_at: new Date().toISOString(),
+          cancel_reason: 'response_deadline',
+        });
+      }
+      controller.abort();
+    }, deadlineMs);
+    deadlineTimer?.unref();
+    const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
+    const startedAt = new Date().toISOString();
+    this.queryControllers.set(requestId, controller);
+    this.setQueryState({
+      request_id: requestId,
+      project_ids: projectIds,
+      query_hash: createHash('sha256').update(query).digest('hex'),
+      status: 'running',
+      phase: 'embedding',
+      completed_lanes: [],
+      degraded_lanes: [],
+      started_at: startedAt,
+      updated_at: startedAt,
+      ...(deadlineMs !== undefined ? { deadline_ms: deadlineMs } : {}),
+    });
+    try {
+    ensureNotAborted(controller.signal);
     let vectors: Array<number[] | undefined> = queries.map(() => undefined);
     if (this.embeddings.enabled()) {
       try {
@@ -4313,8 +4601,10 @@ export class ResearchService {
         vectors = generated;
       } catch {}
     }
-    ensureNotAborted(signal);
+    ensureNotAborted(controller.signal);
     const embedded = performance.now();
+    embeddingFinishedAt = embedded;
+    this.setQueryState({ ...this.queryStates.get(requestId)!, phase: 'retrieval', updated_at: new Date().toISOString() });
     const queryGroups = await mapConcurrent(queries, 2, async (value, index) => {
       const families = await this.searchFamilies(
         projectIdValue,
@@ -4323,7 +4613,7 @@ export class ResearchService {
         includeProjectIds,
         vectors[index],
         false,
-        signal,
+        controller.signal,
         filters,
       );
       candidateCounts.exact += families.exact.length;
@@ -4344,8 +4634,15 @@ export class ResearchService {
       queryGroups.flatMap((group) => group.expanded),
       candidateLimit,
     );
-    ensureNotAborted(signal);
-    const projectIds = [...new Set([projectIdValue, ...includeProjectIds])];
+    partialResults = baseFused.slice(0, cappedLimit);
+    ensureNotAborted(controller.signal);
+    this.setQueryState({
+      ...this.queryStates.get(requestId)!,
+      phase: 'graph',
+      completed_lanes: ['exact', 'bm25', ...(vectors.some(Boolean) ? ['vector' as const] : [])],
+      degraded_lanes: [...degradedLanes].sort(),
+      updated_at: new Date().toISOString(),
+    });
     let projects: ProjectRecord[] = [];
     let graph: LocalSearchHit[] = [];
     try {
@@ -4371,6 +4668,7 @@ export class ResearchService {
       );
       const graphProjectIds = [...selectedProjects, ...linkedProjects].slice(0, 4);
       projects = await Promise.all(graphProjectIds.map((projectId) => this.ensureProject(projectId)));
+      graphProjectCount = projects.length;
       graph = !projects.length || (filters?.retrieval_lanes?.length
         && !filters.retrieval_lanes.includes('graph')) ? [] : projects.length > 1
         ? await this.searchCombinedGraph(projects, query, candidateLimit, boundedBaseFused)
@@ -4379,7 +4677,7 @@ export class ResearchService {
       if (!isResearchQueryTimeout(error)) throw error;
       degradedLanes.add('graph');
     }
-    ensureNotAborted(signal);
+    ensureNotAborted(controller.signal);
     const baseKeys = new Set(baseFused.map((row) => row.url || row.document_id));
     const filteredGraph = filterSearchHits(graph, filters);
     const graphCandidates = !this.embeddings.enabled() && baseKeys.size
@@ -4396,16 +4694,30 @@ export class ResearchService {
     ], candidateLimit);
     const fused = preserveBoundedCandidates(boundedFused, expandedFused, candidateLimit);
     candidateCounts.fused = fused.length;
+    partialResults = fused.slice(0, cappedLimit);
     const retrieved = performance.now();
+    retrievalFinishedAt = retrieved;
+    const completedLanes: RetrievalLane[] = [
+      'exact', 'bm25', ...(vectors.some(Boolean) ? ['vector' as const] : []), 'graph',
+    ];
+    this.setQueryState({
+      ...this.queryStates.get(requestId)!,
+      phase: 'rerank',
+      completed_lanes: completedLanes,
+      degraded_lanes: [...degradedLanes].sort(),
+      updated_at: new Date().toISOString(),
+    });
     const results = rerank
-      ? await this.rerankCandidates(query, fused, cappedLimit, vectors[0], signal)
+      ? await this.rerankCandidates(query, fused, cappedLimit, vectors[0], controller.signal)
       : fused.slice(0, cappedLimit);
     const reranked = performance.now();
-    return {
+    const result = {
       request_id: requestId,
       queries,
       results,
       ...(includePreRerank ? { pre_rerank_results: fused.slice(0, cappedLimit) } : {}),
+      partial: false,
+      completed_lanes: completedLanes,
       graph_project_count: projects.length,
       degraded_lanes: [...degradedLanes].sort(),
       timings: {
@@ -4415,6 +4727,60 @@ export class ResearchService {
       },
       candidate_counts: candidateCounts,
     };
+    this.setQueryState({
+      ...this.queryStates.get(requestId)!,
+      status: 'completed',
+      phase: 'complete',
+      completed_lanes: completedLanes,
+      degraded_lanes: [...degradedLanes].sort(),
+      updated_at: new Date().toISOString(),
+    });
+    return result;
+    } catch (error) {
+      const state = this.queryStates.get(requestId)!;
+      const cancelled = controller.signal.aborted;
+      if (cancelled && partialResults.length) {
+        const incompleteLanes = (['exact', 'bm25', 'vector', 'graph'] as RetrievalLane[])
+          .filter((lane) => !state.completed_lanes.includes(lane));
+        for (const lane of incompleteLanes) degradedLanes.add(lane);
+        const updatedAt = new Date().toISOString();
+        this.setQueryState({
+          ...state,
+          status: 'partial',
+          phase: 'complete',
+          degraded_lanes: [...degradedLanes].sort(),
+          updated_at: updatedAt,
+        });
+        const stopped = performance.now();
+        return {
+          request_id: requestId,
+          queries,
+          results: partialResults,
+          partial: true,
+          completed_lanes: [...state.completed_lanes],
+          incomplete_reason: state.cancel_reason ?? 'caller_cancelled',
+          graph_project_count: graphProjectCount,
+          degraded_lanes: [...degradedLanes].sort(),
+          timings: {
+            embedding_ms: embeddingFinishedAt - started,
+            retrieval_ms: Math.max(0, retrievalFinishedAt - embeddingFinishedAt),
+            rerank_ms: Math.max(0, stopped - Math.max(retrievalFinishedAt, embeddingFinishedAt)),
+          },
+          candidate_counts: candidateCounts,
+        };
+      }
+      this.setQueryState({
+        ...state,
+        status: cancelled ? 'cancelled' : 'failed',
+        updated_at: new Date().toISOString(),
+        ...(cancelled ? {} : { error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) }),
+      });
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', cancelFromCaller);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (this.queryControllers.get(requestId) === controller) this.queryControllers.delete(requestId);
+    }
   }
 
   async searchGrouped(
@@ -4575,7 +4941,8 @@ export class ResearchService {
         selected.splice(selected.length - 1 - replace, 1, candidate);
       }
       return visible(selected.map((entry) => entry.row));
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return visible(rows.slice(0, cappedLimit));
     }
   }

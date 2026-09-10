@@ -191,11 +191,15 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
   - 응답: 본문 필드와 확인 가능한 문서 메타데이터. 실패는 `{ error }` 반환, throw 안 함
-- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 응답에는 최종 순위의 query-focused 요약만 제한된 길이로 포함하고 원문은 DB에 남깁니다. 정확한 식별자와 따옴표 표현은 deterministic variant로 자동 추가합니다. 반복 terminal 호출 대신 이 도구를 한 번 사용하며 브라우저, Google, SearchApi는 호출하지 않습니다.
+- `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?, request_id?, response_deadline_ms?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 응답에는 최종 순위의 query-focused 요약만 제한된 길이로 포함하고 원문은 DB에 남깁니다. 호출 전에 `request_id`를 지정하면 긴 검색 상태를 조회하거나 cooperative cancellation할 수 있습니다. deadline 전에 검색 후보가 만들어졌다면 완료된 lane을 버리지 않고 명시적인 partial 결과로 반환합니다. 브라우저, Google, SearchApi는 호출하지 않습니다.
 - `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때 프로젝트 지식을 관리합니다.
   - `action="search"`: `project_memory_search`를 위한 호환 alias입니다.
+  - `action="project_update"`: 기존 프로젝트의 이름, 목적, 제약과 보호 parent를 revision check가 적용된 profile revision으로 갱신합니다.
+  - `action="context"`: 프로젝트 목적, 확정된 session intent, 최근 임시 query, 현재 계획, 실험의 과학적 상태와 실제 process liveness를 분리해 반환합니다.
+  - `action="get"`: typed record와 legacy record를 UTF-8 byte 구간으로 제한해 정확히 읽습니다. `body_bytes=0`은 metadata만 반환하고 `next_body_offset`으로 전체를 이어 읽습니다.
   - `action="show"`: 항상 count와 활성 record ID만 포함한 제한된 요약을 반환합니다. `detail_level="full"`은 호환성을 위해 허용하지만 전체 record 본문을 덤프하지 않습니다. 관련 본문은 `project_memory_search`, 단일 assertion이나 entity는 `target_id`를 사용합니다.
-  - `action="record"`: 전달한 본문을 저장하고 ID, revision, status만 반환합니다.
+  - `action="record"`: 전달한 본문을 저장하고 ID, revision, status만 반환합니다. 영수증은 실제 적용과 idempotent replay를 구분합니다.
+  - `action="query_status"` / `action="query_cancel"`: 실행 전에 지정한 `request_id`로 로컬 검색을 조회하거나 cooperative cancellation합니다.
   - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
 - `health()` - 검색과 로컬 research runtime 상태
 
@@ -307,9 +311,9 @@ SurrealDB 하나가 서로 다른 세 계층의 기준이 됩니다.
 
 ### 손실 없는 기록과 증분 색인
 
-`project_memory`는 계획, 실험, attempt, measurement, artifact, 문서, 결정과 세션을 typed record로 저장합니다. 같은 asset ID에 revision을 추가하고, 결과를 받지 못해 재시도해도 같은 idempotency key는 이미 commit된 revision을 반환합니다. `body_path`는 최대 256 MiB 본문을 streaming 저장하고 artifact manifest는 자르지 않고 페이지로 읽습니다. `get`과 `get_batch`는 정확한 record 또는 지정한 본문 byte 구간을 반환합니다. 쓰기 영수증은 본문을 다시 출력하지 않고 저장 byte, reference 수, revision과 readback handle만 반환합니다.
+`project_memory`는 프로젝트 profile, 계획, 실험, attempt, measurement, artifact, 문서, 결정과 세션을 typed record로 저장합니다. 같은 asset ID에 revision을 추가하고, 결과를 받지 못해 같은 idempotency key로 재시도하면 `idempotent_replay=true`, `applied_this_request=false`와 함께 이미 commit된 revision을 반환합니다. `body_path`는 최대 256 MiB 본문을 streaming 저장하고 artifact manifest는 자르지 않고 페이지로 읽습니다. `get`과 `get_batch`는 legacy record를 포함해 정확한 record 또는 지정한 본문 byte 구간을 반환합니다. 쓰기 영수증은 본문을 다시 출력하지 않고 저장 byte, reference 수, revision과 readback handle만 반환합니다.
 
-`sync`는 등록 root 또는 명시적인 변경·삭제 path를 받습니다. 변경되지 않은 root와 parent ID는 유지하고, no-op은 파생 index를 다시 쓰지 않으며, 파일 하나의 변경은 해당 generation만 갱신합니다. Code, retrieval, graph publication은 하나의 durable job ID로 추적합니다. `job_wait`는 revision cursor로 상태 변경을 기다리고, `job_cancel`은 안전한 stage 경계에서 중단하며, 완료되지 않은 작업은 process 재시작 후 이어서 실행합니다.
+`sync`는 등록 root 또는 명시적인 변경·삭제 path를 받습니다. 변경되지 않은 root와 parent ID는 유지하고, no-op은 파생 index를 다시 쓰지 않으며, 파일 하나의 변경은 해당 generation만 갱신합니다. Code, retrieval, graph publication은 하나의 durable job ID로 추적합니다. `job_wait`는 revision cursor로 상태 변경을 기다리고, `job_cancel`은 안전한 stage 경계에서 중단하며, 완료되지 않은 작업은 process 재시작 후 이어서 실행합니다. Worker가 soft memory 기준을 넘으면 foreground 요청을 먼저 끝내고, 재구축 가능한 index job은 durable stage 경계에서 checkpoint한 뒤 교체된 worker에서 재개합니다. 이미 commit된 record는 취소하지 않습니다.
 
 ### 온톨로지와 프로젝트 간 연결
 
@@ -443,7 +447,7 @@ npx google-surf-mcp job cancel --project PROJECT --id JOB --reason "operator req
 npx google-surf-mcp daemon drain --json
 ```
 
-`doctor`는 passive 진단입니다. DB, vector model과 graph를 열지 않고 process identity, version, capability, queue, memory, cache와 lifecycle 상태를 표시합니다. MCP client가 연결된 상태여도 실제 작업이 없으면 broker를 drain하고, 진행 중인 요청, commit과 background job이 있으면 종료를 미룹니다. 다음 요청은 자동으로 다시 연결됩니다.
+`doctor`는 passive 진단입니다. DB, vector model과 graph를 열지 않고 process identity, version, capability, queue, memory, cache, lifecycle, foreground/background 소유권, checkpoint drain 상태와 worker recycle을 막는 정확한 이유를 표시합니다. MCP client가 연결된 상태여도 실제 작업이 없으면 broker를 drain하고, 진행 중인 요청과 commit이 있으면 종료를 미룹니다. Memory pressure에서는 재구축 가능한 background job을 안전한 stage 경계에서 checkpoint합니다. 다음 요청은 자동으로 다시 연결됩니다.
 
 ## Env vars
 

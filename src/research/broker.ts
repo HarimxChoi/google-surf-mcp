@@ -35,6 +35,7 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'materializeCurrentView',
   'jobStatus',
   'cancelJob',
+  'cancelQuery',
   'mergeEntities',
   'passiveStatus',
   'prepareRepositoryResults',
@@ -57,7 +58,9 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'splitEntity',
   'startExperiment',
   'projectContext',
+  'queryStatus',
   'updateProjectContext',
+  'updateProjectProfile',
   'verifyCatalogRecord',
   'waitForJob',
   'writeCatalogRecord',
@@ -75,6 +78,7 @@ export const RESEARCH_BROKER_READ_METHODS = new Set([
   'linkEntity',
   'listProjects',
   'jobStatus',
+  'queryStatus',
   'passiveStatus',
   'probe',
   'rerankCandidates',
@@ -88,7 +92,7 @@ export const RESEARCH_BROKER_READ_METHODS = new Set([
   'waitForJob',
 ]);
 
-export const RESEARCH_BROKER_CONTROL_METHODS = new Set(['cancelJob']);
+export const RESEARCH_BROKER_CONTROL_METHODS = new Set(['cancelJob', 'cancelQuery']);
 
 export interface ResearchBrokerConfig {
   enabled: boolean;
@@ -117,6 +121,22 @@ interface BrokerRequest {
   id: string;
   method: string;
   args: unknown[];
+}
+
+const BROKER_UNDEFINED = '__google_surf_broker_undefined__';
+
+export function encodeResearchBrokerArgs(args: unknown[]): unknown[] {
+  return args.map((value) => value === undefined ? { [BROKER_UNDEFINED]: true } : value);
+}
+
+export function decodeResearchBrokerArgs(args: unknown[]): unknown[] {
+  return args.map((value) => (
+    value && typeof value === 'object'
+      && Object.keys(value as Record<string, unknown>).length === 1
+      && (value as Record<string, unknown>)[BROKER_UNDEFINED] === true
+      ? undefined
+      : value
+  ));
 }
 
 interface BrokerResponse {
@@ -257,6 +277,7 @@ class ResearchBrokerClient {
       background_jobs: 0,
       repository_jobs: 0,
       scheduled_graph_jobs: 0,
+      drain_requested: false,
       graph_projection_cache: 0,
       graph_artifact_cache: 0,
       graph_cache_bytes: 0,
@@ -289,7 +310,7 @@ class ResearchBrokerClient {
       token,
       id,
       method,
-      args,
+      args: encodeResearchBrokerArgs(args),
     };
     const timeoutMs = ['exportVisualization', 'indexProject', 'rebuildDerivedState'].includes(method)
       ? 60 * 60_000
@@ -492,7 +513,9 @@ export function createSharedResearchService(
       if (typeof property !== 'string' || !RESEARCH_BROKER_METHODS.has(property)) return undefined;
       return async (...args: unknown[]) => {
         const forwarded = [...args];
-        const signal = isAbortSignal(forwarded.at(-1)) ? forwarded.pop() as AbortSignal : undefined;
+        const signalIndex = forwarded.findIndex(isAbortSignal);
+        const signal = signalIndex >= 0 ? forwarded[signalIndex] as AbortSignal : undefined;
+        if (signalIndex >= 0) forwarded[signalIndex] = undefined;
         return await client.call(property, forwarded, signal);
       };
     },

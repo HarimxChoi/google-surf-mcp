@@ -7,6 +7,7 @@ import {
   RESEARCH_BROKER_METHODS,
   RESEARCH_BROKER_PROTOCOL,
   RESEARCH_BROKER_READ_METHODS,
+  decodeResearchBrokerArgs,
   researchBrokerConfigHash,
   researchBrokerDirectory,
   researchBrokerEndpoint,
@@ -124,12 +125,17 @@ let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let writeTail: Promise<unknown> = Promise.resolve();
 let activeReads = 0;
 const readWaiters: Array<() => void> = [];
-const readInflight = new Map<string, Promise<unknown>>();
+const readInflight = new Map<string, {
+  promise: Promise<unknown>;
+  controller: AbortController;
+  subscribers: Set<string>;
+}>();
 const requestControllers = new Map<string, {
   controller: AbortController;
   socket: Socket;
   read: boolean;
   coalesced: boolean;
+  coalescedKey?: string;
 }>();
 let stopping = false;
 let activeRequests = 0;
@@ -150,32 +156,53 @@ function response(socket: Socket, value: Record<string, unknown>): void {
 
 function invocationArgs(request: BrokerRequest, signal: AbortSignal): unknown[] {
   const args = [...request.args];
+  const setSignal = (index: number): unknown[] => {
+    while (args.length <= index) args.push(undefined);
+    args[index] = signal;
+    return args;
+  };
   if (request.method === 'search') {
-    while (args.length < 4) args.push(undefined);
-    return [...args, signal];
+    return setSignal(4);
   }
   if (request.method === 'searchBatch') {
-    while (args.length < 5) args.push(undefined);
-    return [...args, signal];
+    return setSignal(5);
   }
   if (request.method === 'searchGrouped') {
-    while (args.length < 3) args.push(undefined);
-    return [...args, signal];
+    return setSignal(3);
   }
   if (request.method === 'searchFamilies') {
-    while (args.length < 5) args.push(undefined);
-    if (args.length < 6) args.push(true);
-    return [...args, signal];
+    while (args.length < 6) args.push(undefined);
+    if (args[5] === undefined) args[5] = true;
+    return setSignal(6);
   }
   if (request.method === 'rerankCandidates') {
-    while (args.length < 4) args.push(undefined);
-    return [...args, signal];
+    return setSignal(4);
   }
   return args;
 }
 
 async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unknown> {
   if (request.method === 'passiveStatus') {
+    const status = service.status();
+    const foreground = {
+      active_requests: Math.max(0, activeRequests - 1),
+      active_reads: activeReads,
+      active_writes: activeWrites,
+      queued_reads: readWaiters.length,
+      queued_writes: queuedWrites,
+    };
+    const background = {
+      background_jobs: status.background_jobs,
+      repository_jobs: status.repository_jobs,
+      scheduled_graph_jobs: status.scheduled_graph_jobs,
+    };
+    const recycleBlockers = [
+      ...Object.entries(foreground).filter(([, count]) => count > 0).map(([name]) => name),
+      ...Object.entries(background).filter(([, count]) => count > 0).map(([name]) => name),
+    ];
+    const resourcePressure = Boolean(
+      config.workerSoftMemoryBytes && process.memoryUsage().rss >= config.workerSoftMemoryBytes
+    );
     return {
       ...service.passiveStatus('research_broker'),
       broker: {
@@ -184,26 +211,28 @@ async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unkn
         accepted_requests: acceptedRequests,
         completed_requests: completedRequests,
         coalesced_read_hits: coalescedReadHits,
-        active_requests: Math.max(0, activeRequests - 1),
-        active_reads: activeReads,
-        active_writes: activeWrites,
-        queued_reads: readWaiters.length,
-        queued_writes: queuedWrites,
+        ...foreground,
         last_completed_work_at: lastCompletedWorkAt ?? null,
         idle_ms: config.idleMs,
         read_concurrency: config.readConcurrency,
         query_timeout_ms: config.queryTimeoutMs,
         worker_soft_memory_bytes: config.workerSoftMemoryBytes ?? null,
-        resource_pressure: Boolean(
-          config.workerSoftMemoryBytes && process.memoryUsage().rss >= config.workerSoftMemoryBytes
-        ),
+        resource_pressure: resourcePressure,
+        recycle_eligible: recycleBlockers.length === 0,
+        recycle_blockers: recycleBlockers,
+        recycle_trigger: resourcePressure ? 'memory_pressure' : 'idle_timeout',
+        background_ownership: {
+          ...background,
+          checkpoint_drain_requested: status.drain_requested,
+        },
       },
     };
   }
   const method = (service as unknown as Record<string, (...args: unknown[]) => unknown>)[request.method];
   if (typeof method !== 'function') throw new Error(`unsupported research broker method: ${request.method}`);
-  const sharedSignal = coalescedReads.has(request.method) ? new AbortController().signal : signal;
-  const operation = async () => await method.apply(service, invocationArgs(request, sharedSignal));
+  const operation = async (operationSignal = signal) => (
+    await method.apply(service, invocationArgs(request, operationSignal))
+  );
   if (RESEARCH_BROKER_CONTROL_METHODS.has(request.method)) return await operation();
   if (RESEARCH_BROKER_READ_METHODS.has(request.method)) {
     const key = coalescedReads.has(request.method)
@@ -212,25 +241,36 @@ async function invoke(request: BrokerRequest, signal: AbortSignal): Promise<unkn
     const existing = readInflight.get(key);
     if (existing) {
       coalescedReadHits++;
-      return await existing;
+      existing.subscribers.add(request.id);
+      const pending = requestControllers.get(request.id);
+      if (pending) pending.coalescedKey = key;
+      return await existing.promise;
     }
+    const sharedController = new AbortController();
     const current = (async () => {
       if (activeReads >= config.readConcurrency) {
         await new Promise<void>((resolveSlot) => readWaiters.push(resolveSlot));
       }
       activeReads++;
       try {
-        return await operation();
+        return await operation(coalescedReads.has(request.method) ? sharedController.signal : signal);
       } finally {
         activeReads--;
         readWaiters.shift()?.();
       }
     })();
-    readInflight.set(key, current);
+    const shared = {
+      promise: current,
+      controller: sharedController,
+      subscribers: new Set([request.id]),
+    };
+    readInflight.set(key, shared);
+    const pending = requestControllers.get(request.id);
+    if (pending && coalescedReads.has(request.method)) pending.coalescedKey = key;
     try {
       return await current;
     } finally {
-      if (readInflight.get(key) === current) readInflight.delete(key);
+      if (readInflight.get(key) === shared) readInflight.delete(key);
     }
   }
   queuedWrites++;
@@ -261,10 +301,15 @@ async function handle(socket: Socket, line: string): Promise<void> {
     if (!request.id || !Array.isArray(request.args)) {
       throw new Error('invalid research broker request');
     }
+    request.args = decodeResearchBrokerArgs(request.args);
     if (request.method === '$cancel') {
       const target = typeof request.args[0] === 'string' ? request.args[0] : '';
       const pending = requestControllers.get(target);
-      if (pending?.read && !pending.coalesced) pending.controller.abort();
+      if (pending?.read && pending.coalescedKey) {
+        const shared = readInflight.get(pending.coalescedKey);
+        shared?.subscribers.delete(target);
+        if (shared && shared.subscribers.size === 0) shared.controller.abort();
+      } else if (pending?.read) pending.controller.abort();
       response(socket, { id: request.id, ok: true });
       return;
     }
@@ -289,6 +334,10 @@ async function handle(socket: Socket, line: string): Promise<void> {
       status: service.status(),
     });
   } finally {
+    if (request?.id) {
+      const pending = requestControllers.get(request.id);
+      if (pending?.coalescedKey) readInflight.get(pending.coalescedKey)?.subscribers.delete(request.id);
+    }
     if (request?.id && controller) requestControllers.delete(request.id);
     if (accepted) completedRequests++;
     if (accepted && request?.method !== 'passiveStatus') {
@@ -305,6 +354,11 @@ function scheduleIdle(): void {
   const underPressure = Boolean(
     config.workerSoftMemoryBytes && process.memoryUsage().rss >= config.workerSoftMemoryBytes
   );
+  const status = service.status();
+  if (underPressure && !status.drain_requested
+    && (status.background_jobs || status.scheduled_graph_jobs)) {
+    void service.requestDrain();
+  }
   idleTimer = setTimeout(() => {
     const status = service.status();
     if (activeRequests || activeReads || activeWrites || queuedWrites || readWaiters.length
@@ -348,8 +402,15 @@ const server = createServer((socket) => {
     }
   });
   socket.on('close', () => {
-    for (const pending of requestControllers.values()) {
-      if (pending.socket === socket && pending.read && !pending.coalesced) pending.controller.abort();
+    for (const [requestId, pending] of requestControllers) {
+      if (pending.socket !== socket || !pending.read) continue;
+      if (pending.coalescedKey) {
+        const shared = readInflight.get(pending.coalescedKey);
+        shared?.subscribers.delete(requestId);
+        if (shared && shared.subscribers.size === 0) shared.controller.abort();
+      } else {
+        pending.controller.abort();
+      }
     }
     clients.delete(socket);
     scheduleIdle();

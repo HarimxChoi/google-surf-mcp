@@ -207,6 +207,109 @@ describe('durable research catalog', () => {
     });
   });
 
+  it('versions project profiles and separates durable intent from query intent and process liveness', async () => {
+    root = await mkdtemp(join(tmpdir(), 'surf-catalog-'));
+    service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel: '' });
+    await service.createProject('Context authority', 'context-authority');
+    const first = await service.updateProjectProfile({
+      project_id: 'context-authority', expected_revision: 0, idempotency_key: 'profile-v1',
+      purpose: 'Preserve the durable project purpose.', user_constraints: ['Keep history'],
+    });
+    const replay = await service.updateProjectProfile({
+      project_id: 'context-authority', expected_revision: 0, idempotency_key: 'profile-v1',
+      purpose: 'Preserve the durable project purpose.', user_constraints: ['Keep history'],
+    });
+    const second = await service.updateProjectProfile({
+      project_id: 'context-authority', expected_revision: 1, idempotency_key: 'profile-v2',
+      purpose: 'Preserve purpose and compare alternatives.', protected_parent_ids: ['parent-one'],
+    });
+    await service.recordSessionIntent({
+      project_id: 'context-authority', intent: 'Run the confirmed research plan.',
+    });
+    await service.ensureMemorySession('context-authority', undefined, 'temporary packaging web query');
+    const plan = await service.createPlan({
+      project_id: 'context-authority', title: 'Plan', body: 'Run one experiment.',
+      idempotency_key: 'context-plan-v1',
+    });
+    const experiment = await service.startExperiment({
+      project_id: 'context-authority', plan_revision_id: plan.plan_revision_id,
+      name: 'Historical run', hypothesis: 'The run completes.', idempotency_key: 'context-run-start',
+    });
+    await service.writeCatalogRecord({
+      project_id: 'context-authority', kind: 'experiment', operation: 'patch',
+      asset_id: experiment.experiment_id, expected_revision: 1,
+      idempotency_key: 'context-run-terminal-v1',
+      fields: {
+        name: experiment.name,
+        hypothesis: experiment.hypothesis,
+        status: 'success',
+        process_liveness: 'stopped',
+        process_observed_at: experiment.started_at,
+      },
+    });
+
+    expect(first.receipt).toMatchObject({ revision: 1, applied_this_request: true, idempotent_replay: false });
+    expect(replay.receipt).toMatchObject({
+      revision: 1, operation_id: first.receipt.operation_id,
+      index_job_id: first.receipt.index_job_id,
+      applied_this_request: false, idempotent_replay: true,
+    });
+    expect(second.receipt).toMatchObject({ revision: 2, previous_revision: 1 });
+    const oldProfile = await service.getCatalogRecord('context-authority', 'context-authority', 1, 0, 0);
+    if ('legacy' in oldProfile || 'source' in oldProfile || 'document' in oldProfile) {
+      throw new Error('unexpected project profile type');
+    }
+    expect(oldProfile.revision.fields).toMatchObject({ purpose: 'Preserve the durable project purpose.' });
+    expect((await service.catalogTimeline('context-authority')).events
+      .filter((event) => event.kind === 'project')).toHaveLength(2);
+    const context = await service.projectContext('context-authority');
+    expect(context).toMatchObject({
+      project: {
+        purpose: 'Preserve purpose and compare alternatives.',
+        protected_parent_ids: ['parent-one'],
+      },
+      project_intent: { intent: 'Preserve purpose and compare alternatives.', source: 'project_profile' },
+      session_intent: { intent: 'Run the confirmed research plan.', status: 'confirmed' },
+      current_intent: { intent: 'Run the confirmed research plan.', status: 'confirmed' },
+      recent_query_intent: { intent: 'temporary packaging web query', status: 'provisional' },
+      active_work: [],
+      work_history: [expect.objectContaining({
+        experiment_id: experiment.experiment_id,
+        historical_status: 'running',
+        latest_scientific_state: 'success',
+        process_liveness: 'stopped',
+        schedulable: false,
+      })],
+    });
+  });
+
+  it('bounds legacy exact reads and supports metadata-only paging', async () => {
+    root = await mkdtemp(join(tmpdir(), 'surf-catalog-'));
+    service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel: '' });
+    await service.createProject('Legacy paging', 'legacy-paging');
+    const term = await service.recordOntologyTerm({
+      project_id: 'legacy-paging', kind: 'entity_type',
+      name: 'Long legacy ontology term', aliases: Array.from({ length: 30 }, (_, index) => `alias-${index}`),
+    });
+    const metadata = await service.getCatalogRecord('legacy-paging', term.term_id, undefined, 0, 0);
+    expect(metadata).toMatchObject({
+      legacy: true,
+      record_type: 'ontology',
+      record_id: term.term_id,
+      body_span: { start: 0, end: 0, total_bytes: expect.any(Number) },
+      omitted_fields: ['record', 'body'],
+    });
+    expect('body' in metadata).toBe(false);
+    const complete = await service.getCatalogRecord('legacy-paging', term.term_id);
+    expect(complete).toMatchObject({ legacy: true, record: { term_id: term.term_id }, omitted_fields: [] });
+    expect('body' in complete).toBe(false);
+    const firstPage = await service.getCatalogRecord('legacy-paging', term.term_id, undefined, 0, 40);
+    expect(firstPage).toMatchObject({ legacy: true, body_span: { start: 0, total_bytes: expect.any(Number) } });
+    if (!('legacy' in firstPage)) throw new Error('expected legacy readback');
+    expect(firstPage.body?.length).toBeGreaterThan(0);
+    expect(firstPage.next_body_offset).toBeGreaterThan(0);
+  });
+
   it('exports revision history and rolls back current state without deleting later records', async () => {
     root = await mkdtemp(join(tmpdir(), 'surf-catalog-'));
     service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel: '' });
@@ -253,7 +356,7 @@ describe('durable research catalog', () => {
       project_id: 'rollback', path: snapshot.path, expected_generation: before.catalog_generation,
       rollback: true,
     });
-    expect(preview).toMatchObject({ dry_run: true, mode: 'rollback', current_records: 3 });
+    expect(preview).toMatchObject({ dry_run: true, mode: 'rollback', current_records: 4 });
     const applied = await service.importCatalogSnapshot({
       project_id: 'rollback', path: snapshot.path, expected_generation: before.catalog_generation,
       rollback: true, dry_run: false,

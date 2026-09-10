@@ -14,7 +14,7 @@ const baseEnv = {
   SURF_SEARCH_PROVIDER: 'searchapi',
   SURF_SCHOLAR_PROVIDER: 'searchapi',
   SURF_RESEARCH_VECTOR_MODEL: 'off',
-  SURF_RESEARCH_BROKER_IDLE_MS: '100',
+  SURF_RESEARCH_BROKER_IDLE_MS: '1000',
 };
 const offClient = new Client({ name: 'google-surf-smoke-off', version: '1.0.0' });
 const offTransport = new StdioClientTransport({
@@ -154,13 +154,17 @@ try {
   const memoryProperties = listed.tools.find((tool) => tool.name === 'project_memory')
     ?.inputSchema?.properties ?? {};
   if (!memoryProperties.action?.enum?.includes('search')
+    || !memoryProperties.action?.enum?.includes('project_update')
+    || !memoryProperties.action?.enum?.includes('query_status')
+    || !memoryProperties.action?.enum?.includes('query_cancel')
     || !memoryProperties.action?.enum?.includes('export')
     || !('query' in memoryProperties) || !('limit' in memoryProperties)
     || !('export_format' in memoryProperties) || !('export_view' in memoryProperties)
     || !memoryProperties.export_format?.enum?.includes('html')
     || !memoryProperties.export_format?.enum?.includes('neo4j')
     || !('all_projects' in memoryProperties)
-    || memoryProperties.detail_level?.default !== 'summary') {
+    || memoryProperties.detail_level?.default !== 'summary'
+    || memoryProperties.body_bytes?.minimum !== 0) {
     throw new Error('project_memory visualization contract missing');
   }
   const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
@@ -201,6 +205,8 @@ try {
     || localSearchProperties.query_variants?.maxItems !== 19
     || !('project_id' in localSearchProperties) || !('include_project_ids' in localSearchProperties)
     || !('all_projects' in localSearchProperties)
+    || !('request_id' in localSearchProperties)
+    || !('response_deadline_ms' in localSearchProperties)
     || localSearchTool?.annotations?.readOnlyHint !== true
     || localSearchTool?.annotations?.idempotentHint !== true
     || localSearchTool?.annotations?.openWorldHint !== false) {
@@ -229,6 +235,37 @@ try {
     arguments: { action: 'create', project_id: 'smoke', name: 'Smoke project' },
   });
   if (created.isError) throw new Error('project create failed');
+  const profile = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'project_update', project_id: 'smoke', expected_revision: 0,
+      idempotency_key: 'smoke-profile-v1', purpose: 'Validate durable project context.',
+    },
+  });
+  if (profile.isError || profile.structuredContent?.receipt?.revision !== 1) {
+    throw new Error(`project profile update failed: ${JSON.stringify(profile.structuredContent)}`);
+  }
+  const offsetRecord = await client.callTool({
+    name: 'project_memory',
+    arguments: {
+      action: 'record', project_id: 'smoke', asset_kind: 'document', operation: 'create',
+      asset_id: 'offset-time-record', idempotency_key: 'offset-time-record-v1',
+      body: 'metadata-only-body', fields: { title: 'Offset timestamp' },
+      effective_at: '2026-09-10T00:00:00+00:00',
+    },
+  });
+  if (offsetRecord.isError || offsetRecord.structuredContent?.error) {
+    throw new Error(`offset timestamp rejected: ${JSON.stringify(offsetRecord.structuredContent)}`);
+  }
+  const metadataOnly = await client.callTool({
+    name: 'project_memory',
+    arguments: { action: 'get', project_id: 'smoke', record_id: 'offset-time-record', body_bytes: 0 },
+  });
+  if (metadataOnly.isError || metadataOnly.structuredContent?.record?.body !== undefined
+    || metadataOnly.structuredContent?.record?.body_span?.total_bytes !== 18
+    || !metadataOnly.structuredContent?.record?.omitted_fields?.includes('body')) {
+    throw new Error(`metadata-only read failed: write=${JSON.stringify(offsetRecord.structuredContent)} read=${JSON.stringify(metadataOnly.structuredContent)}`);
+  }
   const planned = await client.callTool({
     name: 'project_memory',
     arguments: {
@@ -288,6 +325,8 @@ try {
       query: 'smoke_index_token',
       query_variants: ['probe.ts', 'smoke code source'],
       limit: 5,
+      request_id: 'smoke-local-query',
+      response_deadline_ms: 30_000,
     },
   });
   if (localSearch.isError
@@ -297,6 +336,13 @@ try {
     || localSearch.structuredContent?.meta?.query_execution !== 'single_broker_request'
     || localSearch.structuredContent?.meta?.live_web_used !== false) {
     throw new Error('project local search failed');
+  }
+  const queryStatus = await client.callTool({
+    name: 'project_memory',
+    arguments: { action: 'query_status', request_id: 'smoke-local-query' },
+  });
+  if (queryStatus.isError || queryStatus.structuredContent?.query_status?.status !== 'completed') {
+    throw new Error(`query status failed: ${JSON.stringify(queryStatus.structuredContent)}`);
   }
   const afterSearch = await client.callTool({
     name: 'project_memory',

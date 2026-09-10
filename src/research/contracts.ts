@@ -27,6 +27,8 @@ export interface ProjectRecord {
   graph_dirty_at?: string;
   active_graph_dirty_at?: string;
   catalog_generation?: number;
+  project_profile_asset_id?: string;
+  project_profile_revision_id?: string;
   purpose?: string;
   user_constraints?: string[];
   protected_parent_ids?: string[];
@@ -184,6 +186,18 @@ export interface CatalogRecordReadback {
   next_body_offset?: number;
   artifact_span?: { start: number; end: number; total: number };
   next_artifact_offset?: number;
+  omitted_fields?: string[];
+}
+
+export interface LegacyRecordReadback {
+  legacy: true;
+  record_type: string;
+  record_id: string;
+  record?: unknown;
+  body?: string;
+  body_span: { start: number; end: number; total_bytes: number };
+  next_body_offset?: number;
+  omitted_fields: string[];
 }
 
 export interface DurableWriteReceipt {
@@ -195,6 +209,8 @@ export interface DurableWriteReceipt {
   idempotency_key: string;
   durability: 'committed';
   changed: boolean;
+  applied_this_request: boolean;
+  idempotent_replay: boolean;
   changed_fields: string[];
   previous_revision?: number;
   previous_revision_id?: string;
@@ -495,6 +511,7 @@ export interface SourceRecordReadback {
   body?: string;
   body_span?: { start: number; end: number; total_bytes: number };
   next_body_offset?: number;
+  omitted_fields?: string[];
 }
 
 export interface DocumentRecordReadback {
@@ -503,6 +520,7 @@ export interface DocumentRecordReadback {
   body?: string;
   body_span?: { start: number; end: number; total_bytes: number };
   next_body_offset?: number;
+  omitted_fields?: string[];
 }
 
 export interface ProjectDocumentRecord {

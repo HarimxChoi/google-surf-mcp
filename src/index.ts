@@ -738,6 +738,7 @@ const ProjectMemoryOutput = {
   receipt: MetaShape.optional(),
   receipts: z.array(MetaShape).optional(),
   context: MetaShape.optional(),
+  current: MetaShape.optional(),
   timeline: MetaShape.optional(),
   diff: MetaShape.optional(),
   job: MetaShape.optional(),
@@ -745,6 +746,7 @@ const ProjectMemoryOutput = {
   snapshot: MetaShape.optional(),
   imported: MetaShape.optional(),
   doctor: MetaShape.optional(),
+  query_status: MetaShape.optional(),
   assertion: MetaShape.optional(),
   entity: MetaShape.optional(),
   entities: z.array(MetaShape).optional(),
@@ -784,13 +786,15 @@ const ProjectMemorySearchSchema = {
     limit: z.number().int().min(1).max(20).optional(),
   })).min(1).max(20).optional().describe('Independent questions returned as separate ranked groups inside one broker request.'),
   response_budget_bytes: z.number().int().min(1_000).max(1_000_000).optional().describe('Maximum requested response budget. Retrieval work and stored bodies remain separate.'),
+  request_id: z.string().min(1).max(200).optional().describe('Caller-chosen ID for one local query. Supply it before a long request so project_memory query_status/query_cancel can inspect or cancel the same operation.'),
+  response_deadline_ms: z.number().int().min(1_000).max(300_000).optional().describe('Cooperative 1-300 second response deadline for one local query. Completed writes are unaffected; native work stops at the next cancellation boundary.'),
   filters: z.object({
     source_families: z.array(z.enum(['document', 'code', 'graph'])).max(3).optional(),
     retrieval_lanes: z.array(z.enum(['exact', 'bm25', 'vector', 'graph'])).max(4).optional(),
     kinds: z.array(z.string().min(1).max(100)).max(20).optional(),
     roles: z.array(z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'other'])).max(10).optional(),
-    recorded_after: z.iso.datetime().optional(),
-    recorded_before: z.iso.datetime().optional(),
+    recorded_after: z.iso.datetime({ offset: true }).optional(),
+    recorded_before: z.iso.datetime({ offset: true }).optional(),
   }).optional().describe('Optional project, source, type, role, lane, and recorded-time filters. Excluded lanes are not executed.'),
 };
 
@@ -1026,7 +1030,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     'PROJECT MEMORY MANAGEMENT. ' +
     SharedResearchBrokerDescription +
     'It links session intent, immutable plan revisions, experiments, decisions, versioned ontology, and bitemporal data lineage; corrections can use entity merge or split without discarding history. ' +
-    'Use context for the bounded current project view; current to generate a compact CURRENT.md; get/get_batch for exact records and body spans; record/record_batch for durable idempotent writes; timeline/diff for history; sync for declared source deltas; job_status/job_wait/job_cancel for background progress and safe stage-boundary cancellation; verify for preservation levels; snapshot/snapshot_import/snapshot_rollback for versioned offline transfer and append-only recovery; doctor for passive diagnostics; rebuild for derived indexes; export for graph views; and forget for reversible deletion. Typed record writes return compact receipts and never echo submitted bodies. ' +
+    'Use project_update for revision-checked changes to an existing project profile; context reads that same versioned profile. Use query_status/query_cancel with a caller-supplied search request_id to inspect or cooperatively stop a long retrieval. Use context for the bounded current project view; current to generate a compact CURRENT.md; get/get_batch for exact records and body spans; record/record_batch for durable idempotent writes; timeline/diff for history; sync for declared source deltas; job_status/job_wait/job_cancel for background progress and safe stage-boundary cancellation; verify for preservation levels; snapshot/snapshot_import/snapshot_rollback for versioned offline transfer and append-only recovery; doctor for passive diagnostics; rebuild for derived indexes; export for graph views; and forget for reversible deletion. Typed record writes return compact receipts and never echo submitted bodies. ' +
     'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
     'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
@@ -1034,11 +1038,11 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     'Search, search_parallel, scholar_search, and extract automatically capture sources and provenance; project_memory manages their durable structure.',
   inputSchema: {
     action: z.enum([
-      'create', 'show', 'search', 'record', 'record_batch', 'get', 'get_batch', 'context',
-      'timeline', 'diff', 'sync', 'job_status', 'job_wait', 'job_cancel', 'verify', 'current', 'snapshot',
+      'create', 'project_update', 'show', 'search', 'record', 'record_batch', 'get', 'get_batch', 'context',
+      'timeline', 'diff', 'sync', 'job_status', 'job_wait', 'job_cancel', 'query_status', 'query_cancel', 'verify', 'current', 'snapshot',
       'snapshot_import', 'snapshot_rollback', 'doctor', 'rebuild', 'export', 'forget',
     ]).describe(
-      'Typed project-memory operation. create: project_id and name required. get/get_batch: exact IDs and bounded body spans. record/record_batch: typed durable writes with idempotency_key. context/current/timeline/diff: compact current or historical views. sync/rebuild: incremental source and derived indexing. job_status/job_wait/job_cancel: durable background work. snapshot/snapshot_import/snapshot_rollback: offline transfer and append-only recovery. export: HTML, DOT, JSON, or Neo4j. forget: reversible deletion preview and confirmation. Unrelated local questions use project_memory_search.',
+      'Typed project-memory operation. create: project_id and name required. project_update: versioned profile update with expected_revision and idempotency_key. get/get_batch: exact IDs and bounded body spans; body_bytes=0 returns metadata only. record/record_batch: typed durable writes with idempotency_key. context/current/timeline/diff: compact current or historical views. query_status/query_cancel: inspect or cooperatively cancel caller-identified local retrieval. sync/rebuild: incremental source and derived indexing. job_status/job_wait/job_cancel: durable background work. snapshot/snapshot_import/snapshot_rollback: offline transfer and append-only recovery. export: HTML, DOT, JSON, or Neo4j. forget: reversible deletion preview and confirmation. Unrelated local questions use project_memory_search.',
     ),
     project_id: z.string().min(1).max(64).optional().describe('Stable project id. For search, this is the write-isolated primary scope. Omit to list projects or use all_projects.'),
     detail_level: z.enum(['summary', 'full']).default('summary').describe('For show with project_id and no target_id, both values return a bounded summary. full is retained only for compatibility and never returns every durable record body.'),
@@ -1049,10 +1053,12 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     limit: z.number().int().min(1).max(20).default(10).describe('Maximum local RAG results for action=search.'),
     queries: ProjectMemorySearchSchema.queries,
     response_budget_bytes: ProjectMemorySearchSchema.response_budget_bytes,
+    request_id: ProjectMemorySearchSchema.request_id,
+    response_deadline_ms: ProjectMemorySearchSchema.response_deadline_ms,
     filters: ProjectMemorySearchSchema.filters,
     export_format: z.enum(['dot', 'd3', 'html', 'neo4j']).default('d3').describe('Visualization file format. html writes one offline explorer with PKM, Lineage, Ontology, project selection, and current-view PNG or anonymized JSON download; d3 writes node-link JSON; dot writes Graphviz DOT; neo4j writes an import-ready CSV and Cypher bundle.'),
     export_view: z.enum(['graph', 'ontology', 'lineage']).default('graph').describe('Initial HTML tab or non-HTML export scope. graph is PKM; ontology shows types, shared schema, verified identity links, and typed instances; lineage shows aligned data and research lineage.'),
-    name: z.string().min(1).max(120).optional().describe('Project name for create, or entity name lookup for show.'),
+    name: z.string().min(1).max(120).optional().describe('Project name for create/project_update, or entity name lookup for show.'),
     record_type: z.enum(['session', 'plan', 'experiment', 'decision', 'ontology', 'correction']).optional().describe(
       'Required for record. session stores intent; plan creates an immutable revision; experiment starts or finishes a run; decision links a conclusion; ontology creates a versioned type or relation; correction replaces an assertion or merges/splits entities.',
     ),
@@ -1101,8 +1107,8 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     supersedes_term_id: z.string().min(1).max(200).optional().describe('Prior ontology term replaced by this revision.'),
     reason: z.string().min(1).max(2_000).optional().describe('Required reason for any correction.'),
     evidence_ids: z.array(z.string().min(1).max(200)).max(50).optional().describe('Evidence retained on a corrected assertion.'),
-    valid_from: z.iso.datetime().optional().describe('Corrected assertion valid-time start.'),
-    valid_to: z.iso.datetime().optional().describe('Corrected assertion valid-time end.'),
+    valid_from: z.iso.datetime({ offset: true }).optional().describe('Corrected assertion valid-time start.'),
+    valid_to: z.iso.datetime({ offset: true }).optional().describe('Corrected assertion valid-time end.'),
     operation: z.enum(['create', 'patch', 'append_evidence', 'relocate', 'correct']).optional().describe('Typed durable write operation. Use with asset_kind and idempotency_key.'),
     asset_kind: z.enum(['project', 'plan', 'task', 'method', 'experiment', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact', 'document', 'decision', 'session']).optional(),
     asset_id: z.string().min(1).max(500).optional().describe('Stable logical identity. Revisions remain under this ID.'),
@@ -1120,7 +1126,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
       content_hash: z.string().max(200).optional(),
       role: z.string().max(200).optional(),
       location: z.string().max(2_000).optional(),
-      observed_at: z.iso.datetime().optional(),
+      observed_at: z.iso.datetime({ offset: true }).optional(),
       available: z.boolean().optional(),
       verification: z.enum(['declared', 'present', 'hash_verified', 'restore_tested', 'replayed']).optional(),
     })).max(50_000).optional(),
@@ -1143,7 +1149,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
         content_hash: z.string().max(200).optional(),
         role: z.string().max(200).optional(),
         location: z.string().max(2_000).optional(),
-        observed_at: z.iso.datetime().optional(),
+        observed_at: z.iso.datetime({ offset: true }).optional(),
         available: z.boolean().optional(),
         verification: z.enum(['declared', 'present', 'hash_verified', 'restore_tested', 'replayed']).optional(),
       })).max(50_000).optional(),
@@ -1152,7 +1158,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
       access_tier: z.enum(['hot', 'warm', 'cold']).optional(),
       set_current: z.boolean().optional(),
       missing_fields: z.array(z.string().min(1).max(500)).max(1_000).optional(),
-      effective_at: z.iso.datetime().optional(),
+      effective_at: z.iso.datetime({ offset: true }).optional(),
       source_sequence: z.number().int().min(0).optional(),
       source_reference: z.string().max(2_000).optional(),
       correction_reason: z.string().max(2_000).optional(),
@@ -1161,7 +1167,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     access_tier: z.enum(['hot', 'warm', 'cold']).optional().describe('Operational access tier. It does not rank scientific quality.'),
     set_current: z.boolean().optional().describe('For plan writes, select this revision as current. Defaults to true; use false for historical imports.'),
     missing_fields: z.array(z.string().min(1).max(500)).max(1_000).optional(),
-    effective_at: z.iso.datetime().optional(),
+    effective_at: z.iso.datetime({ offset: true }).optional(),
     source_sequence: z.number().int().min(0).optional(),
     source_reference: z.string().max(2_000).optional(),
     correction_reason: z.string().max(2_000).optional(),
@@ -1169,14 +1175,14 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     from_revision: z.number().int().min(1).optional(),
     to_revision: z.number().int().min(1).optional(),
     body_offset: z.number().int().min(0).optional(),
-    body_bytes: z.number().int().min(1).max(1024 * 1024).optional(),
+    body_bytes: z.number().int().min(0).max(1024 * 1024).optional().describe('UTF-8 bytes to return. Use 0 for metadata-only readback; use a positive value and next_body_offset for exact paging.'),
     artifact_offset: z.number().int().min(0).optional(),
     artifact_limit: z.number().int().min(1).max(1_000).optional(),
     budget_bytes: z.number().int().min(1_000).max(1_000_000).optional(),
     since_revision: z.number().int().min(0).optional(),
     after: z.string().optional(),
     before: z.string().optional(),
-    as_of: z.iso.datetime().optional().describe('For context, reconstruct the project and plan view at this effective or recorded time.'),
+    as_of: z.iso.datetime({ offset: true }).optional().describe('For context, reconstruct the project and plan view at this effective or recorded time.'),
     job_id: z.string().min(1).max(500).optional(),
     after_revision: z.number().int().min(0).optional(),
     wait_timeout_ms: z.number().int().min(0).max(60_000).optional(),

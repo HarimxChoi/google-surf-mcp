@@ -312,7 +312,7 @@ describe('project_memory tool', () => {
       response_result_bytes: expect.any(Number),
     });
     expect(grouped.structuredContent?.meta?.response_result_bytes).toBeLessThanOrEqual(1_000);
-    expect(timeline.structuredContent?.timeline?.events).toHaveLength(1);
+    expect(timeline.structuredContent?.timeline?.events).toHaveLength(2);
   });
 
   it('cancels a background job through the public memory tool', async () => {
@@ -336,6 +336,33 @@ describe('project_memory tool', () => {
       status: 'cancelled', cancel_reason: 'user changed scope',
     });
     expect(status.structuredContent?.job).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('updates an existing project profile and exposes cancellable query state', async () => {
+    await service.createProject('Profile tool', 'profile-tool');
+    const updated = await projectMemoryTool({
+      action: 'project_update', project_id: 'profile-tool', expected_revision: 0,
+      idempotency_key: 'profile-tool-v1', purpose: 'Keep durable intent separate from search queries.',
+      user_constraints: ['Preserve prior revisions'],
+    }, service);
+    expect(updated.structuredContent).toMatchObject({
+      project: { purpose: 'Keep durable intent separate from search queries.' },
+      receipt: { revision: 1, applied_this_request: true, idempotent_replay: false },
+    });
+
+    const controller = new AbortController();
+    controller.abort();
+    const cancelled = await projectMemorySearchTool({
+      project_id: 'profile-tool', query: 'cancel before retrieval',
+      request_id: 'profile-tool-cancelled-query', response_deadline_ms: 5_000,
+    }, service, controller.signal);
+    expect(cancelled.isError).toBe(true);
+    const status = await projectMemoryTool({
+      action: 'query_status', request_id: 'profile-tool-cancelled-query',
+    }, service);
+    expect(status.structuredContent?.query_status).toMatchObject({
+      request_id: 'profile-tool-cancelled-query', status: 'cancelled', phase: 'embedding',
+    });
   });
 
   it('exports one project or all named projects without node bodies', async () => {

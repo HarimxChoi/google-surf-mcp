@@ -18,12 +18,15 @@ export interface ProjectMemorySearchInput {
   limit?: number;
   queries?: Array<{ id: string; query: string; query_variants?: string[]; limit?: number }>;
   response_budget_bytes?: number;
+  request_id?: string;
+  response_deadline_ms?: number;
   filters?: ResearchSearchFilters;
 }
 
 export interface ProjectMemoryInput extends ProjectMemorySearchInput {
-  action: 'create' | 'show' | 'search' | 'record' | 'record_batch' | 'get' | 'get_batch'
-    | 'context' | 'timeline' | 'diff' | 'sync' | 'job_status' | 'job_wait' | 'job_cancel' | 'verify'
+  action: 'create' | 'project_update' | 'show' | 'search' | 'record' | 'record_batch' | 'get' | 'get_batch'
+    | 'context' | 'timeline' | 'diff' | 'sync' | 'job_status' | 'job_wait' | 'job_cancel'
+    | 'query_status' | 'query_cancel' | 'verify'
     | 'current' | 'snapshot' | 'snapshot_import' | 'snapshot_rollback'
     | 'doctor' | 'rebuild' | 'export' | 'forget';
   detail_level?: 'summary' | 'full';
@@ -202,6 +205,9 @@ export async function projectMemorySearchTool(
     if (!scope.length) throw new Error('project_id or all_projects=true required');
     const started = Date.now();
     if (input.queries?.length) {
+      if (input.request_id || input.response_deadline_ms) {
+        throw new Error('request_id and response_deadline_ms apply to one query; use separate IDs for grouped queries');
+      }
       const groups = await service.searchGrouped(scope[0], input.queries, scope.slice(1), signal, input.filters);
       const resultBudget = input.response_budget_bytes ?? 12_000;
       const groupBudget = Math.max(1, Math.floor(resultBudget / groups.length));
@@ -263,6 +269,10 @@ export async function projectMemorySearchTool(
       scope.slice(1),
       signal,
       input.filters,
+      true,
+      false,
+      input.request_id,
+      input.response_deadline_ms,
     );
     const hits = searched.results;
     const compact = compactRankedResults(input.query!, hits.map((hit) => ({
@@ -295,7 +305,7 @@ export async function projectMemorySearchTool(
         project_ids: scope,
         retrieval_lanes: ['exact', 'bm25', ...(vectorEnabled ? ['vector'] : []), 'graph'],
         fusion: 'rrf',
-        reranker: vectorEnabled ? 'local_vector' : 'rrf_only',
+        reranker: searched.partial ? 'not_completed' : vectorEnabled ? 'local_vector' : 'rrf_only',
         response_format: 'ranked_summaries',
         response_budget_bytes: resultBudget,
         response_result_bytes: budgeted.bytes,
@@ -310,12 +320,14 @@ export async function projectMemorySearchTool(
         query_execution: 'single_broker_request',
         graph_project_count: searched.graph_project_count,
         degraded_lanes: searched.degraded_lanes,
-        partial: searched.degraded_lanes.length > 0,
+        partial: searched.partial || searched.degraded_lanes.length > 0,
+        completed_lanes: searched.completed_lanes,
+        ...(searched.incomplete_reason ? { incomplete_reason: searched.incomplete_reason } : {}),
         timings: searched.timings,
         request_id: searched.request_id,
         candidate_counts: searched.candidate_counts,
       },
-      memory: `Projects: ${scope.length} | Queries: ${searched.queries.length} | Local RAG: ${results.length} results | Live web: no | Status: ${searched.degraded_lanes.length ? `partial (${searched.degraded_lanes.join(', ')})` : 'ready'}`,
+      memory: `Projects: ${scope.length} | Queries: ${searched.queries.length} | Local RAG: ${results.length} results | Live web: no | Status: ${searched.partial || searched.degraded_lanes.length ? `partial (${searched.degraded_lanes.join(', ') || 'cancelled after completed lanes'})` : 'ready'}`,
     });
   } catch (error) {
     return toolError(error);
@@ -346,6 +358,26 @@ export async function projectMemoryTool(
       });
     }
 
+    if (input.action === 'project_update') {
+      const projectId = requireProject(input);
+      if (input.expected_revision === undefined || !input.idempotency_key) {
+        throw new Error('project_update requires expected_revision and idempotency_key');
+      }
+      const updated = await service.updateProjectProfile({
+        project_id: projectId,
+        name: input.name,
+        purpose: input.purpose,
+        user_constraints: input.user_constraints,
+        protected_parent_ids: input.protected_parent_ids,
+        expected_revision: input.expected_revision,
+        idempotency_key: input.idempotency_key,
+      });
+      return formatToolResponse({
+        ...updated,
+        memory: `Project: ${updated.project.name} | Profile: v${updated.receipt.revision} | Status: committed`,
+      });
+    }
+
     if (input.action === 'doctor') {
       const doctor = await service.passiveStatus();
       const adapterMemory = process.memoryUsage();
@@ -364,6 +396,17 @@ export async function projectMemoryTool(
           private_bytes_note: 'Current private bytes are not exposed portably by Node.js and are not inferred from RSS.',
         },
         memory: 'Research doctor: passive | Database/model opened: no',
+      });
+    }
+
+    if (input.action === 'query_status' || input.action === 'query_cancel') {
+      if (!input.request_id) throw new Error('request_id required');
+      const query = input.action === 'query_status'
+        ? await service.queryStatus(input.request_id)
+        : await service.cancelQuery(input.request_id, input.cancel_reason);
+      return formatToolResponse({
+        query_status: query,
+        memory: `Query: ${query.request_id} | Phase: ${query.phase} | Status: ${query.status}`,
       });
     }
 

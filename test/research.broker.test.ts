@@ -71,6 +71,18 @@ describe('research broker', () => {
       ]));
     }
     expect(detail.project.project_id).toBe('broker-4');
+    await clients[0].writeCatalogRecord({
+      project_id: 'broker-0', kind: 'document', operation: 'create',
+      asset_id: 'broker-metadata', idempotency_key: 'broker-metadata-v1',
+      body: 'broker-body', fields: { title: 'Broker metadata' },
+    });
+    const metadata = await clients[1].getCatalogRecord(
+      'broker-0', 'broker-metadata', undefined, 0, 0,
+    );
+    expect('legacy' in metadata).toBe(false);
+    if ('legacy' in metadata) throw new Error('unexpected legacy record');
+    expect(metadata.body).toBeUndefined();
+    expect(metadata.body_span).toEqual({ start: 0, end: 0, total_bytes: 11 });
     expect(clients.every((client) => client.status().state === 'ready')).toBe(true);
     const controller = new AbortController();
     controller.abort();
@@ -114,8 +126,9 @@ describe('research broker', () => {
       query_variants: ['shared calculation evidence'], limit: 5,
     }));
     const controller = new AbortController();
-    const cancelled = first.searchGrouped('coalesced', groups, [], controller.signal);
-    const retained = second.searchGrouped('coalesced', groups, [], undefined);
+    const filters = { retrieval_lanes: ['bm25' as const] };
+    const cancelled = first.searchGrouped('coalesced', groups, [], controller.signal, filters);
+    const retained = second.searchGrouped('coalesced', groups, [], undefined, filters);
     setTimeout(() => controller.abort(), 10);
 
     await expect(cancelled).rejects.toThrow('research search cancelled');
@@ -135,7 +148,13 @@ describe('research broker', () => {
     services.push(service);
 
     const status = await service.passiveStatus() as Awaited<ReturnType<ResearchService['passiveStatus']>> & {
-      broker: { connected_clients: number; active_requests: number };
+      broker: {
+        connected_clients: number;
+        active_requests: number;
+        recycle_eligible: boolean;
+        recycle_blockers: string[];
+        background_ownership: { checkpoint_drain_requested: boolean };
+      };
     };
 
     expect(status).toMatchObject({
@@ -150,6 +169,9 @@ describe('research broker', () => {
     expect(status.process.rss_bytes).toBeGreaterThan(0);
     expect(status.broker.connected_clients).toBe(1);
     expect(status.broker.active_requests).toBe(0);
+    expect(status.broker.recycle_eligible).toBe(true);
+    expect(status.broker.recycle_blockers).toEqual([]);
+    expect(status.broker.background_ownership.checkpoint_drain_requested).toBe(false);
   }, 20_000);
 
   it('drains while clients remain connected and reconnects on the next request', async () => {

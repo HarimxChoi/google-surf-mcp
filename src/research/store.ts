@@ -122,7 +122,7 @@ function utf8Page(text: string, requestedStart: number, requestedBytes: number):
   const bytes = Buffer.from(text, 'utf8');
   let start = Math.max(0, Math.min(Math.floor(requestedStart), bytes.length));
   while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
-  let end = Math.max(start, Math.min(start + Math.max(1, Math.floor(requestedBytes)), bytes.length));
+  let end = Math.max(start, Math.min(start + Math.max(0, Math.floor(requestedBytes)), bytes.length));
   while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
   return {
     body: bytes.subarray(start, end).toString('utf8'),
@@ -597,7 +597,7 @@ export class ResearchStore {
       if (receipt.request_hash !== input.request_hash) {
         throw new Error('idempotency key conflict: the key was already committed with different content');
       }
-      return receipt;
+      return { ...receipt, applied_this_request: false, idempotent_replay: true };
     }
     return await this.transaction(db, async (tx) => {
       const concurrentReceipt = await tx.select<DurableWriteReceipt>(receiptId);
@@ -606,7 +606,7 @@ export class ResearchStore {
         if (receipt.request_hash !== input.request_hash) {
           throw new Error('idempotency key conflict: the key was already committed with different content');
         }
-        return receipt;
+        return { ...receipt, applied_this_request: false, idempotent_replay: true };
       }
       const assetId = catalogRecordId('catalog_asset', input.asset_id);
       const storedAsset = await tx.select<CatalogAssetRecord>(assetId);
@@ -823,6 +823,16 @@ export class ResearchStore {
         if (project) {
           await tx.update(projectId).merge({
             catalog_generation: Number(project.catalog_generation ?? 0) + 1,
+            ...(input.kind === 'project' ? {
+              project_profile_asset_id: input.asset_id,
+              project_profile_revision_id: revisionId,
+              ...(typeof fields.name === 'string' ? { name: fields.name } : {}),
+              ...(typeof fields.purpose === 'string' ? { purpose: fields.purpose } : {}),
+              ...(Array.isArray(fields.user_constraints)
+                ? { user_constraints: fields.user_constraints } : {}),
+              ...(Array.isArray(fields.protected_parent_ids)
+                ? { protected_parent_ids: fields.protected_parent_ids } : {}),
+            } : {}),
             ...(input.kind === 'plan' && input.set_current !== false ? {
               current_plan_asset_id: input.asset_id,
               current_plan_revision_id: revisionId,
@@ -870,6 +880,8 @@ export class ResearchStore {
         idempotency_key: input.idempotency_key,
         durability: 'committed',
         changed,
+        applied_this_request: true,
+        idempotent_replay: false,
         changed_fields: changedFields,
         ...(currentAsset ? { previous_revision: currentAsset.current_revision } : {}),
         ...(currentAsset ? { previous_revision_id: currentAsset.current_revision_id } : {}),
@@ -931,7 +943,18 @@ export class ResearchStore {
     let body: string | undefined;
     let bodySpan: CatalogRecordReadback['body_span'];
     let nextBodyOffset: number | undefined;
+    const omittedFields: string[] = [];
     if (revision.body_blob_id) {
+      if (bodyBytes === 0) {
+        bodySpan = {
+          start: Math.max(0, Math.min(bodyStart, revision.body_bytes)),
+          end: Math.max(0, Math.min(bodyStart, revision.body_bytes)),
+          total_bytes: revision.body_bytes,
+        };
+        omittedFields.push('body');
+      }
+    }
+    if (revision.body_blob_id && bodyBytes > 0) {
       const blob = await db.select<{
         text?: string;
         storage?: 'chunks';
@@ -965,7 +988,7 @@ export class ResearchStore {
           start++;
           localStart++;
         }
-        let localEnd = Math.max(localStart, Math.min(localStart + Math.max(1, bodyBytes), bytes.length));
+        let localEnd = Math.max(localStart, Math.min(localStart + bodyBytes, bytes.length));
         while (localEnd > localStart && start + localEnd - localStart < totalBytes
           && (bytes[localEnd] & 0xc0) === 0x80) localEnd--;
         const end = start + localEnd - localStart;
@@ -982,7 +1005,27 @@ export class ResearchStore {
       ...(nextBodyOffset !== undefined ? { next_body_offset: nextBodyOffset } : {}),
       artifact_span: { start: artifactOffset, end: artifactEnd, total: artifactTotal },
       ...(artifactEnd < artifactTotal ? { next_artifact_offset: artifactEnd } : {}),
+      ...(omittedFields.length ? { omitted_fields: omittedFields } : {}),
     };
+  }
+
+  async listCurrentCatalogRevisions(
+    projectId: string,
+    kind: CatalogAssetKind,
+    limit = 200,
+  ): Promise<CatalogRevisionRecord[]> {
+    const db = await this.open();
+    const [rows] = await db.query<[CatalogRevisionRecord[]]>(
+      `SELECT * OMIT id FROM catalog_revision
+       WHERE project_id = $project_id AND kind = $kind
+         AND revision_id IN (
+           SELECT VALUE current_revision_id FROM catalog_asset
+           WHERE project_id = $project_id AND kind = $kind AND status = 'active'
+         )
+       ORDER BY recorded_at ASC LIMIT $limit`,
+      { project_id: projectId, kind, limit: Math.min(500, Math.max(1, limit)) },
+    ).collect();
+    return rows;
   }
 
   async listCatalogAssets(
@@ -2598,6 +2641,15 @@ export class ResearchStore {
     if (!selected || selected.project_id !== projectId || selected.active !== true) return undefined;
     const { active: _active, ...entry } = selected;
     if (!entry.content_hash || !entry.searchable || entry.sensitive) return { source: true, entry };
+    if (bodyBytes === 0) {
+      const start = Math.max(0, Math.min(bodyStart, entry.size));
+      return {
+        source: true,
+        entry,
+        body_span: { start, end: start, total_bytes: entry.size },
+        omitted_fields: ['body'],
+      };
+    }
     const [bodies] = await db.query<[Array<{ text: string }>]>(
       'SELECT text FROM source_body WHERE content_hash = $content_hash LIMIT 1',
       { content_hash: entry.content_hash },
@@ -2796,6 +2848,16 @@ export class ResearchStore {
         { document_id: documentId },
       ).collect();
     if (!chunks.length) return { document: true, record };
+    if (bodyBytes === 0) {
+      const totalBytes = chunks.reduce((sum, chunk) => sum + Buffer.byteLength(chunk.text, 'utf8'), 0);
+      const start = Math.max(0, Math.min(bodyStart, totalBytes));
+      return {
+        document: true,
+        record,
+        body_span: { start, end: start, total_bytes: totalBytes },
+        omitted_fields: ['body'],
+      };
+    }
     const page = utf8Page(chunks.map((chunk) => chunk.text).join(''), bodyStart, bodyBytes);
     return {
       document: true,

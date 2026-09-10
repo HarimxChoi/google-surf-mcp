@@ -342,4 +342,61 @@ describe('vector retrieval', () => {
       await service.close();
     }
   });
+
+  it('returns completed retrieval lanes when the response deadline interrupts reranking', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'surf-vector-'));
+    roots.push(root);
+    const embeddings = new FakeEmbeddings();
+    const service = new ResearchService({
+      enabled: true,
+      root,
+      endpoint: 'mem://',
+      embeddingProvider: embeddings,
+    });
+    try {
+      await service.createProject('Deadline query', 'deadline-query');
+      for (let index = 0; index < 2; index++) {
+        await service.capture({
+          tool: 'extract',
+          project_id: 'deadline-query',
+          payload: {
+            title: `Deadline evidence ${index}`,
+            url: `https://example.com/deadline-${index}`,
+            content: `deadline evidence semantic target ${index}`,
+            extraction_quality: 'full_text',
+          },
+        });
+      }
+      await service.waitForIdle();
+
+      let releaseRerank!: () => void;
+      let enteredRerank!: () => void;
+      const blocked = new Promise<void>((resolveBlocked) => { releaseRerank = resolveBlocked; });
+      const entered = new Promise<void>((resolveEntered) => { enteredRerank = resolveEntered; });
+      const embedPassages = embeddings.embedPassages.bind(embeddings);
+      embeddings.embedPassages = async (texts: string[]) => {
+        enteredRerank();
+        await blocked;
+        return await embedPassages(texts);
+      };
+      const pending = service.searchBatch(
+        'deadline-query', 'deadline evidence', [], 10, [], undefined, undefined,
+        true, false, 'deadline-partial', 1_000,
+      );
+      await entered;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_050));
+      releaseRerank();
+
+      const result = await pending;
+      expect(result.partial).toBe(true);
+      expect(result.results).toHaveLength(2);
+      expect(result.completed_lanes).toEqual(expect.arrayContaining(['exact', 'bm25', 'vector', 'graph']));
+      expect(result.incomplete_reason).toBe('response_deadline');
+      expect(service.queryStatus('deadline-partial')).toMatchObject({
+        status: 'partial', phase: 'complete', cancel_reason: 'response_deadline',
+      });
+    } finally {
+      await service.close();
+    }
+  });
 });
