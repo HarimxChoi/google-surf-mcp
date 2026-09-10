@@ -138,7 +138,9 @@ Google Surf는 큰 Bash 출력이 모델에 도달하기 전에 재랭킹하는 
 npx -y google-surf-mcp@latest hooks install --host codex
 ```
 
-Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. Shell 출력은 2,000자부터 재랭킹하며, 기본 표시 예산은 2,000자입니다. 서로 다른 query-matching evidence block이 있으면 최대 6,000자까지 확장합니다. 명시적인 override는 6,000자 초과도 허용하며, 턴 전체 출력량에는 누적 제한을 두지 않습니다. 동일하거나 유사한 검색 2회와 명시적인 foreground polling loop는 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
+Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. Shell 출력은 1,500자부터 재랭킹하며, 기본 표시 예산은 1,500자입니다. 서로 다른 query-matching evidence record 또는 block이 있으면 최대 3,000자까지 확장합니다. 명시적인 override는 3,000자 초과도 허용하며, 턴 전체 출력량에는 누적 제한을 두지 않습니다. 동일하거나 유사한 검색 2회와 명시적인 foreground polling loop는 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
+
+JSON/JSONL 요약은 원본 입력 기준 JSON pointer, 상위 identity/조건 참조, 원래 결과 값을 묶은 compact record를 사용합니다. Markdown 표의 행에는 헤더와 출처 줄을 포함한 인접 문맥이 함께 유지됩니다. 선택한 record와 필수 문맥이 함께 예산 안에 들어가야 하며, record 중간을 자르는 대신 생략 여부를 표시합니다. 일반 로그는 block 재랭킹을 유지합니다. 선택은 모델·DB·추가 subprocess 없이 결정론적 lexical 방식으로 수행됩니다. 문맥 추출은 구조와 필드명 휴리스틱이며 의미 이해가 아니므로, 미선택 필드는 원본 입력에서 확인해야 합니다. 이 요약은 실험 로그나 SSOT 이력을 대체하지 않습니다. 입력 기준 pointer는 영구 조회 handle이 아닙니다. 기존 설치 hook은 bundle을 업데이트해야 변경 코드를 사용합니다.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -481,8 +483,8 @@ npx google-surf-mcp daemon drain --json
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | embedded SurrealDB 쿼리별 timeout. 1-600초 범위이며 한 검색 lane이 timeout이면 partial로 표시하고 나머지 결과는 반환 |
 | `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | process 내부 graph projection과 분석 artifact의 byte budget |
 | `SURF_RESEARCH_WORKER_SOFT_MEMORY_MB` | `2048` | 진행 중인 작업 완료 후 즉시 idle drain을 요청하는 RSS 기준 |
-| `SURF_RERANK_TRIGGER_CHARS` | `2000` | 셸 출력 요약을 시작하는 길이 기준(해당 길이 포함). 이보다 짧아도 민감한 값은 제거 |
-| `SURF_RERANK_MAX_CHARS` | adaptive: 2000–6000 | 셸 요약의 명시적 길이 제한으로 6000자 초과도 허용. 기본 확장은 반복 출력량이 아니라 서로 다른 query-matching block 수에 기반 |
+| `SURF_RERANK_TRIGGER_CHARS` | `1500` | 셸 출력 요약을 시작하는 길이 기준(해당 길이 포함). 이보다 짧아도 민감한 값은 제거 |
+| `SURF_RERANK_MAX_CHARS` | adaptive: 1500–3000 | 셸 요약의 명시적 길이 제한으로 3000자 초과도 허용. 기본값은 서로 다른 query-matching record/block 수 n에 대한 `min(3000, ceil(1500 + 750*log2(max(1,n))))`이며 반복 출력량으로 늘어나지 않음 |
 | `GITHUB_TOKEN` | 미설정 | 저장소 확인을 위한 GitHub API 한도를 높이는 선택 token |
 | `SURF_RESEARCH_CODE_WORKERS` | 자동, 최대 4 | 최초 코드 구조 색인에 사용하는 Tree-sitter worker 수 |
 | `SURF_LOCALE` | `en-US` | 브라우저 로케일 |

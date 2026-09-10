@@ -2,7 +2,7 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { formatRerankedOutput, rerankOutput, sanitizeOutputText } from './outputRerank.js';
+import { formatRerankedOutput, rerankOutput, responseText, sanitizeOutputText } from './outputRerank.js';
 
 type HookInput = Record<string, unknown>;
 
@@ -22,14 +22,6 @@ async function readStdin(): Promise<HookInput> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as HookInput;
 }
 
-function responseText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).output === 'string') {
-    return (value as Record<string, unknown>).output as string;
-  }
-  return JSON.stringify(value ?? null);
-}
-
 function commandFrom(input: HookInput): string {
   const toolInput = input.tool_input && typeof input.tool_input === 'object'
     ? input.tool_input as Record<string, unknown>
@@ -46,19 +38,20 @@ export async function processOutputHook(
   if (!raw) return undefined;
   const safe = sanitizeOutputText(raw);
   const triggerChars = options.trigger_chars
-    ?? positiveInteger(process.env.SURF_RERANK_TRIGGER_CHARS, 2_000);
+    ?? positiveInteger(process.env.SURF_RERANK_TRIGGER_CHARS, 1_500);
   const configuredMax = options.max_chars ?? positiveInteger(process.env.SURF_RERANK_MAX_CHARS, 0);
   const maxChars = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.floor(configuredMax) : undefined;
   if (safe === raw && raw.length < triggerChars) return undefined;
 
-  const ranked = rerankOutput(commandFrom(input), safe, { max_chars: maxChars });
   const result = input.tool_response && typeof input.tool_response === 'object'
     ? input.tool_response as Record<string, unknown> : {};
   const exitCode = typeof result.exit_code === 'number' && Number.isFinite(result.exit_code)
     ? ` Exit code: ${result.exit_code}.` : '';
+  const prefix = `[Google Surf output guard]${exitCode}\n`;
+  const ranked = rerankOutput(commandFrom(input), safe, { max_chars: maxChars, output_prefix: prefix });
   const replacement = safe !== raw && safe.length <= triggerChars
     ? `[Google Surf output guard]${exitCode} Sensitive values and control sequences were removed. Source output was not stored.\n${safe}`
-    : `[Google Surf output guard]${exitCode}\n${formatRerankedOutput(ranked)}`;
+    : ranked.rendered ?? `${prefix}${formatRerankedOutput(ranked)}`;
   return { decision: 'block', reason: replacement.slice(0, maxChars ?? ranked.meta.response_budget_chars) };
 }
 

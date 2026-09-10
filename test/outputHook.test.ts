@@ -15,13 +15,13 @@ function input(output: string) {
 afterEach(() => vi.unstubAllEnvs());
 
 describe('Codex output hook', () => {
-  it('intercepts at 2000 characters and includes the header within the default budget', async () => {
+  it('intercepts at 1500 characters and includes the header within the default budget', async () => {
     vi.stubEnv('SURF_RERANK_TRIGGER_CHARS', '');
     vi.stubEnv('SURF_RERANK_MAX_CHARS', '');
-    expect(await processOutputHook(input('x'.repeat(1_999)))).toBeUndefined();
-    const response = await processOutputHook(input('x'.repeat(2_000)));
+    expect(await processOutputHook(input('x'.repeat(1_499)))).toBeUndefined();
+    const response = await processOutputHook(input('x'.repeat(1_500)));
     expect(response?.decision).toBe('block');
-    expect(String(response?.reason).length).toBeLessThanOrEqual(2_000);
+    expect(String(response?.reason).length).toBeLessThanOrEqual(1_500);
   });
 
   it('permits a configured output override above 6000 characters', async () => {
@@ -69,7 +69,7 @@ describe('Codex output hook', () => {
     expect(response?.decision).toBe('block');
     expect(String(response?.reason)).toContain('final perplexity: 8.42');
     expect(String(response?.reason)).toContain('Exit code: 0');
-    expect(String(response?.reason).length).toBeLessThan(6_000);
+    expect(String(response?.reason).length).toBeLessThanOrEqual(3_000);
   });
 
   it('preserves the failed command exit status while compacting the output', async () => {

@@ -1,4 +1,5 @@
 import { adaptiveOutputBudget } from './responseBudget.js';
+import { evidenceRecords, renderEvidence } from './evidenceRecords.js';
 
 type OutputBlock = {
   index: number;
@@ -9,6 +10,8 @@ export interface RankedOutputBlock {
   rank: number;
   source_index: number;
   text: string;
+  locator?: string;
+  context_indices?: number[];
 }
 
 export interface RerankedOutput {
@@ -19,12 +22,14 @@ export interface RerankedOutput {
   total_blocks: number;
   returned_blocks: number;
   truncated: boolean;
+  rendered?: string;
   meta: {
     retrieval_lanes: ['source_order', 'exact', 'bm25'];
     fusion: 'rrf';
     stored: false;
     response_budget_chars: number;
     response_budget_policy: 'adaptive_evidence_breadth' | 'caller';
+    selection: 'evidence_records' | 'blocks';
   };
 }
 
@@ -126,11 +131,13 @@ function plainBlocks(text: string): string[] {
   return output;
 }
 
-function responseText(value: unknown): string {
+export function responseText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    if (typeof record.output === 'string') return record.output;
+    const envelopeKeys = new Set(['output', 'exit_code', 'session_id', 'chunk_id', 'wall_time_seconds', 'original_token_count']);
+    // An experiment may itself have an output field; only unwrap known shell envelopes.
+    if (typeof record.output === 'string' && Object.keys(record).every(key => envelopeKeys.has(key))) return record.output;
   }
   try {
     return JSON.stringify(value ?? null);
@@ -219,10 +226,14 @@ export function sanitizeOutputText(text: string): string {
 export function rerankOutput(
   query: string,
   value: unknown,
-  options: { max_chars?: number; max_blocks?: number } = {},
+  options: { max_chars?: number; max_blocks?: number; selection?: 'records' | 'blocks'; output_prefix?: string } = {},
 ): RerankedOutput {
   const text = responseText(value);
-  const blocks = outputBlocks(sanitizeOutputText(text));
+  const safe = sanitizeOutputText(text);
+  const records = options.selection === 'blocks' ? undefined : evidenceRecords(safe, sanitizeOutputText);
+  const blocks = records ? records.map(record => ({ index: record.index,
+    text: `${record.locator}\n${record.text}\n${record.dependencies.map(id => records[id].text)
+      .filter(context => /^\s*\|.+\n\|[-:|]+/.test(context)).join('\n')}` })) : outputBlocks(safe);
   const exactRank = ranks(exactScores(query, blocks));
   const bm25Rank = ranks(bm25Scores(query, blocks));
   const ordered = blocks.map((block, index) => ({
@@ -235,7 +246,43 @@ export function rerankOutput(
   const evidenceBlocks = new Set([...exactRank.keys(), ...bm25Rank.keys()]).size;
   const maxChars = explicitBudget ? Math.floor(options.max_chars!) : adaptiveOutputBudget(evidenceBlocks);
   const maxBlocks = Number.isFinite(options.max_blocks) && options.max_blocks! > 0
-    ? Math.floor(options.max_blocks!) : Math.max(8, Math.ceil(maxChars / 1_000));
+    ? Math.floor(options.max_blocks!) : Number.MAX_SAFE_INTEGER;
+  if (records) {
+    let selected = new Set<number>();
+    let rendered = renderEvidence(records, selected, options.output_prefix);
+    const prioritized = [...ordered].sort((a, b) => {
+      const matched = (entry: typeof a) => Number(exactRank.has(entry.block.index) || bm25Rank.has(entry.block.index));
+      const value = (entry: typeof a) => entry.score / Math.sqrt(128 + records[entry.block.index].text.length);
+      return matched(b) - matched(a) || value(b) - value(a) || a.block.index - b.block.index;
+    });
+    for (const entry of prioritized) {
+      if (selected.has(entry.block.index)) continue;
+      const next = new Set(selected);
+      const include = (id: number) => {
+        if (next.has(id)) return;
+        next.add(id);
+        records[id].dependencies.forEach(include);
+      };
+      include(entry.block.index);
+      if (next.size > maxBlocks) continue;
+      const candidate = renderEvidence(records, next, options.output_prefix);
+      if (candidate.length <= maxChars) { selected = next; rendered = candidate; }
+    }
+    return {
+      query,
+      results: ordered.filter(entry => selected.has(entry.block.index)).map((entry, index) => {
+        const id = entry.block.index;
+        return { rank: index + 1, source_index: id, text: records[id].text,
+          locator: records[id].locator, context_indices: records[id].dependencies };
+      }),
+      total_chars: text.length, returned_chars: [...selected].reduce((sum, id) => sum + records[id].text.length, 0),
+      total_blocks: records.length, returned_blocks: selected.size, truncated: selected.size < records.length,
+      rendered: rendered.slice(0, maxChars),
+      meta: { retrieval_lanes: ['source_order', 'exact', 'bm25'], fusion: 'rrf', stored: false,
+        response_budget_chars: maxChars, response_budget_policy: explicitBudget ? 'caller' : 'adaptive_evidence_breadth',
+        selection: 'evidence_records' },
+    };
+  }
   const selected: RankedOutputBlock[] = [];
   let returnedChars = 0;
   for (const entry of ordered) {
@@ -258,11 +305,13 @@ export function rerankOutput(
       retrieval_lanes: ['source_order', 'exact', 'bm25'], fusion: 'rrf', stored: false,
       response_budget_chars: maxChars,
       response_budget_policy: explicitBudget ? 'caller' : 'adaptive_evidence_breadth',
+      selection: 'blocks',
     },
   };
 }
 
 export function formatRerankedOutput(result: RerankedOutput): string {
+  if (result.rendered !== undefined) return result.rendered;
   const header = `Google Surf stateless reranker selected ${result.returned_blocks}/${result.total_blocks} blocks (${result.returned_chars}/${result.total_chars} chars) using source-order + exact + BM25 RRF. Nothing was stored.`;
   return [header, ...result.results.map((row) => `\n[${row.rank} | source ${row.source_index + 1}]\n${row.text}`)].join('\n');
 }

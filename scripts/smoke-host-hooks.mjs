@@ -40,6 +40,7 @@ try {
   const postHook = join(manifest.install_dir, 'rerankOutput.js');
   assert(existsSync(preHook) && existsSync(postHook), 'installed hook files are missing');
   assert(existsSync(join(manifest.install_dir, 'responseBudget.js')), 'output-hook budget dependency is missing');
+  assert(existsSync(join(manifest.install_dir, 'evidenceRecords.js')), 'output-hook evidence dependency is missing');
   const commandKey = process.platform === 'win32' ? 'command_windows' : 'command';
   const configuredCommands = [...readFileSync(configPath, 'utf8').matchAll(new RegExp(`^${commandKey} = (.+)$`, 'gm'))]
     .map((match) => JSON.parse(match[1]))
@@ -61,7 +62,7 @@ try {
   });
   const post = JSON.parse(runCommand(configuredCommands[1], postInput));
   assert(post.decision === 'block', 'oversized output was not replaced');
-  assert(post.reason.length <= 2_000, 'single-evidence output exceeded 2000 characters');
+  assert(post.reason.length <= 1_500, 'single-evidence output exceeded 1500 characters');
   assert(post.reason.includes('perplexity'), 'ranked output dropped the relevant result');
 
   const status = run(['build/cli.js', 'hooks', 'status', '--host', 'codex']);

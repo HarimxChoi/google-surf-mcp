@@ -39,21 +39,21 @@ describe('stateless output reranking', () => {
     const diverse = rerankOutput('evidence', Array.from({ length: 100 }, (_, id) => ({ evidence: `record-${id}` })));
     const repeated = rerankOutput('status', 'still running\n'.repeat(100_000));
     const unrelated = rerankOutput('perplexity', Array.from({ length: 100 }, (_, id) => ({ diagnostic: `record-${id}` })));
-    expect(small.meta.response_budget_chars).toBe(2_000);
+    expect(small.meta.response_budget_chars).toBe(1_500);
     expect(diverse.meta.response_budget_chars).toBeGreaterThan(small.meta.response_budget_chars);
-    expect(diverse.meta.response_budget_chars).toBe(6_000);
-    expect(repeated.meta.response_budget_chars).toBe(2_000);
-    expect(unrelated.meta.response_budget_chars).toBe(2_000);
+    expect(diverse.meta.response_budget_chars).toBe(3_000);
+    expect(repeated.meta.response_budget_chars).toBe(1_500);
+    expect(unrelated.meta.response_budget_chars).toBe(1_500);
     expect(repeated.returned_chars).toBeLessThan(200);
     expect(repeated.meta.response_budget_policy).toBe('adaptive_evidence_breadth');
   });
 
   it('expands gradually for multiple query-matching blocks and handles empty output', () => {
     const pair = rerankOutput('evidence', [{ evidence: 'one' }, { evidence: 'two' }]);
-    expect(pair.meta.response_budget_chars).toBe(3_000);
+    expect(pair.meta.response_budget_chars).toBe(2_250);
     const empty = rerankOutput('evidence', '');
     expect(empty.results).toEqual([]);
-    expect(empty.meta.response_budget_chars).toBe(2_000);
+    expect(empty.meta.response_budget_chars).toBe(1_500);
   });
 
   it('honors explicit budgets above the default cap and below the default minimum', () => {

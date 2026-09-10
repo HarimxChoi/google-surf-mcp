@@ -1190,15 +1190,14 @@ export class ResearchStore {
       active_plan_revision_id: plan.plan_revision_id,
       updated_at: plan.created_at,
     };
-    await db.query(
-      'BEGIN TRANSACTION; CREATE ONLY $plan_id CONTENT $plan; UPSERT $project_id CONTENT $project; COMMIT TRANSACTION;',
-      {
-        plan_id: new RecordId('plan_revision', plan.plan_revision_id),
-        plan,
-        project_id: new RecordId('project', project.project_id),
-        project: nextProject,
-      },
-    ).collect();
+    await this.transaction(db, async (tx) => {
+      await tx.create(new RecordId('plan_revision', plan.plan_revision_id))
+        .content(plan as unknown as Record<string, unknown>);
+      await tx.update(new RecordId('project', project.project_id)).merge({
+        active_plan_revision_id: nextProject.active_plan_revision_id,
+        updated_at: nextProject.updated_at,
+      });
+    });
   }
 
   async getExperiment(experimentId: string): Promise<ExperimentRunRecord | undefined> {

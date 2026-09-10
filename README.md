@@ -139,7 +139,9 @@ Google Surf can install an opt-in [Codex hook](https://developers.openai.com/cod
 npx -y google-surf-mcp@latest hooks install --host codex
 ```
 
-Restart Codex, then open `/hooks` to review and trust the definitions. Shell output is reranked from 2,000 characters, with a default 2,000-character display budget that expands up to 6,000 for distinct query-matching evidence blocks. An explicit override may exceed 6,000; there is no cumulative per-turn output limit. Two identical or near-duplicate searches and explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
+Restart Codex, then open `/hooks` to review and trust the definitions. Shell output is reranked from 1,500 characters, with a default 1,500-character display budget that expands up to 3,000 for distinct query-matching evidence records or blocks. An explicit override may exceed 3,000; there is no cumulative per-turn output limit. Two identical or near-duplicate searches and explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
+
+JSON/JSONL summaries use compact records with input-relative JSON pointers, ancestor identity/condition references and original result values. Markdown table rows retain headers and adjacent context, including source lines. Selected records and their required context must fit together; the renderer reports omissions instead of slicing records. Plain logs retain block reranking. Selection is deterministic and lexical, without a model, database or extra subprocess. Context extraction uses structural/field-name heuristics, not semantic understanding; unselected fields remain in the original input. These excerpts do not replace experiment logs or SSOT history. Input-relative pointers are not persistent retrieval handles. Existing installed hook bundles require an update to use changed code.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -510,8 +512,8 @@ npx google-surf-mcp daemon drain --json
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | timeout per embedded SurrealDB query, clamped to 1-600 seconds; a timed-out retrieval lane is reported as partial while other lanes still return |
 | `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | byte budget for in-process graph projections and analysis artifacts |
 | `SURF_RESEARCH_WORKER_SOFT_MEMORY_MB` | `2048` | RSS threshold that requests an immediate idle drain after active work completes |
-| `SURF_RERANK_TRIGGER_CHARS` | `2000` | shell-output interception threshold (inclusive); sensitive output is sanitized even below this threshold |
-| `SURF_RERANK_MAX_CHARS` | adaptive: 2000–6000 | optional explicit shell-summary limit, including values above 6000; default expansion uses distinct query-matching blocks, not repeated output volume |
+| `SURF_RERANK_TRIGGER_CHARS` | `1500` | shell-output interception threshold (inclusive); sensitive output is sanitized even below this threshold |
+| `SURF_RERANK_MAX_CHARS` | adaptive: 1500–3000 | optional explicit shell-summary limit, including values above 3000; default is `min(3000, ceil(1500 + 750*log2(max(1,n))))` for distinct query-matching records/blocks, not repeated output volume |
 | `GITHUB_TOKEN` | unset | optional GitHub token that raises API limits for repository inspection |
 | `SURF_RESEARCH_CODE_WORKERS` | auto, max 4 | Tree-sitter worker count for initial code structure indexing |
 | `SURF_LOCALE` | `en-US` | browser locale |

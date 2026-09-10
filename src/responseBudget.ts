@@ -5,5 +5,5 @@ export function adaptiveResponseBudget(items: number, groups = 1, families = 1):
 }
 
 export function adaptiveOutputBudget(evidenceBlocks: number): number {
-  return Math.min(6_000, Math.ceil(2_000 + 1_000 * Math.log2(Math.max(1, evidenceBlocks))));
+  return Math.min(3_000, Math.ceil(1_500 + 750 * Math.log2(Math.max(1, evidenceBlocks))));
 }

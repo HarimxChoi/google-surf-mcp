@@ -12,6 +12,7 @@ const BUNDLE_FILES = [
   'shellGuard.js',
   'rerankOutput.js',
   'outputRerank.js',
+  'evidenceRecords.js',
   'responseBudget.js',
 ] as const;
 const FINGERPRINT_SALT_FILE = 'fingerprint-salt';

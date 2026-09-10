@@ -14,7 +14,7 @@ function fixture() {
   const sourceDir = join(root, 'build');
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(sourceDir, { recursive: true });
-  for (const name of ['codexShellGuard.js', 'shellGuard.js', 'rerankOutput.js', 'outputRerank.js', 'responseBudget.js']) {
+  for (const name of ['codexShellGuard.js', 'shellGuard.js', 'rerankOutput.js', 'outputRerank.js', 'evidenceRecords.js', 'responseBudget.js']) {
     writeFileSync(join(sourceDir, name), `// ${name}\n`, 'utf8');
   }
   writeFileSync(join(codexHome, 'config.toml'), '[features]\nhooks = true\n\n[mcp_servers.example]\ncommand = "example"\n', 'utf8');
@@ -37,6 +37,7 @@ describe('host hook installer', () => {
     const first = await installCodexHooks(options);
     expect(first).toMatchObject({ installed: true, files_valid: true, stores_command_output: false });
     expect(existsSync(join(first.install_dir!, 'responseBudget.js'))).toBe(true);
+    expect(existsSync(join(first.install_dir!, 'evidenceRecords.js'))).toBe(true);
     const once = readFileSync(join(options.codex_home, 'config.toml'), 'utf8');
     expect(once).toContain('[mcp_servers.example]');
     expect(once.match(/BEGIN google-surf host output hooks/g)).toHaveLength(1);
