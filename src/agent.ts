@@ -2,6 +2,8 @@ import type { BrowserContext } from 'playwright';
 import type { CallToolResult } from './response.js';
 import type { SearchResult } from './types.js';
 import { loadConfig, type Config, type SearchProviderMode } from './config.js';
+import { redactKey, resolveCredential } from './orcarouter/credentials.js';
+import { resolveEndpoints } from './orcarouter/endpoints.js';
 import { UnifiedCache, getCache } from './cache.js';
 import { RateLimiter, RateLimitedError } from './limiter.js';
 import { HumanlikeBehavior, generateBehaviorParams } from './humanlike.js';
@@ -1171,7 +1173,28 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
       insecureTls: deps.config.insecureTls,
       noSandbox: deps.config.noSandbox,
     },
+    orcarouter: await orcaRouterHealth(),
   });
+}
+
+/**
+ * OrcaRouter status for `health`. Reports which credential entry point is
+ * active and where both origins resolve, without ever echoing the key.
+ */
+async function orcaRouterHealth() {
+  const endpoints = resolveEndpoints();
+  const credential = await resolveCredential();
+  return {
+    configured: credential !== null,
+    // "api-key" (pasted sk-orca-…) or "pkce" (issued by the connect flow).
+    source: credential?.source ?? null,
+    scope: credential?.scope ?? null,
+    key: credential ? redactKey(credential.key) : null,
+    generation: credential?.generation ?? null,
+    needsReauth: credential?.needsReauth ?? false,
+    authOrigin: endpoints.authBase,
+    apiOrigin: endpoints.apiBase,
+  };
 }
 
 function rateLimitResponse(e: unknown): CallToolResult | null {

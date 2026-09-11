@@ -1,5 +1,14 @@
 // Workflow-only. Default-off: requires SURF_LLM_HEAL=true and a provider API key.
 
+import {
+  applyUpstream401,
+  redactSecrets,
+  resolveCredential,
+  type OrcaCredential,
+} from '../orcarouter/credentials.js';
+import { resolveEndpoints } from '../orcarouter/endpoints.js';
+import { defaultChatModel, discoverModels } from '../orcarouter/models.js';
+
 const SYSTEM_PROMPT = `You are a CSS-selector repair agent for a Google SERP parser.
 Given (a) compressed HTML of a SERP page (b) the current broken selectors and
 (c) candidate selectors from deterministic synthesis, your job is to either
@@ -125,13 +134,15 @@ async function repairWithAnthropic(
 
 async function repairWithOrcaRouter(
   input: LLMRepairInput,
-  apiKey: string,
+  credential: OrcaCredential,
   model: string,
 ): Promise<LLMRepairOutput> {
-  const response = await fetch('https://api.orcarouter.ai/v1/chat/completions', {
+  // Auth origin and inference origin are separate; the relay URL comes from the
+  // API origin and is never derived from the auth origin.
+  const response = await fetch(resolveEndpoints().chatCompletionsUrl, {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${apiKey}`,
+      authorization: `Bearer ${credential.key}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify({
@@ -161,7 +172,18 @@ async function repairWithOrcaRouter(
     signal: AbortSignal.timeout(60_000),
   });
   if (!response.ok) {
-    const body = (await response.text()).replaceAll(apiKey, '[redacted]').slice(0, 2_000);
+    const body = redactSecrets(await response.text(), [credential.key]).slice(0, 2_000);
+    // A 401 is terminal: mark exactly this account and credential generation,
+    // then report it. There is no refresh grant for a durable key grant.
+    if (response.status === 401) {
+      const current = await resolveCredential();
+      const marked = applyUpstream401(credential, current);
+      throw new Error(
+        'OrcaRouter credential was rejected (401)'
+        + (marked ? `; account ${credential.accountId ?? 'unknown'} marked for reauthentication` : '')
+        + ': ' + body,
+      );
+    }
     throw new Error(`OrcaRouter request failed (${response.status}): ${body}`);
   }
   const payload = await response.json() as {
@@ -179,19 +201,42 @@ async function repairWithOrcaRouter(
   return parseRepairOutput(typeof args === 'string' ? JSON.parse(args) : args);
 }
 
+/**
+ * Default repair model when SURF_LLM_MODEL is unset. The live catalog decides,
+ * so the default tracks what the user's workspace can actually call instead of
+ * a hardcoded example.
+ */
+export async function defaultOrcaModel(
+  credential?: OrcaCredential | null,
+  fetchImpl?: typeof fetch,
+): Promise<string> {
+  const catalog = await discoverModels({
+    endpoints: resolveEndpoints(),
+    apiKey: credential?.key,
+    fetchImpl,
+  });
+  return defaultChatModel(catalog);
+}
+
 export async function repairWithLLM(input: LLMRepairInput): Promise<LLMRepairOutput> {
   if (process.env.SURF_LLM_HEAL !== 'true') {
     return mockRepair(input, 'SURF_LLM_HEAL not enabled');
   }
   const provider = selectedProvider();
   if (provider === 'orcarouter') {
-    const apiKey = process.env.ORCAROUTER_API_KEY?.trim() || process.env.ORCA_KEY?.trim();
-    if (!apiKey) return mockRepair(input, 'no API key');
-    return await repairWithOrcaRouter(
-      input,
-      apiKey,
-      process.env.SURF_LLM_MODEL?.trim() || 'orcarouter/auto',
-    );
+    // One credential seam: the pasted key and the PKCE-issued key are two
+    // adapters on it and are indistinguishable from here down.
+    const credential = await resolveCredential();
+    if (!credential) return mockRepair(input, 'no API key');
+    if (credential.needsReauth) {
+      throw new Error(
+        'OrcaRouter credential needs reauthentication: run `google-surf-mcp orcarouter connect`'
+        + ' or replace ORCAROUTER_API_KEY with a fresh key',
+      );
+    }
+    const model = process.env.SURF_LLM_MODEL?.trim()
+      || (await defaultOrcaModel(credential));
+    return await repairWithOrcaRouter(input, credential, model);
   }
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) return mockRepair(input, 'no API key');
