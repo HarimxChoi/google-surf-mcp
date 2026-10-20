@@ -26,6 +26,7 @@ export async function runResearchCli(args: string[]): Promise<void> {
     vectorModel: config.researchVectorModel,
     vectorLowMemory: config.researchVectorLowMemory,
     vectorThreads: config.researchVectorThreads,
+    vectorBatchSize: config.researchVectorBatchSize,
     vectorBackend: config.researchVectorBackend,
     repositoryAuto: config.researchRepoAuto,
     repositoryMaxSourceBytes: config.researchRepoAutoMaxMb * 1024 * 1024,

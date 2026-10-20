@@ -369,7 +369,7 @@ describe('research project memory', () => {
     expect(await service.search('graph-a', 'onlygraphbterm', 10)).toHaveLength(0);
     expect(await service.search('graph-b', 'onlygraphbterm', 10)).toHaveLength(1);
     expect((await service.getProject('graph-a')).job_counts.done).toBe(1);
-    expect((await service.getProject('graph-b')).job_counts.done).toBe(1);
+    expect((await service.getProject('graph-b')).job_counts.done).toBe(2);
   });
 
   it('routes graph-only all-project retrieval through indexed project seeds', async () => {

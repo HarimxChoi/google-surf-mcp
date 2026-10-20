@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
+import { embeddingBatchSize } from './resources.js';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_RESEARCH_VECTOR_MODEL = 'Xenova/multilingual-e5-small';
@@ -25,6 +26,7 @@ export interface EmbeddingProvider {
 export interface EmbeddingRuntimeOptions {
   lowMemory?: boolean;
   threads?: number;
+  batchSize?: number;
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {
@@ -44,6 +46,7 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
   private extractor?: Promise<FeatureExtractor>;
   private readonly cache = new Map<string, number[]>();
   private readonly revision?: string;
+  private inferenceTail: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly model?: string,
@@ -120,23 +123,29 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
       else missing.push({ index, text, key });
     });
     if (missing.length) {
-      const extractor = await this.load();
-      for (let index = 0; index < missing.length; index += 32) {
-        const batch = missing.slice(index, index + 32);
-        const vectors = (await extractor(
-          batch.map((row) => row.text.slice(0, 4_000)),
-          { pooling: 'mean', normalize: true, truncation: true },
-        )).tolist();
-        if (vectors.length !== batch.length
-          || vectors.some((vector) => vector.length !== RESEARCH_VECTOR_DIMENSIONS)) {
-          throw new Error(`vector model must return ${RESEARCH_VECTOR_DIMENSIONS} dimensions`);
-        }
-        batch.forEach((row, batchIndex) => {
-          output[row.index] = vectors[batchIndex];
-          this.cache.set(row.key, vectors[batchIndex]);
+      const batchSize = embeddingBatchSize(this.runtimeOptions.batchSize);
+      for (let index = 0; index < missing.length; index += batchSize) {
+        const batch = missing.slice(index, index + batchSize);
+        const work = this.inferenceTail.then(async () => {
+          const uncached = batch.filter((row) => !this.cache.has(row.key));
+          if (uncached.length) {
+            const extractor = await this.load();
+            const vectors = (await extractor(
+              uncached.map((row) => row.text.slice(0, 4_000)),
+              { pooling: 'mean', normalize: true, truncation: true },
+            )).tolist();
+            if (vectors.length !== uncached.length
+              || vectors.some((vector) => vector.length !== RESEARCH_VECTOR_DIMENSIONS)) {
+              throw new Error(`vector model must return ${RESEARCH_VECTOR_DIMENSIONS} dimensions`);
+            }
+            uncached.forEach((row, batchIndex) => this.cache.set(row.key, vectors[batchIndex]));
+          }
+          batch.forEach((row) => { output[row.index] = this.cache.get(row.key)!; });
+          while (this.cache.size > 512) this.cache.delete(this.cache.keys().next().value!);
         });
+        this.inferenceTail = work.catch(() => {});
+        await work;
       }
-      while (this.cache.size > 512) this.cache.delete(this.cache.keys().next().value!);
     }
     return output;
   }
@@ -154,6 +163,7 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
   }
 
   async dispose(): Promise<void> {
+    await this.inferenceTail;
     const pending = this.extractor;
     this.extractor = undefined;
     this.cache.clear();

@@ -22,6 +22,7 @@ import type {
 } from './contracts.js';
 import { runCodeStructureBatchStream, type CodeSourceInput } from './codeStructure.js';
 import { cosineSimilarity, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
+import { embeddingBatchSize } from './resources.js';
 import { aliasId, entityId, normalizeEntityName, rankEntityCandidates } from './entities.js';
 import { buildGraphProjection, type ProjectGraphSource } from './graphProjection.js';
 import {
@@ -53,6 +54,7 @@ export interface ResearchServiceOptions {
   vectorModel?: string;
   vectorLowMemory?: boolean;
   vectorThreads?: number;
+  vectorBatchSize?: number;
   vectorBackend?: 'hnsw' | 'exhaustive' | 'compact';
   embeddingProvider?: EmbeddingProvider;
   repositoryAuto?: boolean;
@@ -801,6 +803,8 @@ export class ResearchService {
   private readonly graphArtifacts = new Map<string, GraphArtifact>();
   private graphCacheBytes = 0;
   private readonly backgroundJobs = new Set<Promise<unknown>>();
+  private backgroundTail: Promise<unknown> = Promise.resolve();
+  private readonly captureIndexVersions = new Map<string, { requested: number; completed: number }>();
   private readonly searchReads = new Map<string, Promise<unknown>>();
   private readonly searchReadLease = new AsyncLocalStorage<{ closed: boolean; reads: Set<Promise<unknown>> }>();
   private readonly scheduledJobIds = new Set<string>();
@@ -827,7 +831,7 @@ export class ResearchService {
       options.vectorModel,
       undefined,
       undefined,
-      { lowMemory: options.vectorLowMemory, threads: options.vectorThreads },
+      { lowMemory: options.vectorLowMemory, threads: options.vectorThreads, batchSize: options.vectorBatchSize },
     );
     this.repositoryClient = options.repositoryClient ?? new GitHubClient();
     this.state = options.enabled ? 'idle' : 'disabled';
@@ -837,6 +841,7 @@ export class ResearchService {
     const shared = this.graphArtifacts.get(projection.projection_id)?.projection ?? projection;
     this.graphCache.clear();
     this.graphCacheBytes = 0;
+    this.captureIndexVersions.clear();
     const weight = graphProjectionBytes(shared);
     if (weight <= (this.options.graphCacheMaxBytes ?? 64 * 1024 * 1024)) {
       this.graphCache.set(key, shared);
@@ -1003,14 +1008,34 @@ export class ResearchService {
         const pendingRebuildProjects = new Set(pendingJobs
           .filter((job) => job.kind === 'rebuild')
           .map((job) => job.project_id));
+        const pendingCatalogProjects = new Set(pendingJobs
+          .filter((job) => job.kind === 'retrieval_index' && job.schema_version === 'catalog-record-v1')
+          .map((job) => job.project_id));
+        for (const job of pendingJobs) {
+          if (job.kind === 'retrieval_index' && job.schema_version === 'capture-index-v1') {
+            pendingCatalogProjects.add(job.project_id);
+          }
+        }
+        const resumedRetrievals = new Set<string>();
         for (const project of await this.store.listDirtyProjects()) {
           if (!pendingRebuildProjects.has(project.project_id)) this.scheduleGraph(project.project_id);
         }
         for (const job of pendingJobs) {
           if (job.kind === 'retrieval_index' && job.schema_version === 'catalog-record-v1') {
             this.scheduleCatalogIndex(job);
+          } else if (job.kind === 'retrieval_index' && job.schema_version === 'capture-index-v1') {
+            this.scheduleCaptureIndex(job);
           } else if (job.kind === 'rebuild') {
             this.scheduleSourceIndex(job);
+          } else if (job.kind === 'retrieval_index') {
+            const family = job.schema_version.startsWith('retrieval-v2-document-') ? 'document'
+              : job.schema_version.startsWith('retrieval-v2-code-') ? 'code' : undefined;
+            if (!family || (family === 'document' ? pendingCatalogProjects : pendingRebuildProjects)
+              .has(job.project_id)) continue;
+            const key = `${job.project_id}\0${family}`;
+            if (resumedRetrievals.has(key)) continue;
+            resumedRetrievals.add(key);
+            this.schedule(async () => await this.materializeRetrievalIndex(job.project_id, family));
           }
         }
       }
@@ -1059,7 +1084,8 @@ export class ResearchService {
   }
 
   private schedule(operation: () => Promise<unknown>): void {
-    const job = Promise.resolve().then(operation);
+    const job = this.backgroundTail.then(operation);
+    this.backgroundTail = job.catch(() => {});
     this.backgroundJobs.add(job);
     void job.then(
       () => this.backgroundJobs.delete(job),
@@ -1127,6 +1153,44 @@ export class ResearchService {
       });
     });
     return true;
+  }
+
+  private scheduleCaptureIndex(job: KnowledgeJobRecord): void {
+    if (this.scheduledJobIds.has(job.job_id)) return;
+    this.scheduledJobIds.add(job.job_id);
+    const version = this.captureIndexVersions.get(job.project_id) ?? { requested: 0, completed: 0 };
+    this.captureIndexVersions.set(job.project_id, version);
+    const requested = ++version.requested;
+    this.schedule(async () => {
+      try {
+        const current = await this.store.getKnowledgeJob(job.job_id);
+        if (!current || current.status === 'done' || current.status === 'cancelled' || this.drainRequested) return;
+        if (current.status === 'queued') {
+          await this.transitionKnowledgeJob({ project_id: job.project_id, job_id: job.job_id, status: 'running' });
+        }
+        if (version.completed < requested) {
+          const covered = version.requested;
+          await this.materializeRetrievalIndex(job.project_id, 'document');
+          if (await this.checkpointKnowledgeJobForDrain(job.project_id, job.job_id, 'embedding', 0, 1)) return;
+          version.completed = covered;
+        }
+        await this.transitionKnowledgeJob({
+          project_id: job.project_id, job_id: job.job_id, status: 'done',
+          result_counts: { indexed_documents: current.affected_source_ids.length },
+        });
+      } catch (error) {
+        const current = await this.store.getKnowledgeJob(job.job_id);
+        if (current?.status === 'running') {
+          await this.transitionKnowledgeJob({
+            project_id: job.project_id, job_id: job.job_id, status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        throw error;
+      } finally {
+        this.scheduledJobIds.delete(job.job_id);
+      }
+    });
   }
 
   private scheduleCatalogIndex(job: KnowledgeJobRecord): void {
@@ -3563,12 +3627,15 @@ export class ResearchService {
     return revision;
   }
 
-  private async buildRetrievalItems(projectId: string): Promise<RetrievalIndexItem[]> {
+  private async buildRetrievalItems(
+    projectId: string,
+    sourceFamily: 'document' | 'code',
+  ): Promise<RetrievalIndexItem[]> {
     const [documents, documentChunks, sources, symbols] = await Promise.all([
-      this.store.listProjectDocuments(projectId),
-      this.store.listProjectDocumentChunks(projectId),
-      this.store.listProjectSourceBodies(projectId),
-      this.store.listCodeSymbols(projectId),
+      sourceFamily === 'document' ? this.store.listProjectDocuments(projectId) : [],
+      sourceFamily === 'document' ? this.store.listProjectDocumentChunks(projectId) : [],
+      sourceFamily === 'code' ? this.store.listProjectSourceBodies(projectId) : [],
+      sourceFamily === 'code' ? this.store.listCodeSymbols(projectId) : [],
     ]);
     const symbolNames = new Map<string, string[]>();
     for (const symbol of symbols) {
@@ -3634,8 +3701,7 @@ export class ResearchService {
     projectId: string,
     sourceFamily: 'document' | 'code',
   ): Promise<KnowledgeJobRecord | undefined> {
-    const items = (await this.buildRetrievalItems(projectId))
-      .filter((item) => item.source_family === sourceFamily);
+    const items = await this.buildRetrievalItems(projectId, sourceFamily);
     const digest = createHash('sha256').update(JSON.stringify(items.map((item) => ({
       item_id: item.item_id,
       content_hash: item.content_hash,
@@ -3715,16 +3781,30 @@ export class ResearchService {
       const cached = await this.store.cachedEmbeddings(cacheKeys);
       const missing = pendingItems.map((item, index) => ({ item, index, cache_key: cacheKeys[index] }))
         .filter((row) => !cached.has(row.cache_key));
-      const generated = await this.embeddings.embedPassages(missing.map((row) => row.item.text));
+      const generatedByKey = new Map<string, number[]>();
+      const batchSize = embeddingBatchSize(this.options.vectorBatchSize);
+      for (let offset = 0; offset < missing.length; offset += batchSize) {
+        if (await this.checkpointKnowledgeJobForDrain(
+          projectId, job.job_id, 'embedding', offset, missing.length,
+        )) return await this.store.getKnowledgeJob(job.job_id);
+        if (await this.knowledgeJobCancelled(job.job_id)) throw new Error(`job ${job.job_id} cancelled`);
+        const batch = missing.slice(offset, offset + batchSize);
+        const generated = await this.embeddings.embedPassages(batch.map((row) => row.item.text));
+        await this.store.putCachedEmbeddings(batch.map((row, index) => ({
+          cache_key: row.cache_key,
+          embedding: generated[index],
+        })));
+        batch.forEach((row, index) => generatedByKey.set(row.cache_key, generated[index]));
+        await this.updateKnowledgeJobProgress(
+          projectId, job.job_id, 'embedding', offset + batch.length, missing.length,
+        );
+      }
       if (await this.knowledgeJobCancelled(job.job_id)) throw new Error(`job ${job.job_id} cancelled`);
-      await this.store.putCachedEmbeddings(missing.map((row, index) => ({
-        cache_key: row.cache_key,
-        embedding: generated[index],
-      })));
-      const generatedByKey = new Map(missing.map((row, index) => [row.cache_key, generated[index]]));
+      if (await this.checkpointKnowledgeJobForDrain(
+        projectId, job.job_id, 'embedding', missing.length, missing.length,
+      )) return await this.store.getKnowledgeJob(job.job_id);
       const vectors = cacheKeys.map((key) => cached.get(key) ?? generatedByKey.get(key)!);
-      const currentItems = (await this.buildRetrievalItems(projectId))
-        .filter((item) => item.source_family === sourceFamily);
+      const currentItems = await this.buildRetrievalItems(projectId, sourceFamily);
       const currentDigest = createHash('sha256').update(JSON.stringify(currentItems.map((item) => ({
         item_id: item.item_id,
         content_hash: item.content_hash,
@@ -5271,8 +5351,9 @@ export class ResearchService {
         }
       }
 
+      const searchEventId = randomUUID();
       await this.store.createSearchEvent({
-        search_event_id: randomUUID(),
+        search_event_id: searchEventId,
         project_id: project.project_id,
         plan_revision_id: project.active_plan_revision_id,
         tool: input.tool,
@@ -5286,7 +5367,15 @@ export class ResearchService {
       });
       await this.invalidateGraph(project.project_id);
       if (ragActive) {
-        this.schedule(async () => await this.materializeRetrievalIndex(project.project_id, 'document'));
+        const job = await this.queueKnowledgeJob({
+          project_id: project.project_id,
+          kind: 'retrieval_index',
+          source_hash: createHash('sha256').update(searchEventId).digest('hex'),
+          schema_version: 'capture-index-v1',
+          algorithm_version: RETRIEVAL_ALGORITHM_VERSION,
+          affected_source_ids: documentIds,
+        });
+        this.scheduleCaptureIndex(job);
       }
 
       const stored = unique.size;

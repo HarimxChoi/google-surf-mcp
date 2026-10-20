@@ -1,6 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LocalSearchHit } from '../src/research/contracts.js';
 import {
@@ -62,6 +64,58 @@ describe('vector retrieval', () => {
       `${DEFAULT_RESEARCH_VECTOR_MODEL}@${DEFAULT_RESEARCH_VECTOR_REVISION}`,
     );
   });
+
+  it('bounds inference batches and serializes callers without poisoning the queue on failure', async () => {
+    let active = 0;
+    let peak = 0;
+    let fail = true;
+    const batches: string[][] = [];
+    const model = new LocalEmbeddingModel('fake-e5', async () => async (texts) => {
+      batches.push(texts);
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (fail) { fail = false; throw new Error('inference failed'); }
+        return { tolist: () => texts.map(() => vector(1, 0)) };
+      } finally {
+        active--;
+      }
+    });
+    await expect(model.embedQuery('failure')).rejects.toThrow('inference failed');
+    const [passages, query] = await Promise.all([
+      model.embedPassages(Array.from({ length: 11 }, (_, index) => `document ${index}`)),
+      model.embedQuery('question'),
+    ]);
+    expect(passages).toHaveLength(11);
+    expect(query).toHaveLength(384);
+    expect(peak).toBe(1);
+    expect(batches.every((batch) => batch.length <= 8)).toBe(true);
+    expect(batches.some((batch) => batch.length === 8)).toBe(true);
+    const count = batches.length;
+    await model.embedQuery('question');
+    expect(batches).toHaveLength(count);
+    await model.dispose();
+  });
+
+  it('persists each embedding batch and resumes a drained job without regenerating cached passages', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'surf-vector-drain-'));
+    roots.push(root);
+    const fixture = fileURLToPath(new URL('./fixtures/research-embedding-drain.mjs', import.meta.url));
+    const reports: Array<{ batches: string[][]; vector_hits?: number; queued_vector_hits?: number }> = [];
+    for (const mode of ['write', 'read']) {
+      const child = spawnSync(process.execPath, [fixture, mode, root], { encoding: 'utf8', timeout: 25_000 });
+      expect(child.error, child.stderr).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
+      reports.push(JSON.parse(child.stdout.trim()));
+    }
+    expect(reports[0].batches).toHaveLength(1);
+    expect(reports[0].batches[0]).toHaveLength(4);
+    expect(reports[1].batches.length).toBeGreaterThan(0);
+    expect(reports[1].batches.flat().some((text) => reports[0].batches[0].includes(text))).toBe(false);
+    expect(reports[1].vector_hits).toBeGreaterThan(0);
+    expect(reports[1].queued_vector_hits).toBeGreaterThan(0);
+  }, 30_000);
 
   it('adds only deterministic query variants and removes duplicates', () => {
     expect(tuneLocalQueries(

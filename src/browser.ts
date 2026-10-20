@@ -115,8 +115,8 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ...(remoteDebug ? ['--remote-debugging-port=0', '--remote-debugging-address=0.0.0.0'] : []),
   ];
 
-  const doLaunch = () => driver.launchPersistentContext(profileFor(opts.profileDir), {
-    executablePath: detectChrome(),
+  const doLaunch = (defaultExecutable = false) => driver.launchPersistentContext(profileFor(opts.profileDir), {
+    ...(defaultExecutable ? {} : { executablePath: detectChrome() }),
     headless: effectiveHeadless,
     viewport: { width: 1366, height: 768 },
     locale: process.env.SURF_LOCALE || 'en-US',
@@ -133,11 +133,15 @@ export async function launch(opts: LaunchOpts): Promise<BrowserContext> {
     ctx = await doLaunch();
   } catch (e) {
     const msg = (e as Error).message;
-    if (!/ProcessSingleton|SingletonLock|Target page, context or browser has been closed/i.test(msg)) throw e;
-    killZombieChromium(opts.profileDir);
-    await waitForLockReleased(opts.profileDir, 3_000);
-    await clearProfileLocks(opts.profileDir);
-    ctx = await doLaunch();
+    if (effectiveHeadless && !process.env.CHROME_PATH && /spawn UNKNOWN/i.test(msg)) {
+      ctx = await doLaunch(true);
+    } else {
+      if (!/ProcessSingleton|SingletonLock|Target page, context or browser has been closed/i.test(msg)) throw e;
+      killZombieChromium(opts.profileDir);
+      await waitForLockReleased(opts.profileDir, 3_000);
+      await clearProfileLocks(opts.profileDir);
+      ctx = await doLaunch();
+    }
   }
 
   if (opts.blockResources !== false) {

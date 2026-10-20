@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { ResearchService, type ResearchServiceOptions } from './service.js';
 import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
 import { queryResponseDeadlineMs, ResearchQueryInterrupted } from './queryControl.js';
+import { embeddedStorageEnvironment } from './resources.js';
 
 export const RESEARCH_BROKER_PROTOCOL = 1;
 
@@ -113,6 +114,8 @@ export interface ResearchBrokerConfig {
   vectorModel?: string;
   vectorLowMemory?: boolean;
   vectorThreads?: number;
+  vectorBatchSize?: number;
+  storageEnvironment?: Record<string, string>;
   vectorBackend?: 'hnsw' | 'exhaustive' | 'compact';
   repositoryAuto?: boolean;
   repositoryMaxSourceBytes?: number;
@@ -503,6 +506,8 @@ export function createSharedResearchService(
     vectorModel: options.vectorModel,
     vectorLowMemory: options.vectorLowMemory,
     vectorThreads: options.vectorThreads,
+    vectorBatchSize: options.vectorBatchSize,
+    storageEnvironment: embeddedStorageEnvironment(),
     vectorBackend: options.vectorBackend,
     repositoryAuto: options.repositoryAuto,
     repositoryMaxSourceBytes: options.repositoryMaxSourceBytes,

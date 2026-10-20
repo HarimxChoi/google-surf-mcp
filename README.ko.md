@@ -474,6 +474,7 @@ npx google-surf-mcp daemon drain --json
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | HNSW vector 검색과 최종 리랭킹에 쓰는 local 384차원 모델. 기본 model revision은 고정되며 `off`로 vector lane 비활성화 |
 | `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | ONNX CPU memory arena와 memory pattern을 비활성화. `false`는 최초 색인 속도를 높이는 대신 peak memory 증가 |
 | `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread 수. 1-16 범위 |
+| `SURF_RESEARCH_VECTOR_BATCH_SIZE` | `8` | 추론 소배치 크기. 1-32 범위. 배치마다 생성한 임베딩을 저장하고 체크포인트 처리 |
 | `SURF_RESEARCH_VECTOR_BACKEND` | `hnsw` | vector 표현: `hnsw`, content 중복을 제거한 `compact`, 제한된 `exhaustive` |
 | `SURF_RESEARCH_REPO_AUTO` | `true` | 검색 호출당 작고 관련성 높은 GitHub 저장소를 최대 하나 sparse-index |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | 자동 GitHub 색인의 검색 가능한 소스 텍스트 상한. asset은 제외 |
@@ -516,6 +517,12 @@ npx google-surf-mcp daemon drain --json
 | `ANTHROPIC_API_KEY` | 미설정 | Anthropic provider를 선택했을 때만 사용하는 본인 API 키 |
 | `ORCAROUTER_API_KEY` | 미설정 | OrcaRouter provider를 선택했을 때만 사용하는 본인 API 키 |
 | `ORCA_KEY` | 미설정 | `ORCAROUTER_API_KEY` 별칭 |
+
+### 임베디드 자원 예산
+
+Embedded storage는 서버용 자동 예산 대신 RocksDB block cache 512 MiB, HNSW vector cache 128 MiB, 32 MiB 쓰기 버퍼 최대 2개, background job 2개를 기본으로 사용합니다. `SURREAL_HNSW_CACHE_SIZE`, `SURREAL_ROCKSDB_BLOCK_CACHE_SIZE`, `SURREAL_ROCKSDB_WRITE_BUFFER_SIZE`, `SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER`, `SURREAL_ROCKSDB_THREAD_COUNT`, `SURREAL_ROCKSDB_JOBS_COUNT`를 명시하면 해당 값을 우선합니다.
+
+백그라운드 색인은 한 번에 한 작업씩 실행합니다. 같은 프로젝트에 대기 중인 자동 저장은 최신 상태를 한 번 색인하며, 대기 요청은 브로커 재시작 후에도 복구합니다. 임베딩 추론도 단일 대기열을 사용하고, 작은 배치마다 결과를 저장한 뒤 drain 여부를 확인합니다. 문서 색인 시 무관한 코드 본문은 읽지 않습니다. 기존 임베딩 캐시는 재사용하므로 배치 크기 변경만으로 전체 재색인을 강제하지 않습니다. 이는 구성요소별 예산이며 프로세스 전체 RSS의 하드 상한은 아닙니다. 네이티브 DB 기본값은 새 브로커가 DB를 열 때 적용되며 이미 실행 중인 브로커에는 소급 적용되지 않습니다.
 
 ### OrcaRouter
 

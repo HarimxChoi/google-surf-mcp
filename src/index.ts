@@ -281,6 +281,7 @@ const researchService = createSharedResearchService({
   vectorModel: baseDeps.config.researchVectorModel,
   vectorLowMemory: baseDeps.config.researchVectorLowMemory,
   vectorThreads: baseDeps.config.researchVectorThreads,
+  vectorBatchSize: baseDeps.config.researchVectorBatchSize,
   vectorBackend: baseDeps.config.researchVectorBackend,
   repositoryAuto: baseDeps.config.researchRepoAuto,
   repositoryMaxSourceBytes: baseDeps.config.researchRepoAutoMaxMb * 1024 * 1024,

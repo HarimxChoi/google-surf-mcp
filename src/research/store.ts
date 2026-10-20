@@ -19,6 +19,7 @@ import type {
 } from './contracts.js';
 import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
 import { cosineSimilarity } from './dense.js';
+import { applyEmbeddedStorageDefaults } from './resources.js';
 
 const SCHEMA = `
 DEFINE TABLE IF NOT EXISTS project SCHEMALESS;
@@ -338,6 +339,8 @@ export class ResearchStore {
 
   private async connect(): Promise<Surreal> {
     await mkdir(this.root, { recursive: true });
+    // The embedded engine otherwise budgets its cache like a dedicated DB server.
+    if (this.endpoint.startsWith('rocksdb:')) applyEmbeddedStorageDefaults();
     const [{ Surreal, createRemoteEngines }, { createNodeEngines }] = await Promise.all([
       import('surrealdb'),
       import('@surrealdb/node'),

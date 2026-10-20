@@ -20,6 +20,7 @@ describe('loadConfig', () => {
     expect(c.researchVectorModel).toBe('Xenova/multilingual-e5-small');
     expect(c.researchVectorLowMemory).toBe(true);
     expect(c.researchVectorThreads).toBe(4);
+    expect(c.researchVectorBatchSize).toBe(8);
     expect(c.researchRepoAuto).toBe(true);
     expect(c.researchRepoAutoMaxMb).toBe(20);
     expect(c.researchRepoAutoMaxFiles).toBe(2_000);

@@ -503,6 +503,7 @@ npx google-surf-mcp daemon drain --json
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | local 384-dimensional model used by HNSW vector retrieval and final reranking. The default model revision is pinned; `off` disables the vector lane. |
 | `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | disables the ONNX CPU memory arena and memory pattern; set `false` to trade higher peak memory for faster initial indexing |
 | `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread count, clamped to 1-16 |
+| `SURF_RESEARCH_VECTOR_BATCH_SIZE` | `8` | inference microbatch size, clamped to 1-32; generated embeddings are checkpointed after each batch |
 | `SURF_RESEARCH_VECTOR_BACKEND` | `hnsw` | vector representation: `hnsw`, content-deduplicated `compact`, or bounded `exhaustive` |
 | `SURF_RESEARCH_REPO_AUTO` | `true` | automatically sparse-index at most one small, relevant GitHub repository per search call |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | maximum searchable source-text size for automatic GitHub indexing; assets are excluded |
@@ -545,6 +546,12 @@ npx google-surf-mcp daemon drain --json
 | `ANTHROPIC_API_KEY` | unset | Anthropic key used only when LLM repair is enabled with the Anthropic provider. |
 | `ORCAROUTER_API_KEY` | unset | OrcaRouter key used only when LLM repair is enabled with the OrcaRouter provider. |
 | `ORCA_KEY` | unset | Alias for `ORCAROUTER_API_KEY`. |
+
+### Embedded resource budget
+
+Embedded storage defaults to a 512 MiB RocksDB block cache, a 128 MiB HNSW vector cache, two 32 MiB write buffers, and two background jobs instead of machine-scaled server defaults. Explicit `SURREAL_HNSW_CACHE_SIZE`, `SURREAL_ROCKSDB_BLOCK_CACHE_SIZE`, `SURREAL_ROCKSDB_WRITE_BUFFER_SIZE`, `SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER`, `SURREAL_ROCKSDB_THREAD_COUNT`, and `SURREAL_ROCKSDB_JOBS_COUNT` settings take precedence.
+
+Background indexing runs one job at a time. Queued captures in the same project share a current indexing pass, and pending capture requests survive broker restarts. Inference calls share one queue, and each small embedding batch is saved before checking for drain. Document indexing does not load unrelated code bodies. Existing cached embeddings remain reusable; the smaller batch setting does not force a full reindex. These are component budgets, not a hard whole-process RSS cap. Native storage defaults apply when a broker opens its database, not to an already running broker.
 
 ### OrcaRouter
 

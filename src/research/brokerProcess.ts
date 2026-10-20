@@ -16,6 +16,7 @@ import {
 } from './broker.js';
 import { ResearchService } from './service.js';
 import { ResearchQueryInterrupted } from './queryControl.js';
+import { embeddedStorageEnvironment } from './resources.js';
 import {
   MAX_RESEARCH_QUERY_TIMEOUT_MS,
   MIN_RESEARCH_QUERY_TIMEOUT_MS,
@@ -107,6 +108,7 @@ function parseConfig(): ResearchBrokerConfig {
 }
 
 const config = parseConfig();
+if (config.storageEnvironment) Object.assign(process.env, embeddedStorageEnvironment(config.storageEnvironment));
 process.title = 'google-surf-research-broker';
 const acquiredOwnership = await acquireOwner(config.root);
 if (!acquiredOwnership) process.exit(0);

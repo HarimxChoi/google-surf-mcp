@@ -36,6 +36,33 @@ describe('launch sandbox', () => {
     delete process.env.SURF_NO_SANDBOX;
   });
 
+  it('falls back to Playwright headless shell when the auto-selected executable cannot spawn', async () => {
+    vi.stubEnv('CHROME_PATH', '');
+    try {
+      mocks.bareLaunch.mockRejectedValueOnce(new Error('browserType.launchPersistentContext: spawn UNKNOWN'));
+      const { launch } = await import('../src/browser.js');
+      await launch({ profileDir: 'profile', stealth: false, headless: true });
+      expect(mocks.bareLaunch).toHaveBeenCalledTimes(2);
+      expect(mocks.bareLaunch.mock.calls[0][1].executablePath).toBe(process.execPath);
+      expect(mocks.bareLaunch.mock.calls[1][1].executablePath).toBeUndefined();
+      expect(mocks.bareLaunch.mock.calls[1][1].chromiumSandbox).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('does not replace an explicitly configured executable after a spawn failure', async () => {
+    vi.stubEnv('CHROME_PATH', process.execPath);
+    try {
+      mocks.bareLaunch.mockRejectedValueOnce(new Error('spawn UNKNOWN'));
+      const { launch } = await import('../src/browser.js');
+      await expect(launch({ profileDir: 'profile', stealth: false, headless: true })).rejects.toThrow('spawn UNKNOWN');
+      expect(mocks.bareLaunch).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('enables the Chromium sandbox by default', async () => {
     const { launch } = await import('../src/browser.js');
     await launch({ profileDir: 'profile', stealth: false });

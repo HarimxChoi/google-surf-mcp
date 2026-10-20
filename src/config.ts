@@ -43,6 +43,7 @@ export interface Config {
   researchVectorModel?: string;
   researchVectorLowMemory: boolean;
   researchVectorThreads: number;
+  researchVectorBatchSize: number;
   researchVectorBackend: ResearchVectorBackend;
   researchRepoAuto: boolean;
   researchRepoAutoMaxMb: number;
@@ -183,6 +184,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ),
     researchVectorLowMemory: parseBool(env.SURF_RESEARCH_VECTOR_LOW_MEMORY, true),
     researchVectorThreads: parseInt0(env.SURF_RESEARCH_VECTOR_THREADS, 4, 1, 16),
+    researchVectorBatchSize: parseInt0(env.SURF_RESEARCH_VECTOR_BATCH_SIZE, 8, 1, 32),
     researchVectorBackend: parseResearchVectorBackend(env.SURF_RESEARCH_VECTOR_BACKEND),
     researchRepoAuto: parseBool(env.SURF_RESEARCH_REPO_AUTO, true),
     researchRepoAutoMaxMb: parseInt0(env.SURF_RESEARCH_REPO_AUTO_MAX_MB, 20, 1, 500),
