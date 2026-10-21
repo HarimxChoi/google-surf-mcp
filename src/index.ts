@@ -721,6 +721,7 @@ const HealthOutput = {
   selfHealing: MetaShape.optional(),
   nativeBrowser: MetaShape.optional(),
   research: MetaShape.optional(),
+  orcarouter: MetaShape.optional(),
   config: MetaShape.optional(),
   error: ErrorInfoShape.optional(),
 };

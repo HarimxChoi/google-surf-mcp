@@ -74,7 +74,9 @@
         "SURF_LLM_PROVIDER": "${user_config.llm_provider}",
         "SURF_LLM_MODEL": "${user_config.llm_model}",
         "ANTHROPIC_API_KEY": "${user_config.anthropic_api_key}",
-        "ORCAROUTER_API_KEY": "${user_config.orcarouter_api_key}"
+        "ORCAROUTER_API_KEY": "${user_config.orcarouter_api_key}",
+        "ORCA_AUTH_BASE_URL": "${user_config.orcarouter_auth_base_url}",
+        "ORCA_API_BASE_URL": "${user_config.orcarouter_api_base_url}"
       }
     }
   },
@@ -324,8 +326,20 @@
     "orcarouter_api_key": {
       "type": "string",
       "title": "OrcaRouter API key",
-      "description": "Used only by the optional OrcaRouter repair provider.",
+      "description": "Paste an existing sk-orca-... key. Either this or the OrcaRouter connect flow is enough; both reach the same inference API.",
       "sensitive": true,
+      "required": false
+    },
+    "orcarouter_auth_base_url": {
+      "type": "string",
+      "title": "OrcaRouter auth base URL",
+      "description": "Override the authentication origin. Defaults to https://www.orcarouter.ai. Non-loopback origins must use HTTPS.",
+      "required": false
+    },
+    "orcarouter_api_base_url": {
+      "type": "string",
+      "title": "OrcaRouter API base URL",
+      "description": "Override the inference origin. Defaults to https://api.orcarouter.ai. The /v1 relay path is appended automatically.",
       "required": false
     }
   },
