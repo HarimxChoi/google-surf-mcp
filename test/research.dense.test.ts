@@ -65,6 +65,26 @@ describe('vector retrieval', () => {
     );
   });
 
+  it('reports embedding residency without loading the model and clears it on disposal', async () => {
+    const dispose = vi.fn(async () => {});
+    const factory = vi.fn(async () => Object.assign(async (texts: string[]) => ({
+      tolist: () => texts.map(() => vector(1, 0)),
+    }), { dispose }));
+    const model = new LocalEmbeddingModel('fake-e5', factory);
+    expect(model.diagnostics()).toEqual({
+      loaded: false, cached_vectors: 0, inference_active: false, completed_batches: 0,
+    });
+    expect(factory).not.toHaveBeenCalled();
+    await model.embedQuery('cached question');
+    await model.embedQuery('cached question');
+    expect(model.diagnostics()).toEqual({
+      loaded: true, cached_vectors: 1, inference_active: false, completed_batches: 1,
+    });
+    await model.dispose();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(model.diagnostics()).toMatchObject({ loaded: false, cached_vectors: 0 });
+  });
+
   it('bounds inference batches and serializes callers without poisoning the queue on failure', async () => {
     let active = 0;
     let peak = 0;
@@ -83,6 +103,7 @@ describe('vector retrieval', () => {
       }
     });
     await expect(model.embedQuery('failure')).rejects.toThrow('inference failed');
+    expect(model.diagnostics()).toMatchObject({ inference_active: false, completed_batches: 0 });
     const [passages, query] = await Promise.all([
       model.embedPassages(Array.from({ length: 11 }, (_, index) => `document ${index}`)),
       model.embedQuery('question'),
@@ -161,6 +182,28 @@ describe('vector retrieval', () => {
       expect(bm25.bm25.map((row) => row.title)).toContain('Exact Vector Document');
       expect(semantic.bm25).toHaveLength(0);
       expect(semantic.vector.map((row) => row.title)).toContain('Exact Vector Document');
+    } finally {
+      await service.close();
+    }
+  });
+
+  it('compares every vector exactly in a small scope without a filtered global HNSW walk', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'surf-small-vector-scope-'));
+    roots.push(root);
+    const embeddings = new FakeEmbeddings();
+    const service = new ResearchService({ enabled: true, root, endpoint: 'mem://', embeddingProvider: embeddings });
+    try {
+      await service.createProject('Small scope', 'small-scope');
+      for (const [title, content] of [['Target', 'semantic target'], ['Distractor', 'unrelated evidence']]) {
+        await service.capture({ tool: 'extract', project_id: 'small-scope',
+          payload: { title, url: `https://example.com/${title}`, content, extraction_quality: 'full_text' } });
+      }
+      await service.waitForIdle();
+      const queries = vi.spyOn(await service.store.open(), 'query');
+      const hits = await service.store.searchProjectVector('small-scope', embeddings.modelId(), vector(1, 0), 10);
+      expect(hits.map((hit) => hit.title)).toEqual(['Target', 'Distractor']);
+      expect(hits.map((hit) => hit.score)).toEqual([1, 0]);
+      expect(queries.mock.calls.some(([sql]) => String(sql).includes('embedding <|'))).toBe(false);
     } finally {
       await service.close();
     }

@@ -360,7 +360,7 @@ function scheduleIdle(): void {
   if (activeRequests || activeReads || activeWrites || queuedWrites || readWaiters.length || stopping) return;
   clearTimeout(idleTimer);
   const underPressure = Boolean(
-    config.workerSoftMemoryBytes && process.memoryUsage().rss >= config.workerSoftMemoryBytes
+    config.workerSoftMemoryBytes && process.memoryUsage.rss() >= config.workerSoftMemoryBytes
   );
   const status = service.status();
   if (underPressure && !status.drain_requested
@@ -383,6 +383,7 @@ async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
   clearTimeout(idleTimer);
+  clearInterval(memoryTimer);
   for (const client of clients) client.destroy();
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
   await service.close().catch(() => {});
@@ -430,6 +431,15 @@ server.on('error', async () => {
   await releaseOwner(ownership.directory, ownership.owner);
   process.exit(1);
 });
+const memoryTimer = setInterval(() => {
+  if (stopping || !config.workerSoftMemoryBytes || process.memoryUsage.rss() < config.workerSoftMemoryBytes) return;
+  const status = service.status();
+  if (!status.drain_requested && (status.background_jobs || status.scheduled_graph_jobs)) {
+    void service.requestDrain();
+  }
+  scheduleIdle();
+}, 1_000);
+memoryTimer.unref();
 server.listen(endpoint);
 process.once('SIGINT', () => void stop());
 process.once('SIGTERM', () => void stop());

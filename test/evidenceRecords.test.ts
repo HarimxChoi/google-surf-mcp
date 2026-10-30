@@ -147,8 +147,9 @@ describe('compact evidence records', () => {
     const response = await processOutputHook({ tool_name: 'Bash', tool_input: { command: 'result' },
       tool_response: { output: JSON.stringify({ experiment: 'x', contract: { seed: 0 }, result: 0.875 }), exit_code: 1 } },
     { trigger_chars: 1, max_chars: 400 });
-    expect(String(response?.reason).length).toBeLessThanOrEqual(400);
-    expect(String(response?.reason)).toContain('Exit code: 1');
-    expect(String(response?.reason)).toContain('0.875');
+    expect(response).toMatchObject({ continue: false });
+    expect(String(response?.stopReason).length).toBeLessThanOrEqual(400);
+    expect(String(response?.stopReason)).toContain('Exit code: 1');
+    expect(String(response?.stopReason)).toContain('0.875');
   });
 });

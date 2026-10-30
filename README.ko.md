@@ -104,7 +104,7 @@ Research 모드를 꺼도 live `search`와 `search_parallel` 결과에는 경량
 
 ## Install
 
-Node 20.18.1+ 필요. 브라우저 모드는 Google Chrome 또는 Chromium도 필요합니다.
+Node 22.12.0+ 필요. CI는 Linux와 Windows에서 Node 22와 24를 검사합니다. 브라우저 모드는 Google Chrome 또는 Chromium도 필요합니다.
 
 ```bash
 npx google-surf-mcp   # 실제 MCP, 클라이언트 config에 등록
@@ -141,6 +141,8 @@ npx -y google-surf-mcp@latest hooks install --host codex
 Codex를 재시작한 뒤 `/hooks`에서 새 정의를 검토하고 신뢰하도록 설정합니다. Shell 출력은 1,500자부터 재랭킹하며, 기본 표시 예산은 1,500자입니다. 서로 다른 query-matching evidence record 또는 block이 있으면 최대 3,000자까지 확장합니다. 명시적인 override는 3,000자 초과도 허용하며, 턴 전체 출력량에는 누적 제한을 두지 않습니다. 동일하거나 유사한 검색 2회와 명시적인 foreground polling loop는 차단합니다. 이미 실행 중인 unified command의 `write_stdin` 재조회는 이 훅이 아니라 Codex runtime이 관리합니다.
 
 JSON/JSONL 요약은 원본 입력 기준 JSON pointer, 상위 identity/조건 참조, 원래 결과 값을 묶은 compact record를 사용합니다. Markdown 표의 행에는 헤더와 출처 줄을 포함한 인접 문맥이 함께 유지됩니다. 선택한 record와 필수 문맥이 함께 예산 안에 들어가야 하며, record 중간을 자르는 대신 생략 여부를 표시합니다. 일반 로그는 block 재랭킹을 유지합니다. 선택은 모델·DB·추가 subprocess 없이 결정론적 lexical 방식으로 수행됩니다. 문맥 추출은 구조와 필드명 휴리스틱이며 의미 이해가 아니므로, 미선택 필드는 원본 입력에서 확인해야 합니다. 이 요약은 실험 로그나 SSOT 이력을 대체하지 않습니다. 입력 기준 pointer는 영구 조회 handle이 아닙니다. 기존 설치 hook은 bundle을 업데이트해야 변경 코드를 사용합니다.
+
+출력 대체는 차단 결정 대신 Codex의 `continue: false` 응답을 사용합니다. 원래 명령의 종료 코드는 요약에 유지하며, 정상 출력을 축약했다는 이유로 도구 호출을 실패시키거나 같은 code-mode script의 후속 호출을 중단하지 않습니다.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -335,6 +337,8 @@ Graphology는 SurrealDB의 원본에서 typed graph projection을 만들고 Page
 
 로컬 multi-query 검색은 query embedding을 batch 처리하고 exact, BM25, vector lane을 독립적으로 RRF에 반영한 뒤 graph 확장, 선택 chunk hydrate, 최종 rerank를 각각 한 번만 수행합니다. Graph-only 전체 프로젝트 검색은 query 시점에 모든 프로젝트 graph를 만들지 않고 가벼운 memory-node index와 검증된 identity alias로 최대 4개 graph scope를 선택합니다.
 
+각 검색 lane은 프로젝트 scope를 최대 2개씩 조회합니다. 코드 BM25 순위 metadata는 같은 질의 안에서 공유하고, 선택된 프로젝트 소유 본문만 읽습니다. 현재 모델의 vector가 1,024개 이하인 scope는 해당 vector 전체를 정확한 cosine 거리로 비교하고, 더 큰 scope는 HNSW를 사용합니다. 요청한 검색 범위, 모델과 index 형식은 바꾸지 않습니다.
+
 Query embedding이 실패하거나 vector가 없으면 rerank에서 모델을 재호출하지 않고 lexical/graph 순위를 반환합니다. 시간 필드는 중복 없는 wall-clock 구간입니다. `embedding_ms`와 `retrieval_ms`의 합은 검색 종료까지의 시간이고, `rerank_ms`는 그 이후 응답 처리 시간입니다. 검색과 embedding이 동시에 진행될 수 있으므로 `retrieval_ms`는 독립적인 DB 실행 시간이 아닙니다. `response_deadline_ms`는 broker admission 이후 시작하며, transport watchdog에는 해당 deadline 외에 기존 5분의 queue/IPC 여유 시간이 유지됩니다. Partial 응답 이후에도 실행 중인 native query는 종료될 때까지 broker read slot을 보유합니다.
 
 #### 로컬 RAG 검색 검증
@@ -452,6 +456,8 @@ npx google-surf-mcp daemon drain --json
 ```
 
 `doctor`는 passive 진단입니다. DB, vector model과 graph를 열지 않고 process identity, version, capability, queue, memory, cache, lifecycle, foreground/background 소유권, checkpoint drain 상태와 worker recycle을 막는 정확한 이유를 표시합니다. MCP client가 연결된 상태여도 실제 작업이 없으면 broker를 drain하고, 진행 중인 요청과 commit이 있으면 종료를 미룹니다. Memory pressure에서는 재구축 가능한 background job을 안전한 stage 경계에서 checkpoint합니다. 다음 요청은 자동으로 다시 연결됩니다.
+
+임베딩 모델의 로드 여부, 캐시된 vector 수, 추론 실행 상태와 완료 배치 수, 설정된 embedded storage cache 예산도 표시합니다. `npm run research:memory-soak -- 100`은 초기 상태, DB 열기, 색인, 마지막 질의를 포함한 조회, 재시작 후 상태를 나눠 측정합니다. `SURF_SOAK_VECTOR_MODEL=Xenova/multilingual-e5-small`을 설정하면 실제 고정 revision 모델을 포함하며, `SURF_SOAK_UNIQUE_QUERIES=true`는 동일 질의의 캐시 조회 대신 새로운 질의의 추론을 검증합니다. 기본 실행은 vector를 끄고 storage와 broker 비용을 분리합니다. RSS를 측정하는 것이며 개별 native allocator의 점유를 정확히 분해한 값은 아닙니다.
 
 ## Env vars
 

@@ -1,6 +1,6 @@
 {
   "name": "google-surf-mcp",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "mcpName": "io.github.HarimxChoi/google-surf-mcp",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
   "type": "module",
@@ -43,6 +43,7 @@
     "research:memory-soak": "node scripts/soak-research-memory.mjs",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "smoke:hooks": "node scripts/smoke-host-hooks.mjs",
+    "smoke:extraction": "node scripts/smoke-extraction.mjs",
     "drift-check": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/repair/index.js"
   },
   "keywords": [
@@ -73,11 +74,11 @@
     "url": "https://github.com/HarimxChoi/google-surf-mcp/issues"
   },
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=22.12.0"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "^2.0.8",
-    "@modelcontextprotocol/sdk": "^1.20.0",
+    "@llamaindex/liteparse": "^2.17.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@mozilla/readability": "^0.6.0",
     "@surrealdb/node": "^3.0.3",
     "graphology": "^0.26.0",
@@ -88,29 +89,29 @@
     "onnxruntime-common": "1.29.0",
     "onnxruntime-node": "1.29.0",
     "pdf-lib": "^1.17.1",
-    "playwright": "^1.59.1",
+    "playwright": "^1.64.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "surrealdb": "^2.0.8",
     "tree-sitter": "^0.21.1",
     "tree-sitter-cpp": "^0.22.3",
     "tree-sitter-python": "^0.21.0",
     "tree-sitter-typescript": "^0.23.2",
     "turndown": "^7.2.4",
-    "undici": "7.29.0",
-    "zod": "^4.4.3"
+    "undici": "7.30.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.97.0",
     "@types/jsdom": "^21.1.7",
-    "@types/node": "^20.17.10",
+    "@types/node": "^22.0.0",
     "@types/turndown": "^5.0.6",
     "jsdom": "^25.0.1",
     "neo4j-driver": "^6.2.0",
     "typescript": "^5.3.3",
-    "vite": "^6.4.3",
-    "vitest": "^3.2.6"
+    "vite": "^6.4.5",
+    "vitest": "^5.0.5"
   },
   "main": "index.js",
   "directories": {

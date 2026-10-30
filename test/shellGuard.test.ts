@@ -84,4 +84,12 @@ describe('Codex shell guard', () => {
     expect(isForegroundPolling('tail -f training.log')).toBe(true);
     expect(isForegroundPolling('npm test')).toBe(false);
   });
+
+  it('allows event-driven waits and literal searches without hiding executable loops', () => {
+    expect(isForegroundPolling('Wait-Process -Id 123 -Timeout 180')).toBe(false);
+    expect(isForegroundPolling('rg -n "Wait-Process|while|Start-Sleep 30|tail -f" src')).toBe(false);
+    expect(isForegroundPolling('rg needle src; while ($true) { Start-Sleep 30 }')).toBe(true);
+    expect(isForegroundPolling('rg "$(Start-Sleep 30)" src')).toBe(true);
+    expect(isForegroundPolling('ssh host "while true; do sleep 30; done"')).toBe(true);
+  });
 });

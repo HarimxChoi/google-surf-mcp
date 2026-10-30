@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Replace oversized Codex tool output without rejecting nested code-mode promises; retain redaction, output budgets and original command exit codes.
+- Allow event-driven process waits and literal source searches in the shell guard while retaining executable polling-loop detection.
+- Serialize only graph publication across project scopes and reconcile projection status transactionally without rewriting unchanged active rows.
+- Share metadata-only source BM25 ranks across project scopes, hydrate only selected code bodies, bound project reads to two, and skip HNSW for empty model scopes.
+- Rank all vectors exactly for scopes up to 1,024 vectors to avoid selective global-HNSW walks; larger scopes retain HNSW and the model/index format is unchanged.
+- Prioritize foreground retrieval over queued background work and check broker memory pressure periodically even when no client requests arrive.
+- Hydrate exact/vector results using indexed document/hash pairs and primary source/body record IDs rather than full-table IN scans; retain active-source and stale-hash checks, with native EXPLAIN and empty/mismatched-reference regressions.
+- Match BM25 hits to their own current or legacy chunk set using one project-membership read; remove repeated per-hit project subqueries and exclude staged/obsolete/other-project hits without changing BM25 scoring.
+- Use document-and-active-set equality predicates for bounded chunk reads, so the existing composite index is used instead of a full-table scan for each membership batch; verify the native query plan including legacy chunks and 250/251 boundaries.
+- Replace repeated whole-project chunk subqueries with bounded membership reads and per-document active-chunk-set matching; do not read chunk bodies twice during retrieval publication.
+- Keep legacy unversioned chunks isolated from staged replacements and prevent another document's active chunk-set ID from admitting obsolete chunks.
+- Resume a failed catalog-index job through queued/running on idempotent replay without creating a new catalog revision or operation.
+
+### Changed
+- Update MCP, HTTP, validation, PDF, browser and test dependencies; refresh transitive security patches without changing the SurrealDB engine or Tree-sitter ABI.
+- Require Node.js 22.12+ and test Node 22/24 on both Linux and Windows with current GitHub Actions runtimes.
+- Expose passive embedding residency, cache and inference diagnostics, and record cold/database/index/query/reopen memory stages in the soak probe.
+
 ## [0.9.5]
 
 ### Added

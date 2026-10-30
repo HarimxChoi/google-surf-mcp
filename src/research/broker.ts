@@ -289,6 +289,8 @@ class ResearchBrokerClient {
       external_sync: 'off',
       database_open: false,
       background_jobs: 0,
+      active_background_jobs: 0,
+      queued_background_jobs: 0,
       repository_jobs: 0,
       scheduled_graph_jobs: 0,
       drain_requested: false,

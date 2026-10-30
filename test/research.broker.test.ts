@@ -189,6 +189,8 @@ describe('research broker', () => {
     });
     expect(status.process.pid).toBeGreaterThan(0);
     expect(status.process.rss_bytes).toBeGreaterThan(0);
+    expect(status.capabilities.embedding).toMatchObject({ loaded: false, cached_vectors: 0 });
+    expect(status.capabilities.storage_cache_budgets?.SURREAL_HNSW_CACHE_SIZE).toBe(String(128 * 1024 * 1024));
     expect(status.broker.connected_clients).toBe(1);
     expect(status.broker.active_requests).toBe(0);
     expect(status.broker.recycle_eligible).toBe(true);
@@ -252,4 +254,46 @@ describe('research broker', () => {
       await rm(source, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
     }
   }, 30_000);
+
+  it('recycles under memory pressure without losing a committed catalog body', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-memory-pressure-'));
+    const service = createSharedResearchService(
+      { enabled: true, root, vectorModel: '' },
+      { idleMs: 60_000, workerSoftMemoryBytes: 1, processPath: resolve('build/research/brokerProcess.js') },
+    );
+    services.push(service);
+    await service.createProject('Memory pressure', 'memory-pressure');
+    await service.writeCatalogRecord({
+      project_id: 'memory-pressure', kind: 'document', operation: 'create',
+      asset_id: 'pressure-document', idempotency_key: 'pressure-document-v1',
+      body: 'Committed evidence survives worker recycling.', fields: { title: 'Pressure evidence' },
+    });
+    const ownerPath = resolve(researchBrokerDirectory(root), 'owner', 'owner.json');
+    const first = JSON.parse(await readFile(ownerPath, 'utf8')) as { pid: number };
+    await waitUntil(() => {
+      try { process.kill(first.pid, 0); return false; } catch { return true; }
+    }, 15_000);
+
+    const record = await service.getCatalogRecord('memory-pressure', 'pressure-document');
+    expect(record.body).toBe('Committed evidence survives worker recycling.');
+    const second = JSON.parse(await readFile(ownerPath, 'utf8')) as { pid: number };
+    expect(second.pid).not.toBe(first.pid);
+  }, 30_000);
+
+  it('detects memory pressure without another client request', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-passive-pressure-'));
+    const service = createSharedResearchService(
+      { enabled: true, root, vectorModel: '' },
+      { idleMs: 60_000, workerSoftMemoryBytes: 1024 ** 3,
+        processPath: resolve('test/fixtures/research-pressure-broker.mjs') },
+    );
+    services.push(service);
+    await service.createProject('Passive pressure', 'passive-pressure');
+    const ownerPath = resolve(researchBrokerDirectory(root), 'owner', 'owner.json');
+    const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { pid: number };
+    await writeFile(join(root, 'pressure-on'), '');
+    await waitUntil(() => {
+      try { process.kill(owner.pid, 0); return false; } catch { return true; }
+    }, 10_000);
+  }, 20_000);
 });

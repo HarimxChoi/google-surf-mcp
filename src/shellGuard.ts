@@ -68,6 +68,10 @@ export function isSearchCommand(command: string): boolean {
 }
 
 export function isForegroundPolling(command: string): boolean {
+  if (/^\s*(?:(?:rg|ripgrep|grep|findstr)(?:\.exe)?|Select-String|git\s+(?:grep|log|show|diff))\b/i.test(command)
+    && !/\$\(|`/.test(command)) {
+    command = command.replace(/"(?:\\.|[^"\\])*"|'(?:''|[^'])*'/g, '');
+  }
   const sleeps = [
     ...command.matchAll(/\bStart-Sleep\b(?:\s+-Seconds)?\s+(\d+)/gi),
     ...command.matchAll(/(?:^|[;&|]\s*|\s)\bsleep\s+(\d+)(?:s)?\b/gi),
@@ -78,7 +82,6 @@ export function isForegroundPolling(command: string): boolean {
     /\btail\b[^\r\n]*(?:\s-f\b|--follow\b)/i,
     /\bGet-Content\b[^\r\n]*\s-Wait\b/i,
     /(?:^|[;&|]\s*|\s)\bwatch(?:\.exe)?\b/i,
-    /\bWait-Process\b/i,
   ].some((pattern) => pattern.test(command));
 }
 

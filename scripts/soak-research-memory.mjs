@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const queries = Math.max(1, Number.parseInt(process.argv[2] ?? '100', 10));
+const uniqueQueries = process.env.SURF_SOAK_UNIQUE_QUERIES === 'true';
 const workspace = mkdtempSync(join(tmpdir(), 'surf-memory-soak-'));
 const researchRoot = join(workspace, 'research');
 const profileRoot = join(workspace, 'profile');
@@ -84,13 +85,20 @@ function memorySample(phase, status) {
     ...status.process,
     adapter_rss_bytes: status.adapter_process?.rss_bytes ?? 0,
     observed_worker_rss_bytes: status.observed_worker_rss_bytes ?? status.process.rss_bytes,
+    embedding: status.capabilities?.embedding ?? null,
+    graph_cache_bytes: status.graph_cache_bytes ?? 0,
+    storage_cache_budgets: status.capabilities?.storage_cache_budgets ?? null,
   };
 }
 
-async function memorySearch(client) {
+async function memorySearch(client, index) {
   const result = await client.callTool({
     name: 'project_memory_search',
-    arguments: { project_id: 'memory-soak', query: 'durable_soak_token', limit: 5 },
+    arguments: {
+      project_id: 'memory-soak',
+      query: `durable_soak_token${uniqueQueries && index !== undefined ? ` research variation ${index}` : ''}`,
+      limit: 5,
+    },
   });
   if (result.isError || result.structuredContent?.meta?.browser_used !== false) {
     throw new Error('memory-only search route failed');
@@ -144,11 +152,13 @@ try {
   mkdirSync(sourceRoot, { recursive: true });
   writeFileSync(join(sourceRoot, 'soak.ts'), 'export const soak = "initial";\n', 'utf8');
   first = await connect('google-surf-memory-soak');
+  samples.push(memorySample('cold', await doctor(first.client)));
   const created = await first.client.callTool({
     name: 'project_memory',
     arguments: { action: 'create', project_id: 'memory-soak', name: 'Memory soak' },
   });
   if (created.isError) throw new Error('memory soak project create failed');
+  samples.push(memorySample('database-open', await doctor(first.client)));
   const initialBrokerPid = ownerPid();
   const recorded = await first.client.callTool({
     name: 'project_memory',
@@ -174,6 +184,7 @@ try {
     });
     if (waited.isError) throw new Error('memory soak index wait failed');
   }
+  samples.push(memorySample('document-indexed', await doctor(first.client)));
   const initialSync = await syncSource(first.client);
   await waitForIndex(first.client, initialSync);
   const noOpSync = await syncSource(first.client);
@@ -194,8 +205,8 @@ try {
   await memorySearch(first.client);
   samples.push(memorySample('warm', await doctor(first.client)));
   for (let index = 0; index < queries; index++) {
-    await memorySearch(first.client);
-    if ((index + 1) % Math.max(1, Math.floor(queries / 4)) === 0) {
+    await memorySearch(first.client, index);
+    if ((index + 1) % Math.max(1, Math.floor(queries / 4)) === 0 || index + 1 === queries) {
       samples.push(memorySample(`query-${index + 1}`, await doctor(first.client)));
     }
   }
@@ -221,6 +232,7 @@ try {
   console.log(JSON.stringify({
     fixture: researchRoot,
     queries,
+    unique_queries: uniqueQueries,
     vector_model: env.SURF_RESEARCH_VECTOR_MODEL,
     browser_broker_started: false,
     first_broker_pid: firstPid,

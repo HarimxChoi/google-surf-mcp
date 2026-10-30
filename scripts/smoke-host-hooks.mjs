@@ -61,9 +61,9 @@ try {
     tool_response: { output: `${'still running\n\n'.repeat(700)}final perplexity: 8.42\nstatus: complete` },
   });
   const post = JSON.parse(runCommand(configuredCommands[1], postInput));
-  assert(post.decision === 'block', 'oversized output was not replaced');
-  assert(post.reason.length <= 1_500, 'single-evidence output exceeded 1500 characters');
-  assert(post.reason.includes('perplexity'), 'ranked output dropped the relevant result');
+  assert(post.continue === false && !('decision' in post), 'output replacement must not reject a nested tool promise');
+  assert(post.stopReason.length <= 1_500, 'single-evidence output exceeded 1500 characters');
+  assert(post.stopReason.includes('perplexity'), 'ranked output dropped the relevant result');
 
   const status = run(['build/cli.js', 'hooks', 'status', '--host', 'codex']);
   assert(status.includes('"files_valid": true'), 'status did not validate installed files');

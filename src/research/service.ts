@@ -22,7 +22,7 @@ import type {
 } from './contracts.js';
 import { runCodeStructureBatchStream, type CodeSourceInput } from './codeStructure.js';
 import { cosineSimilarity, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
-import { embeddingBatchSize } from './resources.js';
+import { embeddedStorageEnvironment, embeddingBatchSize } from './resources.js';
 import { aliasId, entityId, normalizeEntityName, rankEntityCandidates } from './entities.js';
 import { buildGraphProjection, type ProjectGraphSource } from './graphProjection.js';
 import {
@@ -73,6 +73,8 @@ export interface ResearchServiceStatus {
   external_sync: 'off';
   database_open: boolean;
   background_jobs: number;
+  active_background_jobs: number;
+  queued_background_jobs: number;
   repository_jobs: number;
   scheduled_graph_jobs: number;
   drain_requested: boolean;
@@ -125,6 +127,8 @@ export interface ResearchPassiveStatus extends ResearchServiceStatus {
     remote_endpoint?: string;
     vector_index: 'hnsw' | 'exhaustive' | 'compact';
     vector_dimensions: number;
+    embedding?: import('./dense.js').EmbeddingDiagnostics;
+    storage_cache_budgets?: Record<string, string>;
     passive_health_opens_database: false;
   };
 }
@@ -815,6 +819,7 @@ export class ResearchService {
   private readonly queryStates = new Map<string, ResearchQueryState>();
   private readonly queryControllers = new Map<string, AbortController>();
   private drainRequested = false;
+  private activeBackgroundJobs = 0;
   private recoveredDirtyProjects = false;
   private state: 'disabled' | 'idle' | 'ready' | 'unavailable';
 
@@ -880,6 +885,8 @@ export class ResearchService {
       external_sync: 'off',
       database_open: this.store.isOpen(),
       background_jobs: this.backgroundJobs.size,
+      active_background_jobs: this.activeBackgroundJobs,
+      queued_background_jobs: Math.max(0, this.backgroundJobs.size - this.activeBackgroundJobs),
       repository_jobs: this.repositoryJobs.size,
       scheduled_graph_jobs: this.graphTimers.size,
       drain_requested: this.drainRequested,
@@ -924,6 +931,8 @@ export class ResearchService {
         ...(remoteEndpoint ? { remote_endpoint: remoteEndpoint } : {}),
         vector_index: this.options.vectorBackend ?? 'hnsw',
         vector_dimensions: this.embeddings.dimensions(),
+        ...(this.embeddings.diagnostics ? { embedding: this.embeddings.diagnostics() } : {}),
+        ...(!remoteEndpoint ? { storage_cache_budgets: embeddedStorageEnvironment() } : {}),
         passive_health_opens_database: false,
       },
     };
@@ -1035,7 +1044,9 @@ export class ResearchService {
             const key = `${job.project_id}\0${family}`;
             if (resumedRetrievals.has(key)) continue;
             resumedRetrievals.add(key);
-            this.schedule(async () => await this.materializeRetrievalIndex(job.project_id, family));
+            this.schedule(async () => {
+              if (!this.drainRequested) await this.materializeRetrievalIndex(job.project_id, family);
+            });
           }
         }
       }
@@ -1077,14 +1088,24 @@ export class ResearchService {
     if (pending) clearTimeout(pending);
     const timer = setTimeout(() => {
       this.graphTimers.delete(projectId);
-      this.schedule(async () => await this.materializeGraph([projectId]));
+      this.schedule(async () => {
+        if (!this.drainRequested) await this.materializeGraph([projectId]);
+      });
     }, 5_000);
     timer.unref();
     this.graphTimers.set(projectId, timer);
   }
 
   private schedule(operation: () => Promise<unknown>): void {
-    const job = this.backgroundTail.then(operation);
+    const job = this.backgroundTail.then(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      while (!this.drainRequested && (this.queryControllers.size || this.searchReads.size)) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      this.activeBackgroundJobs++;
+      try { return await operation(); }
+      finally { this.activeBackgroundJobs--; }
+    });
     this.backgroundTail = job.catch(() => {});
     this.backgroundJobs.add(job);
     void job.then(
@@ -1198,8 +1219,13 @@ export class ResearchService {
     this.scheduledJobIds.add(job.job_id);
     this.schedule(async () => {
       try {
-        const current = await this.store.getKnowledgeJob(job.job_id);
+        let current = await this.store.getKnowledgeJob(job.job_id);
         if (!current || current.status === 'done' || current.status === 'cancelled') return;
+        if (current.status === 'failed') {
+          current = await this.transitionKnowledgeJob({
+            project_id: current.project_id, job_id: current.job_id, status: 'queued',
+          });
+        }
         if (current.status === 'queued') {
           await this.transitionKnowledgeJob({
             project_id: current.project_id,
@@ -3631,9 +3657,14 @@ export class ResearchService {
     projectId: string,
     sourceFamily: 'document' | 'code',
   ): Promise<RetrievalIndexItem[]> {
+    const read = async <T>(lane: string, pending: Promise<T>): Promise<T> => {
+      try { return await pending; } catch (error) {
+        throw new Error(`retrieval ${lane}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+    };
     const [documents, documentChunks, sources, symbols] = await Promise.all([
-      sourceFamily === 'document' ? this.store.listProjectDocuments(projectId) : [],
-      sourceFamily === 'document' ? this.store.listProjectDocumentChunks(projectId) : [],
+      sourceFamily === 'document' ? read('document metadata', this.store.listProjectDocuments(projectId, false)) : [],
+      sourceFamily === 'document' ? read('document chunks', this.store.listProjectDocumentChunks(projectId)) : [],
       sourceFamily === 'code' ? this.store.listProjectSourceBodies(projectId) : [],
       sourceFamily === 'code' ? this.store.listCodeSymbols(projectId) : [],
     ]);
@@ -3708,7 +3739,9 @@ export class ResearchService {
       exact_terms: item.exact_terms,
       text_hash: createHash('sha256').update(item.text).digest('hex'),
     })))).digest('hex');
-    const delta = await this.store.planRetrievalItemDelta(projectId, sourceFamily, items);
+    const delta = await this.store.planRetrievalItemDelta(projectId, sourceFamily, items).catch((error) => {
+      throw new Error(`retrieval item-state planning: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    });
     const model = this.embeddings.modelId();
     if (!model) {
       await this.store.commitRetrievalGeneration(projectId, sourceFamily, digest, delta);
@@ -4398,7 +4431,10 @@ export class ResearchService {
       await this.updateKnowledgeJobProgress(
         owner, job.job_id, 'graph_publish', projection.nodes.length, projection.nodes.length,
       );
-      await this.store.publishGraphProjection(projection, analysis);
+      // Publication reconciles shared projection status and retention across projects.
+      await this.locked('graph:publication\0', async () => (
+        await this.store.publishGraphProjection(projection, analysis)
+      ));
       this.rememberGraphArtifact(projection.projection_id, { projection, analysis });
       const publishMs = Date.now() - publishStarted;
       const jobs = await this.completeGraphJobs(projection, {
@@ -4553,10 +4589,11 @@ export class ResearchService {
       operation: (project: ProjectRecord) => Promise<LocalSearchHit[]>,
       context?: unknown,
     ): Promise<LocalSearchHit[][]> => {
-      const groups: LocalSearchHit[][] = [];
-      for (const project of projects) {
+      const groups: LocalSearchHit[][] = projects.map(() => []);
+      let completed = 0;
+      await mapConcurrent(projects, 2, async (project, index) => {
         ensureNotAborted(signal);
-        groups.push(await runRetrievalLane(lane, degradedLanes, async () => {
+        groups[index] = await runRetrievalLane(lane, degradedLanes, async () => {
           try {
             return await this.searchRead(
               [lane, project, cleanedQuery, cappedLimit, context], () => operation(project), signal,
@@ -4567,11 +4604,12 @@ export class ResearchService {
             degradedLanes.add(lane);
             return [];
           }
-        }));
+        });
         ensureNotAborted(signal);
+        completed++;
         onLane?.(lane, filterSearchHits(fuseRankedGroups(groups, cappedLimit, lane), filters),
-          groups.length === projects.length, degradedLanes.has(lane));
-      }
+          completed === projects.length, degradedLanes.has(lane));
+      });
       return groups;
     };
     const vector = async (): Promise<LocalSearchHit[][]> => {
@@ -4596,12 +4634,17 @@ export class ResearchService {
         project.project_id, model, queryVector, cappedLimit,
       ), [model, queryVector]);
     };
+    let sourceRanks: ReturnType<ResearchStore['searchSourceRanks']> | undefined;
+    const sharedSourceRanks = () => sourceRanks ??= this.searchRead(
+      ['source-bm25-ranks', cleanedQuery, cappedLimit],
+      () => this.store.searchSourceRanks(cleanedQuery, cappedLimit), signal,
+    );
     const [exactGroups, bm25Groups, vectorGroups] = await Promise.all([
       lanes.has('exact') ? collect('exact', (project) => this.store.searchProjectExact(
         project.project_id, normalizeEntityName(cleanedQuery), cappedLimit,
       )) : Promise.resolve([]),
       lanes.has('bm25') ? collect('bm25', (project) => this.store.searchProjectBm25(
-        project.project_id, cleanedQuery, cappedLimit,
+        project.project_id, cleanedQuery, cappedLimit, projects.length > 1 ? sharedSourceRanks : undefined,
       )) : Promise.resolve([]),
       vector(),
     ]);

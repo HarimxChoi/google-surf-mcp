@@ -105,7 +105,7 @@ Measured across three uncached queries per provider on a workstation with a 1Gb/
 
 ## Install
 
-Requires Node 20.18.1+. Browser mode also requires Google Chrome or Chromium.
+Requires Node 22.12.0+. CI tests Node 22 and 24 on Linux and Windows. Browser mode also requires Google Chrome or Chromium.
 
 ```bash
 npx google-surf-mcp   # actual MCP - register in client config
@@ -142,6 +142,8 @@ npx -y google-surf-mcp@latest hooks install --host codex
 Restart Codex, then open `/hooks` to review and trust the definitions. Shell output is reranked from 1,500 characters, with a default 1,500-character display budget that expands up to 3,000 for distinct query-matching evidence records or blocks. An explicit override may exceed 3,000; there is no cumulative per-turn output limit. Two identical or near-duplicate searches and explicit foreground polling loops are blocked. Existing `write_stdin` polls for an already-running unified command remain controlled by the Codex runtime, not this hook.
 
 JSON/JSONL summaries use compact records with input-relative JSON pointers, ancestor identity/condition references and original result values. Markdown table rows retain headers and adjacent context, including source lines. Selected records and their required context must fit together; the renderer reports omissions instead of slicing records. Plain logs retain block reranking. Selection is deterministic and lexical, without a model, database or extra subprocess. Context extraction uses structural/field-name heuristics, not semantic understanding; unselected fields remain in the original input. These excerpts do not replace experiment logs or SSOT history. Input-relative pointers are not persistent retrieval handles. Existing installed hook bundles require an update to use changed code.
+
+Output replacement uses Codex's non-rejecting `continue: false` response, not a blocking tool decision. The command's exit code remains visible in the summary; truncating a successful result does not turn it into a tool-call failure or interrupt later calls in the same code-mode script.
 
 ```bash
 npx -y google-surf-mcp@latest hooks status --host codex
@@ -364,6 +366,8 @@ Graphology builds a typed graph projection from SurrealDB and computes PageRank,
 
 Local multi-query retrieval batches query embeddings, keeps exact, BM25, and vector lanes independent through RRF, expands the graph once, hydrates selected chunks once, and reranks once. Graph-only all-project searches use a lightweight memory-node index and verified identity aliases to select at most four graph scopes instead of constructing every project graph at query time.
 
+Project lanes read at most two scopes concurrently. Code BM25 rank metadata is shared within each query, then only selected project-owned bodies are hydrated. Scopes with up to 1,024 active-model vectors use exact cosine ranking over all their vectors; larger scopes use HNSW. The requested search scope, model and index format are unchanged.
+
 If query embedding fails or returns no vector, local search returns its lexical/graph ranking without retrying the model in reranking. Timing fields are non-overlapping wall-clock partitions: `embedding_ms` plus `retrieval_ms` reaches the end of retrieval, and `rerank_ms` covers the remaining response work. Retrieval may overlap embedding, so `retrieval_ms` is not standalone database execution time. A supplied `response_deadline_ms` starts after broker admission; the transport watchdog retains its five-minute queue/IPC allowance in addition to that deadline. Native queries that outlive a partial response retain their broker read slot until they settle.
 
 #### Research retrieval check
@@ -481,6 +485,8 @@ npx google-surf-mcp daemon drain --json
 ```
 
 `doctor` is passive: it reports process identity, versions, capabilities, queue counters, memory counters, cache bytes, current lifecycle state, foreground/background ownership, checkpoint-drain state, and the exact blockers preventing worker recycling without opening the database, vector model, or graph. The broker drains after meaningful work is idle even if an MCP client remains connected; active requests and commits postpone the drain, while rebuildable background jobs checkpoint at safe stage boundaries under memory pressure. The next request reconnects transparently.
+
+Diagnostics also report whether the embedding model is loaded, its cached-vector count, active inference and completed batches, plus configured embedded-storage cache budgets. `npm run research:memory-soak -- 100` records cold, database-open, indexed, query and reopened stages, including the final query. Set `SURF_SOAK_VECTOR_MODEL=Xenova/multilingual-e5-small` to include the real pinned model and `SURF_SOAK_UNIQUE_QUERIES=true` to exercise new query inference rather than identical-query cache hits. The default run isolates storage and broker overhead with vectors disabled. RSS is measured, not attributed exactly to individual native allocators.
 
 ## Env vars
 

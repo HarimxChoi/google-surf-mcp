@@ -52,7 +52,7 @@ export async function processOutputHook(
   const replacement = safe !== raw && safe.length <= triggerChars
     ? `[Google Surf output guard]${exitCode} Sensitive values and control sequences were removed. Source output was not stored.\n${safe}`
     : ranked.rendered ?? `${prefix}${formatRerankedOutput(ranked)}`;
-  return { decision: 'block', reason: replacement.slice(0, maxChars ?? ranked.meta.response_budget_chars) };
+  return { continue: false, stopReason: replacement.slice(0, maxChars ?? ranked.meta.response_budget_chars) };
 }
 
 async function main(): Promise<void> {

@@ -16,7 +16,7 @@ Check existing issues and pull requests to avoid duplicating work.
 
 ## Development and Testing
 
-Use Node.js 22, which matches CI, and npm. Fork the repository and create a
+Use Node.js 22.12+ or 24, which match CI, and npm. Fork the repository and create a
 branch for your changes.
 
 ```sh

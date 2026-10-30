@@ -20,16 +20,17 @@ describe('Codex output hook', () => {
     vi.stubEnv('SURF_RERANK_MAX_CHARS', '');
     expect(await processOutputHook(input('x'.repeat(1_499)))).toBeUndefined();
     const response = await processOutputHook(input('x'.repeat(1_500)));
-    expect(response?.decision).toBe('block');
-    expect(String(response?.reason).length).toBeLessThanOrEqual(1_500);
+    expect(response).toMatchObject({ continue: false });
+    expect(response).not.toHaveProperty('decision');
+    expect(String(response?.stopReason).length).toBeLessThanOrEqual(1_500);
   });
 
   it('permits a configured output override above 6000 characters', async () => {
     vi.stubEnv('SURF_RERANK_MAX_CHARS', '12000');
     const rows = Array.from({ length: 12 }, (_, id) => ({ failure: `record-${id} ${'x'.repeat(1_500)}` }));
     const response = await processOutputHook(input(JSON.stringify(rows)));
-    expect(String(response?.reason).length).toBeGreaterThan(6_000);
-    expect(String(response?.reason).length).toBeLessThanOrEqual(12_000);
+    expect(String(response?.stopReason).length).toBeGreaterThan(6_000);
+    expect(String(response?.stopReason).length).toBeLessThanOrEqual(12_000);
   });
 
   it('passes a small safe result and reranks oversized output', async () => {
@@ -41,9 +42,9 @@ describe('Codex output hook', () => {
     const response = await processOutputHook(input(large), {
       trigger_chars: 100, max_chars: 500,
     });
-    expect(response).toMatchObject({ decision: 'block' });
-    expect(String(response?.reason)).toContain('perplexity');
-    expect(String(response?.reason).length).toBeLessThanOrEqual(500);
+    expect(response).toMatchObject({ continue: false });
+    expect(String(response?.stopReason)).toContain('perplexity');
+    expect(String(response?.stopReason).length).toBeLessThanOrEqual(500);
   });
 
   it('redacts secrets without persisting source output', async () => {
@@ -51,8 +52,8 @@ describe('Codex output hook', () => {
     const response = await processOutputHook(input(`${marker}\nerror: authentication failed`), {
       trigger_chars: 1_000, max_chars: 500,
     });
-    expect(String(response?.reason)).toContain('API_KEY=[REDACTED]');
-    expect(String(response?.reason)).not.toContain('private-hook-value');
+    expect(String(response?.stopReason)).toContain('API_KEY=[REDACTED]');
+    expect(String(response?.stopReason)).not.toContain('private-hook-value');
   });
 
   it('does not suppress later bounded status output', async () => {
@@ -66,16 +67,18 @@ describe('Codex output hook', () => {
 
   it('still intercepts an accidental giant dump without a configured hard output limit', async () => {
     const response = await processOutputHook(input(`${'still running\n'.repeat(100_000)}\nfinal perplexity: 8.42`));
-    expect(response?.decision).toBe('block');
-    expect(String(response?.reason)).toContain('final perplexity: 8.42');
-    expect(String(response?.reason)).toContain('Exit code: 0');
-    expect(String(response?.reason).length).toBeLessThanOrEqual(3_000);
+    expect(response).toMatchObject({ continue: false });
+    expect(String(response?.stopReason)).toContain('final perplexity: 8.42');
+    expect(String(response?.stopReason)).toContain('Exit code: 0');
+    expect(String(response?.stopReason).length).toBeLessThanOrEqual(3_000);
   });
 
   it('preserves the failed command exit status while compacting the output', async () => {
     const failed = input('failure details\n'.repeat(10_000));
     failed.tool_response.exit_code = 1;
     const response = await processOutputHook(failed);
-    expect(String(response?.reason)).toContain('Exit code: 1');
+    expect(response).toMatchObject({ continue: false });
+    expect(response).not.toHaveProperty('decision');
+    expect(String(response?.stopReason)).toContain('Exit code: 1');
   });
 });

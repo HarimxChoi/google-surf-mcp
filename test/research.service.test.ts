@@ -368,6 +368,7 @@ describe('research project memory', () => {
 
     expect(await service.search('graph-a', 'onlygraphbterm', 10)).toHaveLength(0);
     expect(await service.search('graph-b', 'onlygraphbterm', 10)).toHaveLength(1);
+    await service.waitForIdle();
     expect((await service.getProject('graph-a')).job_counts.done).toBe(1);
     expect((await service.getProject('graph-b')).job_counts.done).toBe(2);
   });
@@ -418,6 +419,16 @@ describe('research project memory', () => {
       [seed],
       1,
     )).toContain(seed);
+  });
+
+  it('publishes different project graphs concurrently without losing active projections', async () => {
+    const projectIds = Array.from({ length: 6 }, (_, index) => `parallel-graph-${index}`);
+    for (const projectId of projectIds) await service.createProject(projectId, projectId);
+    const graphs = await Promise.all(projectIds.map((projectId) => service.materializeGraph([projectId])));
+    for (const [index, graph] of graphs.entries()) {
+      expect((await service.store.currentGraph(projectIds[index])).projection_id).toBe(graph.projection.projection_id);
+      expect(await service.store.loadGraphArtifact(graph.projection.projection_id)).toBeDefined();
+    }
   });
 
   it('bounds graph projection and artifact caches across projects', async () => {

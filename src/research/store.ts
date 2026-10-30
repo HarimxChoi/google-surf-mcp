@@ -1574,30 +1574,33 @@ export class ResearchStore {
   }
 
   private async reconcileGraphProjectionStatuses(db: Surreal): Promise<void> {
-    const [rows] = await db.query<[Array<{ active_graph_projection_id?: string }>]>(
-      `SELECT active_graph_projection_id FROM project
-       WHERE (status = NONE OR status = 'active') AND active_graph_projection_id != NONE`,
-    ).collect();
-    const activeIds = [...new Set(rows
-      .map((row) => row.active_graph_projection_id)
-      .filter((value): value is string => Boolean(value)))];
-    if (activeIds.length) {
-      await db.query(
-        `UPDATE graph_projection SET status = 'active'
-         WHERE projection_id IN $active_ids
-           AND (payload_file != NONE OR payload_gzip != NONE)`,
-        { active_ids: activeIds },
+    await this.transaction(db, async (tx) => {
+      const [rows] = await tx.query<[Array<{ active_graph_projection_id?: string }>]>(
+        `SELECT active_graph_projection_id FROM project
+         WHERE (status = NONE OR status = 'active') AND active_graph_projection_id != NONE`,
       ).collect();
-      await db.query(
-        `UPDATE graph_projection SET status = 'superseded'
-         WHERE status = 'active' AND projection_id NOT IN $active_ids`,
-        { active_ids: activeIds },
-      ).collect();
-    } else {
-      await db.query(
-        `UPDATE graph_projection SET status = 'superseded' WHERE status = 'active'`,
-      ).collect();
-    }
+      const activeIds = [...new Set(rows
+        .map((row) => row.active_graph_projection_id)
+        .filter((value): value is string => Boolean(value)))];
+      if (activeIds.length) {
+        await tx.query(
+          `UPDATE graph_projection SET status = 'active'
+           WHERE projection_id IN $active_ids
+             AND (status = NONE OR status != 'active')
+             AND (payload_file != NONE OR payload_gzip != NONE)`,
+          { active_ids: activeIds },
+        ).collect();
+        await tx.query(
+          `UPDATE graph_projection SET status = 'superseded'
+           WHERE status = 'active' AND projection_id NOT IN $active_ids`,
+          { active_ids: activeIds },
+        ).collect();
+      } else {
+        await tx.query(
+          `UPDATE graph_projection SET status = 'superseded' WHERE status = 'active'`,
+        ).collect();
+      }
+    });
   }
 
   private async pruneGraphProjections(db: Surreal): Promise<void> {
@@ -2773,37 +2776,24 @@ export class ResearchStore {
     });
   }
 
-  async listProjectDocuments(projectId: string): Promise<ProjectDocumentRecord[]> {
+  async listProjectDocuments(projectId: string, includeFirstText = true): Promise<ProjectDocumentRecord[]> {
     const db = await this.open();
-    const [rows] = await db.query<[ProjectDocumentRecord[]]>(
-      `SELECT project_id, document_id, state,
+    const [rows] = await db.query<[Array<ProjectDocumentRecord & { active_chunk_set_id?: string }>]>(
+      `SELECT project_id, document_id, state, active_chunk_set_id,
         (SELECT VALUE title FROM ONLY type::record('document', $parent.document_id)) AS title,
         (SELECT VALUE canonical_url FROM ONLY type::record('document', $parent.document_id)) AS url,
         (SELECT VALUE scholar_id FROM ONLY type::record('document', $parent.document_id)) AS scholar_id
        FROM project_document WHERE project_id = $project_id ORDER BY document_id ASC`,
       { project_id: projectId },
     ).collect();
-    const documentIds = rows.map((row) => row.document_id);
-    const [chunks] = documentIds.length
-      ? await db.query<[Array<{ document_id: string; chunk_index: number; text: string }>]>(
-        `SELECT document_id, chunk_index, text FROM chunk
-         WHERE document_id IN $document_ids AND (
-           chunk_set_id IN (
-             SELECT VALUE active_chunk_set_id FROM project_document
-             WHERE project_id = $project_id AND active_chunk_set_id != NONE
-           ) OR document_id IN (
-             SELECT VALUE document_id FROM project_document
-             WHERE project_id = $project_id AND active_chunk_set_id = NONE
-           )
-         ) ORDER BY document_id ASC, chunk_index ASC`,
-        { project_id: projectId, document_ids: documentIds },
-      ).collect()
-      : [[]];
+    const chunks = includeFirstText ? await this.listMembershipChunks(rows) : [];
     const firstText = new Map<string, string>();
     for (const chunk of chunks) {
       if (!firstText.has(chunk.document_id)) firstText.set(chunk.document_id, chunk.text);
     }
-    return rows.map((row) => ({ ...row, text: firstText.get(row.document_id) }));
+    return rows.map(({ active_chunk_set_id: _active, ...row }) => ({
+      ...row, ...(includeFirstText ? { text: firstText.get(row.document_id) } : {}),
+    }));
   }
 
   async getProjectDocumentRecord(
@@ -2873,23 +2863,36 @@ export class ResearchStore {
 
   async listProjectDocumentChunks(projectId: string): Promise<ProjectDocumentChunkRecord[]> {
     const db = await this.open();
-    const [rows] = await db.query<[ProjectDocumentChunkRecord[]]>(
-      `SELECT document_id, chunk_index, title, url, text, content_hash FROM chunk
-       WHERE document_id IN (
-         SELECT VALUE document_id FROM project_document
-         WHERE project_id = $project_id AND state = 'lexical_active'
-       ) AND (
-         chunk_set_id IN (
-           SELECT VALUE active_chunk_set_id FROM project_document
-           WHERE project_id = $project_id AND active_chunk_set_id != NONE
-         ) OR document_id IN (
-           SELECT VALUE document_id FROM project_document
-           WHERE project_id = $project_id AND active_chunk_set_id = NONE
-         )
-       )
-       ORDER BY document_id ASC, chunk_index ASC`,
+    const [memberships] = await db.query<[Array<{ document_id: string; active_chunk_set_id?: string }>]>(
+      `SELECT document_id, active_chunk_set_id FROM project_document
+       WHERE project_id = $project_id AND state = 'lexical_active' ORDER BY document_id ASC`,
       { project_id: projectId },
     ).collect();
+    return await this.listMembershipChunks(memberships);
+  }
+
+  private async listMembershipChunks(
+    memberships: Array<{ document_id: string; active_chunk_set_id?: string }>,
+  ): Promise<ProjectDocumentChunkRecord[]> {
+    const db = await this.open();
+    const rows: ProjectDocumentChunkRecord[] = [];
+    const active = new Map(memberships.map((row) => [row.document_id, row.active_chunk_set_id]));
+    for (let offset = 0; offset < memberships.length; offset += 250) {
+      const bindings: Record<string, string> = {};
+      const predicates = memberships.slice(offset, offset + 250).map((row, index) => {
+        bindings[`document_${index}`] = row.document_id;
+        if (row.active_chunk_set_id) bindings[`set_${index}`] = row.active_chunk_set_id;
+        return `(document_id = $document_${index} AND chunk_set_id = ${row.active_chunk_set_id ? `$set_${index}` : 'NONE'})`;
+      });
+      const [batch] = await db.query<[Array<ProjectDocumentChunkRecord & { chunk_set_id?: string }>]>(
+        `SELECT document_id, chunk_index, chunk_set_id, title, url, text, content_hash FROM chunk
+         WHERE ${predicates.join(' OR ')} ORDER BY document_id ASC, chunk_index ASC`,
+        bindings,
+      ).collect();
+      for (const { chunk_set_id, ...chunk } of batch) {
+        if (chunk_set_id === active.get(chunk.document_id)) rows.push(chunk);
+      }
+    }
     return rows;
   }
 
@@ -2956,15 +2959,24 @@ export class ResearchStore {
     const db = await this.open();
     const documentReferences = references.filter((row) => row.source_family === 'document');
     const documentIds = [...new Set(documentReferences.map((row) => row.source_id))];
-    const documentHashes = [...new Set(documentReferences.map((row) => row.content_hash))];
+    const documentBindings: Record<string, string> = {};
+    const documentPredicates = [...new Map(documentReferences.map((row) => [
+      `${row.source_id}\0${row.content_hash}`, row,
+    ])).values()].map((row, index) => {
+      documentBindings[`document_${index}`] = row.source_id;
+      documentBindings[`hash_${index}`] = row.content_hash;
+      return `(document_id = $document_${index} AND content_hash = $hash_${index})`;
+    });
     const sourceIds = [...new Set(references
       .filter((row) => row.source_family === 'code').map((row) => row.source_id))];
+    const sourceRecords = references.filter((row) => row.source_family === 'code')
+      .map((row) => new RecordId('project_source_entry', `${row.project_id}_${row.source_id}`));
     const projectIds = [...new Set(references.map((row) => row.project_id))];
     const [documentRows] = documentIds.length
       ? await db.query<[Array<{ document_id: string; text: string; content_hash: string }>]>(
         `SELECT document_id, text, content_hash FROM chunk
-         WHERE document_id IN $document_ids AND content_hash IN $content_hashes`,
-        { document_ids: documentIds, content_hashes: documentHashes },
+          WHERE ${documentPredicates.join(' OR ')}`,
+        documentBindings,
       ).collect()
       : [[]];
     const [documentMetadata] = documentIds.length
@@ -2989,17 +3001,17 @@ export class ResearchStore {
         content_hash: string;
         role?: ProjectDocumentRole;
       }>]>(
-        `SELECT entry_id, project_id, root, path, content_hash, role FROM project_source_entry
+        `SELECT entry_id, project_id, root, path, content_hash, role FROM $source_records
          WHERE project_id IN $project_ids AND entry_id IN $source_ids
            AND active = true AND searchable = true`,
-        { project_ids: projectIds, source_ids: sourceIds },
+        { project_ids: projectIds, source_ids: sourceIds, source_records: sourceRecords },
       ).collect()
       : [[]];
     const hashes = [...new Set(sourceEntries.map((row) => row.content_hash))];
     const [sourceBodies] = hashes.length
       ? await db.query<[Array<{ content_hash: string; text: string }>]>(
-        'SELECT content_hash, text FROM source_body WHERE content_hash IN $hashes',
-        { hashes },
+        'SELECT content_hash, text FROM $body_records WHERE content_hash IN $hashes',
+        { hashes, body_records: hashes.map((hash) => new RecordId('source_body', hash)) },
       ).collect()
       : [[]];
     const documents = new Map(documentRows.map((row) => [
@@ -3095,6 +3107,24 @@ export class ResearchStore {
   ): Promise<LocalSearchHit[]> {
     const db = await this.open();
     const cappedLimit = Math.min(Math.max(limit, 1), 100);
+    if (this.vectorBackend !== 'exhaustive') {
+      const [scope] = await db.query<[Array<Omit<RetrievalReference, 'score'> & { embedding: number[] }>]>(
+        `SELECT item_id, project_id, source_family, source_id, title, url, content_hash,
+           span_start, span_end, role, embedding FROM retrieval_vector
+         WHERE project_id = $project_id AND embedding_model = $embedding_model LIMIT $scope_limit`,
+        { project_id: projectId, embedding_model: embeddingModel, scope_limit: 1_025 },
+      ).collect();
+      if (scope.length <= 1_024) {
+        const references = scope.map(({ embedding: stored, ...row }) => ({
+          ...row, score: cosineSimilarity(stored, embedding),
+        })).sort((left, right) => stableVectorScore(right.score) - stableVectorScore(left.score)
+          || left.item_id.localeCompare(right.item_id))
+          .filter((row, index, rows) => rows.findIndex((candidate) => (
+            candidate.source_family === row.source_family && candidate.source_id === row.source_id
+          )) === index).slice(0, cappedLimit);
+        return await this.hydrateRetrieval(references, 'vector');
+      }
+    }
     if (this.vectorBackend === 'exhaustive') {
       const ranked: Array<RetrievalReference & { embedding?: number[] }> = [];
       const pageSize = 500;
@@ -3161,26 +3191,27 @@ export class ResearchStore {
     return await this.hydrateRetrieval(references, 'vector');
   }
 
+  async searchSourceRanks(query: string, limit: number): Promise<Array<{ content_hash: string; score: number }>> {
+    const db = await this.open();
+    const [rows] = await db.query<[Array<{ content_hash: string; score: number }>]>(
+      `SELECT content_hash, search::score(0) AS score
+       FROM source_body WHERE text @0@ $query
+       ORDER BY score DESC, content_hash ASC LIMIT $limit`,
+      { query, limit: Math.min(Math.max(limit * 20, 100), 500) },
+    ).collect();
+    return rows;
+  }
+
   private async searchProjectSources(
     projectId: string,
     snapshotId: string | undefined,
     query: string,
     limit: number,
+    preparedRanks?: () => ReturnType<ResearchStore['searchSourceRanks']>,
   ): Promise<LocalSearchHit[]> {
     if (!snapshotId) return [];
     const db = await this.open();
-    const candidateLimit = Math.min(Math.max(limit * 20, 100), 500);
-    const [rows] = await db.query<[Array<{
-      content_hash: string;
-      text: string;
-      score: number;
-    }>]>(
-      `SELECT content_hash, text, search::score(0) AS score
-       FROM source_body
-       WHERE text @0@ $query
-       ORDER BY score DESC, content_hash ASC LIMIT $limit`,
-      { query, limit: candidateLimit },
-    ).collect();
+    const rows = await (preparedRanks ? preparedRanks() : this.searchSourceRanks(query, limit));
     if (!rows.length) return [];
     const hashes = rows.map((row) => row.content_hash);
     const [entries] = await db.query<[Array<{
@@ -3202,19 +3233,24 @@ export class ResearchStore {
     for (const entry of entries) {
       if (!firstPath.has(entry.content_hash)) firstPath.set(entry.content_hash, entry);
     }
-    return rows.flatMap((row) => {
+    const selected = rows.filter((row) => firstPath.has(row.content_hash)).slice(0, limit);
+    const bodies = await Promise.all(selected.map(async (row) => (
+      await db.select<{ text: string }>(new RecordId('source_body', row.content_hash))
+    )));
+    return selected.flatMap((row, index) => {
       const entry = firstPath.get(row.content_hash);
-      if (!entry) return [];
+      const text = bodies[index]?.text;
+      if (!entry || text === undefined) return [];
       return [{
         document_id: `source-${row.content_hash.slice(0, 24)}`,
         record_id: entry.entry_id,
         body_handle: entry.entry_id,
-        source_span: { start: 0, end: row.text.length },
+        source_span: { start: 0, end: text.length },
         index_freshness: 'current' as const,
         title: `${entry.root}/${entry.path}`,
         url: `surf://projects/${projectId}/files/${entry.entry_id}`,
-        description: row.text.slice(0, 500),
-        content: row.text,
+        description: text.slice(0, 500),
+        content: text,
         score: Number(row.score),
         project_ids: [projectId],
         source_family: 'code' as const,
@@ -3225,10 +3261,18 @@ export class ResearchStore {
     }).slice(0, limit);
   }
 
-  async searchProjectBm25(projectId: string, query: string, limit: number): Promise<LocalSearchHit[]> {
+  async searchProjectBm25(
+    projectId: string, query: string, limit: number,
+    preparedSourceRanks?: () => ReturnType<ResearchStore['searchSourceRanks']>,
+  ): Promise<LocalSearchHit[]> {
     const db = await this.open();
     const project = await this.getProject(projectId);
-    const [rows] = await db.query<[Array<{
+    const [memberships] = await db.query<[Array<{ document_id: string; active_chunk_set_id?: string }>]>(
+      `SELECT document_id, active_chunk_set_id FROM project_document
+       WHERE project_id = $project_id AND state = 'lexical_active'`,
+      { project_id: projectId },
+    ).collect();
+    const [rows] = memberships.length ? await db.query<[Array<{
       document_id: string;
       chunk_index: number;
       title: string;
@@ -3239,22 +3283,15 @@ export class ResearchStore {
       `SELECT document_id, chunk_index, title, url, text, search::score(0) AS score
        FROM chunk
        WHERE text @0@ $query
-         AND document_id IN (
-           SELECT VALUE document_id FROM project_document
-           WHERE project_id = $project_id AND state = 'lexical_active'
-         )
-         AND (
-           chunk_set_id IN (
-             SELECT VALUE active_chunk_set_id FROM project_document
-             WHERE project_id = $project_id AND active_chunk_set_id != NONE
-           ) OR document_id IN (
-             SELECT VALUE document_id FROM project_document
-             WHERE project_id = $project_id AND active_chunk_set_id = NONE
-           )
-         )
+         AND document_id IN $document_ids
+         AND chunk_set_id = $active_memberships[document_id].active_chunk_set_id
        ORDER BY score DESC, document_id ASC, chunk_index ASC LIMIT $chunk_limit`,
-      { project_id: projectId, query, chunk_limit: Math.min(100, limit * 4) },
-    ).collect();
+      {
+        query, chunk_limit: Math.min(100, limit * 4),
+        document_ids: memberships.map((row) => row.document_id),
+        active_memberships: Object.fromEntries(memberships.map((row) => [row.document_id, row])),
+      },
+    ).collect() : [[]];
     const documentIds = [...new Set(rows.map((row) => row.document_id))];
     const [documentMetadata] = documentIds.length
       ? await db.query<[Array<{
@@ -3296,6 +3333,7 @@ export class ResearchStore {
       project?.active_source_snapshot_id,
       query,
       limit,
+      preparedSourceRanks,
     );
     const fused = [...documents.map((row, index) => ({ row, score: 1 / (60 + index + 1) })),
       ...sources.map((row, index) => ({ row, score: 1 / (60 + index + 1) }))];

@@ -13,6 +13,13 @@ type FeatureExtractor = ((
   options: { pooling: 'mean'; normalize: true; truncation: true },
 ) => Promise<{ tolist(): number[][] }>) & { dispose?: () => Promise<void> };
 
+export interface EmbeddingDiagnostics {
+  loaded: boolean;
+  cached_vectors: number;
+  inference_active: boolean;
+  completed_batches: number;
+}
+
 export interface EmbeddingProvider {
   enabled(): boolean;
   modelId(): string | undefined;
@@ -20,6 +27,7 @@ export interface EmbeddingProvider {
   embedQuery(text: string): Promise<number[]>;
   embedQueries?(texts: string[]): Promise<number[][]>;
   embedPassages(texts: string[]): Promise<number[][]>;
+  diagnostics?(): EmbeddingDiagnostics;
   dispose?(): Promise<void>;
 }
 
@@ -47,6 +55,9 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
   private readonly cache = new Map<string, number[]>();
   private readonly revision?: string;
   private inferenceTail: Promise<unknown> = Promise.resolve();
+  private loaded = false;
+  private inferenceActive = false;
+  private completedBatches = 0;
 
   constructor(
     private readonly model?: string,
@@ -68,6 +79,15 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
 
   dimensions(): number {
     return RESEARCH_VECTOR_DIMENSIONS;
+  }
+
+  diagnostics(): EmbeddingDiagnostics {
+    return {
+      loaded: this.loaded,
+      cached_vectors: this.cache.size,
+      inference_active: this.inferenceActive,
+      completed_batches: this.completedBatches,
+    };
   }
 
   private async load(): Promise<FeatureExtractor> {
@@ -101,7 +121,9 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
           },
         },
       ) as unknown as FeatureExtractor);
-    return await this.extractor;
+    const extractor = await this.extractor;
+    this.loaded = true;
+    return extractor;
   }
 
   private key(text: string): string {
@@ -130,10 +152,17 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
           const uncached = batch.filter((row) => !this.cache.has(row.key));
           if (uncached.length) {
             const extractor = await this.load();
-            const vectors = (await extractor(
-              uncached.map((row) => row.text.slice(0, 4_000)),
-              { pooling: 'mean', normalize: true, truncation: true },
-            )).tolist();
+            this.inferenceActive = true;
+            let vectors: number[][];
+            try {
+              vectors = (await extractor(
+                uncached.map((row) => row.text.slice(0, 4_000)),
+                { pooling: 'mean', normalize: true, truncation: true },
+              )).tolist();
+              this.completedBatches++;
+            } finally {
+              this.inferenceActive = false;
+            }
             if (vectors.length !== uncached.length
               || vectors.some((vector) => vector.length !== RESEARCH_VECTOR_DIMENSIONS)) {
               throw new Error(`vector model must return ${RESEARCH_VECTOR_DIMENSIONS} dimensions`);
@@ -168,5 +197,6 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
     this.extractor = undefined;
     this.cache.clear();
     if (pending) await (await pending).dispose?.();
+    this.loaded = false;
   }
 }
