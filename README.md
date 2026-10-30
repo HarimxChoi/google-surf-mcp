@@ -548,10 +548,11 @@ Diagnostics also report whether the embedding model is loaded, its cached-vector
 | `SURF_SELF_HEALING_FILE` | `<profile>/.heal/strategy-order.json` | persistence path for healing state. Atomic tmp+rename writes; debounced 5s. |
 | `SURF_LLM_HEAL` | `false` | opt-in for LLM-assisted selector repair in the workflow-only `repairWithLLM` helper. Off by default, so no third-party LLM request fires. |
 | `SURF_LLM_PROVIDER` | `anthropic` | LLM repair provider: `anthropic` or `orcarouter`. |
-| `SURF_LLM_MODEL` | provider default | model for LLM-assisted repair. Defaults to `claude-sonnet-4-6` for Anthropic and `orcarouter/auto` for OrcaRouter. |
+| `SURF_LLM_MODEL` | provider default | model for LLM-assisted repair. Defaults to `claude-sonnet-4-6` for Anthropic and to the first text-chat model in the live OrcaRouter catalog (falling back to `orcarouter/auto`) for OrcaRouter. |
 | `ANTHROPIC_API_KEY` | unset | Anthropic key used only when LLM repair is enabled with the Anthropic provider. |
 | `ORCAROUTER_API_KEY` | unset | OrcaRouter key used only when LLM repair is enabled with the OrcaRouter provider. |
 | `ORCA_KEY` | unset | Alias for `ORCAROUTER_API_KEY`. |
+| `SURF_ORCAROUTER_CREDENTIAL_FILE` | `<profileRoot>/.orcarouter/credential.json` | Where the connect flow stores the key it was issued. Written mode 0600; reused until revoked. |
 
 ### Embedded resource budget
 
@@ -561,12 +562,38 @@ Background indexing runs one job at a time. Queued captures in the same project 
 
 ### OrcaRouter
 
+[OrcaRouter](https://www.orcarouter.ai) is an OpenAI-compatible AI gateway used here as the LLM-assisted repair provider. Two credential entry points are supported and either one is enough:
+
+```bash
+# 1. Paste an existing key
+ORCAROUTER_API_KEY=sk-orca-...
+# or, from the CLI (saved to <profileRoot>/.orcarouter/credential.json, mode 0600)
+google-surf-mcp orcarouter login
+
+# 2. Authorize an OrcaRouter account (OAuth 2.0 + PKCE, no client secret)
+google-surf-mcp orcarouter connect          # loopback redirect
+google-surf-mcp orcarouter connect --oob    # out-of-band code, for sessions without a loopback listener
+```
+
+Both end up as the same durable OrcaRouter API key and reach the same inference API; `google-surf-mcp orcarouter status` reports which one is active. Then:
+
 ```env
 SURF_LLM_HEAL=true
 SURF_LLM_PROVIDER=orcarouter
-ORCAROUTER_API_KEY=...
 SURF_LLM_MODEL=orcarouter/auto
 ```
+
+`SURF_LLM_MODEL` is optional. When it is unset the model comes from the live catalog at `GET https://api.orcarouter.ai/v1/models`, so the default tracks what your workspace can actually call. Inspect the catalog with `google-surf-mcp orcarouter models --capability chat|embedding|image|video|rerank`.
+
+Authentication and inference use different origins, and both are configurable for self-hosted deployments:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ORCA_BASE_URL` | unset | Shared base for a single-origin self-hosted deployment. |
+| `ORCA_AUTH_BASE_URL` | `https://www.orcarouter.ai` | Authentication origin. An explicit value wins over `ORCA_BASE_URL`. |
+| `ORCA_API_BASE_URL` | `https://api.orcarouter.ai` | Inference origin. An explicit value wins over `ORCA_BASE_URL`. |
+
+The auth API lives at `/api/v1/auth` on the auth origin and the relay lives at `/v1` on the inference origin; the two are never derived from one another. Non-loopback origins must be HTTPS. If the gateway rejects a stored key with `401`, the exact credential generation is marked for reauthentication rather than retried or silently deleted — rerun `orcarouter connect` or set a fresh `ORCAROUTER_API_KEY`. Revoke keys at <https://www.orcarouter.ai/console/authorized-apps>.
 
 ## Troubleshooting
 

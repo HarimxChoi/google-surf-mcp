@@ -519,10 +519,11 @@ npx google-surf-mcp daemon drain --json
 | `SURF_SELF_HEALING_FILE` | `<profile>/.heal/strategy-order.json` | self-healing 상태 영속 경로. atomic tmp+rename 쓰기, 5초 디바운스 |
 | `SURF_LLM_HEAL` | `false` | workflow 전용 `repairWithLLM`의 LLM 호출 opt-in. 기본값에서는 외부 LLM을 호출하지 않음 |
 | `SURF_LLM_PROVIDER` | `anthropic` | LLM repair provider: `anthropic`, `orcarouter` |
-| `SURF_LLM_MODEL` | provider 기본값 | LLM repair 모델. Anthropic은 `claude-sonnet-4-6`, OrcaRouter는 `orcarouter/auto`가 기본값 |
+| `SURF_LLM_MODEL` | provider 기본값 | LLM repair 모델. Anthropic은 `claude-sonnet-4-6`, OrcaRouter는 live 모델 카탈로그의 첫 text-chat 모델(카탈로그 사용 불가 시 `orcarouter/auto`)이 기본값 |
 | `ANTHROPIC_API_KEY` | 미설정 | Anthropic provider를 선택했을 때만 사용하는 본인 API 키 |
 | `ORCAROUTER_API_KEY` | 미설정 | OrcaRouter provider를 선택했을 때만 사용하는 본인 API 키 |
 | `ORCA_KEY` | 미설정 | `ORCAROUTER_API_KEY` 별칭 |
+| `SURF_ORCAROUTER_CREDENTIAL_FILE` | `<profileRoot>/.orcarouter/credential.json` | connect 흐름이 발급받은 키를 저장하는 경로. mode 0600으로 기록되며 revoke 전까지 재사용 |
 
 ### 임베디드 자원 예산
 
@@ -532,12 +533,38 @@ Embedded storage는 서버용 자동 예산 대신 RocksDB block cache 512 MiB, 
 
 ### OrcaRouter
 
+[OrcaRouter](https://www.orcarouter.ai)는 OpenAI 호환 AI 게이트웨이로, 여기서는 LLM selector repair provider로 사용합니다. 두 가지 인증 방식 중 하나만 있으면 됩니다:
+
+```bash
+# 1. 기존 키 입력
+ORCAROUTER_API_KEY=sk-orca-...
+# 또는 CLI로 저장 (<profileRoot>/.orcarouter/credential.json, mode 0600)
+google-surf-mcp orcarouter login
+
+# 2. OrcaRouter 계정 인증 (OAuth 2.0 + PKCE, client secret 불필요)
+google-surf-mcp orcarouter connect          # loopback redirect
+google-surf-mcp orcarouter connect --oob    # loopback 리스너를 쓸 수 없을 때 out-of-band 코드
+```
+
+두 방식 모두 동일한 OrcaRouter API 키를 만들어 동일한 inference API로 전달됩니다. 현재 활성 credential은 `google-surf-mcp orcarouter status`로 확인합니다.
+
 ```env
 SURF_LLM_HEAL=true
 SURF_LLM_PROVIDER=orcarouter
-ORCAROUTER_API_KEY=...
 SURF_LLM_MODEL=orcarouter/auto
 ```
+
+`SURF_LLM_MODEL`은 선택 사항입니다. 미설정이면 `GET https://api.orcarouter.ai/v1/models`의 live 카탈로그에서 모델을 고르므로 기본값이 실제 workspace에서 호출 가능한 모델을 따릅니다. 카탈로그는 `google-surf-mcp orcarouter models --capability chat|embedding|image|video|rerank`로 확인합니다.
+
+인증과 추론은 서로 다른 origin을 사용하며, self-hosted 배포를 위해 둘 다 설정할 수 있습니다:
+
+| 변수 | 기본값 | 용도 |
+| --- | --- | --- |
+| `ORCA_BASE_URL` | 미설정 | 단일 origin self-hosted 배포용 공용 base |
+| `ORCA_AUTH_BASE_URL` | `https://www.orcarouter.ai` | 인증 origin. 명시값이 `ORCA_BASE_URL`보다 우선 |
+| `ORCA_API_BASE_URL` | `https://api.orcarouter.ai` | 추론 origin. 명시값이 `ORCA_BASE_URL`보다 우선 |
+
+auth API는 인증 origin의 `/api/v1/auth`에, relay는 추론 origin의 `/v1`에 있으며 두 경로는 서로로부터 유도되지 않습니다. loopback이 아닌 origin은 HTTPS가 필요합니다. 저장된 키가 `401`을 받으면 재시도하거나 조용히 삭제하지 않고 해당 credential generation만 reauthentication 대상으로 표시합니다 — `orcarouter connect`를 다시 실행하거나 새 `ORCAROUTER_API_KEY`를 설정하세요. 키는 <https://www.orcarouter.ai/console/authorized-apps>에서 revoke합니다.
 
 ## Troubleshooting
 
