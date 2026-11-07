@@ -36,18 +36,20 @@ function expectPrivateFile(file: string): void {
   }
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    '$acl = Get-Acl -LiteralPath $env:SURF_ORCA_TEST_FILE',
+    '$acl = [IO.File]::GetAccessControl($env:SURF_ORCA_TEST_FILE)',
     '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
-    '$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { @{sid=$_.IdentityReference.Value; type=$_.AccessControlType.ToString(); inherited=$_.IsInherited} })',
-    '@{protected=$acl.AreAccessRulesProtected; sid=$sid; rules=$rules} | ConvertTo-Json -Compress',
+    '$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))',
+    "if (!$acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].IsInherited) { throw 'Credential ACL must grant access only to the current user' }",
+    "'PASS'",
   ].join('\n');
-  const result = JSON.parse(execFileSync(
+  const result = execFileSync(
     join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-    { windowsHide: true, timeout: 10_000, encoding: 'utf8', stdio: 'pipe', env: { ...process.env, SURF_ORCA_TEST_FILE: file } },
-  ));
-  expect(result.protected).toBe(true);
-  expect(result.rules).toEqual([{ sid: result.sid, type: 'Allow', inherited: false }]);
+    { windowsHide: true, timeout: 10_000, encoding: 'utf8', stdio: 'pipe', env: {
+      ...process.env, SURF_ORCA_TEST_FILE: file, PSModulePath: join(tmpdir(), 'unused-orca-test-modules'),
+    } },
+  ).trim();
+  expect(result).toBe('PASS');
 }
 
 beforeEach(() => {
