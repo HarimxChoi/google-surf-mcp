@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { setWindowsCredentialAcl } from '../src/orcarouter/credentialPermissions.js';
 import {
   apiKeyProvider,
   applyUpstream401,
@@ -99,6 +100,16 @@ describe('credential storage', () => {
     expect(loadStoredCredential(env)?.key).toBe(PASTED);
     expect(readdirSync(join(root, '.orcarouter'))).toEqual(['credential.json']);
   });
+
+  it.runIf(process.platform === 'win32')('replaces explicit non-owner permissions, not only inherited rules', () => {
+    const file = join(root, 'broad-permissions.json');
+    writeFileSync(file, '');
+    execFileSync(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'icacls.exe'),
+      [file, '/grant', '*S-1-1-0:R'], { windowsHide: true, timeout: 5_000, stdio: 'pipe' });
+    expect(() => expectPrivateFile(file)).toThrow();
+    setWindowsCredentialAcl(file);
+    expectPrivateFile(file);
+  }, 20_000);
 
   it('reuses the stored key across restarts instead of re-authorizing', async () => {
     savePkceCredential(ISSUED, 'api', undefined, env);

@@ -11,10 +11,10 @@ import {
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { setWindowsCredentialAcl } from './credentialPermissions.js';
 
 export type OrcaCredentialSource = 'api-key' | 'pkce';
 
@@ -110,19 +110,6 @@ function readJson<T>(file: string): T | null {
   }
 }
 
-let windowsOwnerSid: string | undefined;
-
-function protectWindowsFile(file: string): void {
-  const system32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32');
-  const options = { windowsHide: true, timeout: 5_000, encoding: 'utf8' as const, stdio: 'pipe' as const };
-  if (!windowsOwnerSid) {
-    const identity = execFileSync(join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], options);
-    windowsOwnerSid = identity.trim().match(/,"(S-\d(?:-\d+)+)"$/)?.[1];
-    if (!windowsOwnerSid) throw new Error('Cannot resolve the Windows credential owner SID');
-  }
-  execFileSync(join(system32, 'icacls.exe'), [file, '/inheritance:r', '/grant:r', `*${windowsOwnerSid}:F`], options);
-}
-
 function writePrivateJson(file: string, payload: unknown): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
@@ -130,7 +117,7 @@ function writePrivateJson(file: string, payload: unknown): void {
   try {
     try {
       if (process.platform === 'win32') {
-        protectWindowsFile(tmp);
+        setWindowsCredentialAcl(tmp);
       } else {
         fchmodSync(fd, 0o600);
       }
