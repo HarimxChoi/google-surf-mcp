@@ -20,7 +20,7 @@
 
 *"Turn Google Search, Papers, and Codebases into an Automatic Local Knowledge Graph and lineage for AI Agents with Zero API Key, Zero External Server."*
 
-Google Surf는 검색(논문, 코드베이스, 웹검색결과, 프로젝트 계획 등) 및 추출 결과를 프로젝트별 로컬 지식 그래프에 저장합니다.
+Google Surf Auto Ontology는 검색(논문, 코드베이스, 웹검색결과, 프로젝트 계획 등) 및 추출 결과를 프로젝트별 로컬 지식 그래프에 저장합니다.
 
 검색할수록 논문, 코드, 웹 자료, 세션 의도, 계획, 실험과 결정이 개인 PKM으로 축적됩니다. 새 리서치에서는 저장된 지식과 신규 웹 결과를 함께 검색해 중복 조사를 줄이고 새로운 정보를 찾습니다.
 
@@ -39,9 +39,9 @@ Exact + BM25 + Vector + Code graph + Graph PPR
 ```
 기본 도구 7개: `search` / `search_parallel` / `extract` / `scholar_search` / `project_memory_search` / `project_memory` / `health`
 
-Research 모드와 자동 저장은 기본으로 활성화됩니다. 검색과 추출만 사용하려면 `SURF_RESEARCH=false`로 설정합니다. 이때 DB와 graph sidecar를 열지 않고 프로젝트 메모리 도구도 등록하지 않습니다.
+Auto Ontology와 자동 저장은 기본으로 활성화됩니다. 검색과 추출만 사용하려면 `SURF_RESEARCH=false`로 설정합니다. 이때 DB와 graph sidecar를 열지 않고 프로젝트 메모리 도구도 등록하지 않습니다. 기존 Research 모드의 새 이름이며, `SURF_RESEARCH*` 설정, 저장 경로, CLI 명령과 `project_memory*` 도구 이름은 그대로 유지합니다.
 
-Research 모드를 꺼도 live `search`와 `search_parallel` 결과에는 경량 인메모리 리랭커가 적용됩니다. Provider 원본 순위와 쿼리 BM25 순위를 RRF로 결합하며 vector 모델이나 로컬 저장소는 열지 않습니다.
+Auto Ontology를 꺼도 live `search`와 `search_parallel` 결과에는 경량 인메모리 리랭커가 적용됩니다. Provider 원본 순위와 쿼리 BM25 순위를 RRF로 결합하며 vector 모델이나 로컬 저장소는 열지 않습니다.
 
 기본 브라우저 검색은 API 키가 필요 없습니다. SearchApi는 선택적으로 기본 provider 또는 fallback으로 사용할 수 있습니다.
 
@@ -189,12 +189,17 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 - `scholar_search(query, limit?)` - Google Scholar metadata 검색. `limit`은 1-10입니다. 브라우저, SearchApi 메인, fallback을 지원합니다.
 - `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - 여러 쿼리의 넓은 라이브 탐색과 읽기를 함께 수행하는 기본 도구입니다. 최대 4개 탭이 2-12개 쿼리를 처리하며, 웹페이지, PDF, 논문, GitHub 저장소를 읽어야 하면 같은 호출에 `extract_mode`를 지정합니다. 로컬 PDF 도구는 로컬 파일이나 시각적 레이아웃 검토에만 사용하고, 저장소 clone은 편집, 빌드, 테스트, 전체 Git 이력이 필요할 때만 사용합니다. 쿼리별 `limit`은 1-20입니다. 호출 전체의 `extract_limit`은 abstract에서 기본 12, 최대 20이며 full에서 기본값과 최대값이 10입니다. `response_content`는 한 번의 응답 크기를 제한하기 위해 `summary`가 기본값입니다.
 - 통합 추출 결과는 `requested`, `applied`, `skipped`, `truncated`, `total_chars`를 반환합니다. `remaining_urls`는 검색을 반복하지 않고 `extract`에 바로 전달할 수 있습니다.
-- `extract(url, max_chars?, mode?, response_content?)` - 신규 탐색 없이 정확한 공개 URL 하나를 읽는 차선 도구입니다. 출처를 찾아야 한다면 `search` 또는 `search_parallel`에 `extract_mode`를 지정합니다.
-  - `mode="full"` (기본): research 저장용으로 최대 1000000자를 읽고 4000자 단위의 deterministic chunk로 저장합니다. `response_content="full"`은 최대 50000자, `summary`는 1500자 근거 발췌를 반환합니다.
-  - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). research 모드에서는 문서 메타데이터도 요약과 함께 저장
+- 두 라이브 검색 도구에 최대 12개 `requirements`(`id`, `text`, 선택적 0 기반 `query_indices`)와 `request_id`를 전달할 수 있습니다. 이때 `meta.research_contract`가 조건별 후보 결과, 미확인 항목과 후속 작업을 연결합니다. 단어 일치는 정답 검증이 아니므로 실제 답변 가능 여부는 호스트가 판단합니다. `health().runtime_identity`의 `build_id`와 실제 도구 입력의 `schema_hash`로 실행 환경을 식별할 수 있습니다.
+- `extract(url, max_chars?, mode?, response_content?, query?, body_handle?, exclude_spans?, refresh?)` - 신규 탐색 없이 정확한 공개 URL 하나를 읽는 차선 도구입니다. 출처를 찾아야 한다면 `search` 또는 `search_parallel`에 `extract_mode`를 지정합니다.
+  - `mode="full"` (기본): Auto Ontology가 활성화돼 있으면 저장용으로 최대 1000000자를 읽고 4000자 단위의 deterministic chunk로 저장합니다. `response_content="full"`은 최대 50000자, `summary`는 1500자 근거 발췌를 반환합니다.
+  - `mode="abstract"`: ~1500자 요약 (PDF 1페이지 또는 HTML meta description). Auto Ontology에서는 문서 메타데이터도 요약과 함께 저장
   - `mode="metadata"`: 본문 없이 메타데이터만 반환. 가능한 경우 제목, 저자, 게재 정보, 날짜, DOI, 설명, 키워드, canonical URL과 PDF 페이지 수 및 문서 속성을 포함
   - GitHub 저장소 URL은 metadata에서 README를 읽고, abstract와 full은 같은 다운로드 기준을 적용하되 색인할 소스 범위만 다름
   - 응답: 본문 필드와 확인 가능한 문서 메타데이터. 실패는 `{ error }` 반환, throw 안 함
+  - `query`로 필요한 근거 구간을 고른 뒤 응답 길이를 제한합니다. `body_handle`은 같은 MCP 프로세스에서 최대 5분간 원문을 재사용하고, `exclude_spans`로 이미 본 구간을 제외합니다. `refresh=true`는 새 원문을 읽으며 handle과 함께 사용할 수 없습니다. 만료되거나 URL·mode가 맞지 않는 handle은 브라우저를 몰래 열지 않고 명시적으로 실패합니다.
+  - 요약의 `evidence_ranges`는 정제 본문의 UTF-16 위치를 `[start, end]`로 압축한 배열입니다. 시작 위치는 포함하고 끝 위치는 제외하며, 후속 읽기에 `exclude_ranges`로 그대로 전달합니다. 상세 추출은 객체형 `evidence_spans`를 유지하고 기존 `exclude_spans`도 지원합니다. `captured_hash`는 정제 본문의 hash이며 PDF 파일 자체의 hash가 아닙니다. 임시 캐시는 보수적인 텍스트 메모리 예산 16 MiB로 제한하며 `SURF_RESEARCH=false`에서는 DB를 열지 않습니다. 준비된 GitHub README도 같은 handle 흐름을 사용하며, 로컬 프로젝트 검색 본문은 이 공개 출처 캐시에 넣지 않습니다.
+  - Auto Ontology OFF의 full 수집은 최대 50,000자입니다. 본문 읽기는 Google 초기화 없는 별도 재사용 headless context를 쓰며, HTTP만으로 끝나는 PDF·abstract·metadata는 브라우저를 열지 않습니다. HTTP 리소스는 DNS 검사 후 확인된 IP에 고정한 GET/HEAD로 읽습니다. 사설·예약 주소, 인증 정보가 든 URL, WebSocket, 서비스 워커와 자동 다운로드는 차단하며, 우회 브라우저 연결은 전달 기능이 없는 로컬 프록시가 거절합니다. 로그인이나 POST가 필요한 페이지는 읽지 못할 수 있습니다. 이 정책은 원문 읽기에 적용하며 별도 Google 검색 창의 동작은 그대로입니다.
+  - `thin_text`, `navigation_only`, `blocked`, `consent_required`로 짧거나 접근 불가능한 본문을 구분합니다. 짧은 사실 본문은 유지하며, 차단·동의·탐색 화면은 RAG 근거로 활성화하지 않습니다. `full_text`도 파싱 상태이지 사실 검증 결과는 아닙니다.
 - `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?, request_id?, response_deadline_ms?)` - 저장된 로컬 지식만 검색합니다. optional variant를 최대 19개까지 한 broker 요청에서 처리하며 query embedding batch, RRF 통합, 검색 근거 기반 graph 확장, 핵심 `query` 기준 최종 rerank를 한 번 수행합니다. 응답에는 최종 순위의 query-focused 요약만 제한된 길이로 포함하고 원문은 DB에 남깁니다. 호출 전에 `request_id`를 지정하면 긴 검색 상태를 조회하거나 cooperative cancellation할 수 있습니다. deadline 전에 검색 후보가 만들어졌다면 완료된 lane을 버리지 않고 명시적인 partial 결과로 반환합니다. 브라우저, Google, SearchApi는 호출하지 않습니다.
 - `project_memory(action, ...)` - `SURF_RESEARCH=true`일 때 프로젝트 지식을 관리합니다.
   - `action="search"`: `project_memory_search`를 위한 호환 alias입니다.
@@ -203,9 +208,15 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
   - `action="get"`: typed record와 legacy record를 UTF-8 byte 구간으로 제한해 정확히 읽습니다. `body_bytes=0`은 metadata만 반환하고 `next_body_offset`으로 전체를 이어 읽습니다.
   - `action="show"`: 항상 count와 활성 record ID만 포함한 제한된 요약을 반환합니다. `detail_level="full"`은 호환성을 위해 허용하지만 전체 record 본문을 덤프하지 않습니다. 관련 본문은 `project_memory_search`, 단일 assertion이나 entity는 `target_id`를 사용합니다.
   - `action="record"`: 전달한 본문을 저장하고 ID, revision, status만 반환합니다. 영수증은 실제 적용과 idempotent replay를 구분합니다.
+  - `record_type="ontology"`는 용어와 선택적 domain/range/허용 단위를 정의하고, `record_type="assertion"`은 subject/predicate/value 사실과 선택적 단위·확정 상태를 별도로 저장합니다. 구분 표식이 없는 기존 정의는 `legacy_unclassified`로 보존하며 임의로 재분류하거나 삭제하지 않습니다. 검토 기록에는 주체와 방법을 남기며, 주체 불명 호스트 검토를 사람의 검증으로 표시하지 않습니다.
+  - `action="aggregate"`: 검색 상위 결과가 아니라 해당 범위의 모든 assertion으로 `count`, `min`, `max`, `sum`, `mean`을 계산합니다. 모집단 범위와 결과 hash를 반환하고, 빈 데이터와 숫자 0을 구분하며, 단위를 확인하고 `expected_value`와 비교할 수 있습니다. 자유 서술 추론을 자동 검증하는 기능은 아닙니다.
   - `action="query_status"` / `action="query_cancel"`: 실행 전에 지정한 `request_id`로 로컬 검색을 조회하거나 cooperative cancellation합니다.
   - `action="export"`: 독립 실행형 HTML 탐색기, Graphviz DOT, D3 node-link JSON 또는 Neo4j import 묶음을 `<research-root>/exports`에 저장합니다.
-- `health()` - 검색과 로컬 research runtime 상태
+- `health()` - 검색과 로컬 Auto Ontology runtime 상태
+
+임베딩 색인은 모델, revision, 차원, 정규화, 양자화, runtime fingerprint로 구분합니다. 현재 vector index는 384차원을 지원합니다. 차원이 맞지 않거나 vector가 유효하지 않으면 해당 lane만 명시적으로 열화시키고 lexical·graph 검색은 유지합니다. Fingerprint가 바뀌면 원본을 삭제하지 않고 파생 vector 색인을 다시 구축해야 합니다. 포함된 런타임은 revision 전용 오프라인 캐시에서도 tokenizer 탐색에 고정 revision을 전달합니다. 수정 범위는 [로컬 런타임 패치](vendor/PATCHES.md)에 설명했습니다.
+
+`SURF_ALLOW_PRIVATE=true`는 로컬 테스트를 위한 사설 주소 읽기 예외입니다. 신뢰할 수 없는 공개 콘텐츠를 처리할 때는 켜지 마세요.
 
 | 목적 | 도구 |
 |---|---|
@@ -214,7 +225,29 @@ Claude Code를 재시작하면 기본 도구 7개를 사용할 수 있습니다.
 | 신규 웹 결과와 저장된 프로젝트 지식을 함께 비교 | `project_id`를 지정한 `search` |
 | 여러 신규 웹 쿼리 실행 | `search_parallel` |
 
+## 복합 질문과 근거 부족 구분
+
+복합 질문은 호스트 에이전트가 서로 보완하는 하위 질문으로 나누고, `search_parallel`의 `research_goal`에 원래 질문을, `queries`에 하위 검색어를 전달합니다. 제품명, 버전, 제외 조건과 비교 기준을 유지합니다. 기존 호스트의 추론을 활용하며 별도 유료 계획 모델이나 숨겨진 추가 검색을 실행하지 않습니다.
+
+음수 값은 `"-1"`, `"-2"`처럼 따옴표로 묶어 Google의 제외 연산자와 구분합니다. 부족한 항목이 기존 출처에 있으면 같은 원문을 재사용하고, 필요한 출처 자체가 없으면 다른 미확인 항목을 위한 보완 검색을 합니다. 총 검색·읽기 예산을 구분해서 관리하며, 다른 출처를 읽었다는 이유만으로 미확인 조건을 완료 처리하지 않습니다.
+
+반환된 구간을 읽은 뒤 이미 수집한 출처의 미확인 항목은 `extract(query=..., body_handle=..., exclude_spans=...)`로 먼저 확인합니다. `meta.evidence.questions`는 출처 가용성·단어 일치·본문 품질 상태이며 **답변 가능성의 판정은 아닙니다**. `meta.research_degraded`는 사용할 수 없던 메모리 단계를 알리고, `memory_storage=not_confirmed`는 성공한 저장 영수증이 없다는 뜻입니다. URL 복원 실패는 근거 부족과 구분하며 같은 검색의 limit을 늘려 반복하지 않습니다. Google 내부의 지연 리디렉션은 명시된 대기 시간을 제한된 범위에서 준수하고 CAPTCHA나 로그인은 자동 해결하지 않습니다.
+
+응답은 질문 관련 원문 구간을 먼저 고른 뒤 마지막 한 곳에서 길이를 제한합니다. 정확한 hash·부호 있는 값·표 제목·코드는 수집 본문의 위치와 함께 반환합니다. 원문 수집·저장 깊이는 모델에 보내는 길이와 다릅니다.
+
+`search`, `search_parallel`, `extract`에서 `evidence_mode`를 지정할 수 있습니다. 기본값 `balanced`는 기존 근거 밀도를 유지합니다. 선택형 `compact`는 중복과 바이트 비용을 고려한 구간을 최대 5개 선택합니다. 세부 사항이 빠질 수 있으므로 구체적인 `query`와 같은 `body_handle`의 후속 읽기를 사용합니다. 수집 깊이를 바꾸거나 추가 모델을 로드하지 않으며, 정확한 LLM 토큰 상한은 아닙니다.
+
+선택형 `coherent`는 짧은 문단의 연속 문장과 코드형 용어·정의를 함께 고르고, 질문과 일치하는 첫 설명 문단을 최대 500자까지 같은 응답 예산 안에 남깁니다. 미확인 조건 주변의 이미 본 문장이 다시 포함되거나 다른 구간의 자리가 줄어들 수 있습니다. 긴 문단·코드·표의 기존 처리는 유지하며, 추가 모델을 로드하거나 기본값을 바꾸지 않습니다.
+
+JSON 텍스트 응답은 들여쓰기 없이 반환합니다. 검색 요약에서는 중복된 수집·만료 시각과 길이 별칭을 생략하고, 상세 추출 영수증은 `extract`로 확인할 수 있습니다. 같은 URL·원문 hash의 동일 구간은 한 번만 반환하며 `evidence_ref`로 앞선 결과를 가리킵니다. 후속 읽기에서도 표 머리글과 코드 펜스는 문맥을 위해 반복될 수 있습니다. 토큰 절감 폭은 문자 수뿐 아니라 호스트의 직렬화 방식과 모델 tokenizer에도 영향을 받습니다.
+
+명확한 단일 도메인 `site:example.org` 검색은 캐시 결과를 포함해 원문 추출 전에 해당 도메인과 하위 도메인을 확인합니다. 범위 밖 결과는 제외하고 `site_scope_mismatch`로 알리며 검색을 반복하지 않습니다. 복잡한 OR·다중 도메인·경로 지정 조건은 로컬에서 임의 해석하지 않고 제공자에 맡깁니다.
+
 ## 재실행 가능한 리서치 수집
+
+같은 MCP 연결에서 `search_parallel` 탐색과 `extract` 후속 읽기도 실행합니다. [원문 후속 읽기 예시](./examples/research-followup-workflow.example.json)를 참고하세요. URL은 재시작 후에도 사용할 수 있지만 임시 handle은 재사용할 수 없습니다.
+
+[선택형 호스트 정책](./examples/research-host-policy.md)은 미확인 조건, 원문 재사용, 공식 출처와의 모순, 답변 길이 관리를 설명합니다. 별도 모델을 켜거나 호스트 설정을 자동 변경하지 않습니다.
 
 `google-surf-collect`는 버전형 JSON 명세를 하나의 지속 MCP 세션에서 실행합니다. 하나의 명세에 라이브 `search`와 로컬 전용 `project_memory_search` 작업을 함께 넣을 수 있습니다. 라이브 작업은 같은 호출에서 본문을 추출하고, 로컬 작업은 Google을 열지 않고 이미 색인된 프로젝트 지식을 검색합니다.
 
@@ -243,7 +276,7 @@ npm run research:collect -- examples/project-memory-workflow.example.json
 
 이 방식은 수집 절차와 반환된 snapshot을 재실행하고 감사할 수 있게 합니다. 라이브 웹 결과 자체는 시각, 로케일, 네트워크 경로와 upstream ranking에 따라 달라질 수 있습니다.
 
-## 온톨로지와 데이터 리니지가 적용된 그래프 하이브리드 RAG 구조
+## Google Surf Auto Ontology
 
 ```mermaid
 flowchart TB
@@ -311,7 +344,7 @@ SurrealDB 하나가 서로 다른 세 계층의 기준이 됩니다.
 - **Payload:** 정확한 본문, source snapshot, manifest와 artifact reference. 같은 내용은 한 번 저장하고 ID와 byte 구간으로 다시 읽습니다.
 - **Derived view:** exact, BM25, vector, code, graph index와 작은 현재 프로젝트 view. Source hash를 기준으로 다시 만들 수 있습니다.
 
-로컬 research broker 하나만 embedded RocksDB 연결을 소유합니다. 여러 MCP 세션은 인증된 로컬 IPC로 연결해 제한된 조회를 병렬 실행하고 쓰기를 순서대로 처리합니다. 본문, embedding과 graph 구조를 중복 제거해도 원본 evidence와 각 실험의 이력은 별도 ID로 계속 조회할 수 있습니다.
+로컬 Auto Ontology broker 하나만 embedded RocksDB 연결을 소유합니다. 여러 MCP 세션은 인증된 로컬 IPC로 연결해 제한된 조회를 병렬 실행하고 쓰기를 순서대로 처리합니다. 본문, embedding과 graph 구조를 중복 제거해도 원본 evidence와 각 실험의 이력은 별도 ID로 계속 조회할 수 있습니다.
 
 ### 손실 없는 기록과 증분 색인
 
@@ -320,6 +353,8 @@ SurrealDB 하나가 서로 다른 세 계층의 기준이 됩니다.
 `sync`는 등록 root 또는 명시적인 변경·삭제 path를 받습니다. 변경되지 않은 root와 parent ID는 유지하고, no-op은 파생 index를 다시 쓰지 않으며, 파일 하나의 변경은 해당 generation만 갱신합니다. Code, retrieval, graph publication은 하나의 durable job ID로 추적합니다. `job_wait`는 revision cursor로 상태 변경을 기다리고, `job_cancel`은 안전한 stage 경계에서 중단하며, 완료되지 않은 작업은 process 재시작 후 이어서 실행합니다. Worker가 soft memory 기준을 넘으면 foreground 요청을 먼저 끝내고, 재구축 가능한 index job은 durable stage 경계에서 checkpoint한 뒤 교체된 worker에서 재개합니다. 이미 commit된 record는 취소하지 않습니다.
 
 ### 온톨로지와 프로젝트 간 연결
+
+온톨로지 기록에 `definition`, 같은 프로젝트의 `evidence_ids`, `review_status`를 넣을 수 있습니다. 기본값은 `draft`이며, 호스트가 명시적으로 검토한 경우에만 `reviewed`를 사용합니다. 서버는 정의와 근거의 존재를 검사하지만 내용의 진실성을 독립적으로 인증하지는 않습니다. 정의나 검토 상태를 수정할 때는 `supersedes_term_id`로 새 버전을 만듭니다. 프로젝트를 지정한 웹 검색은 일치하는 활성 용어를 최대 6개까지 `research_context.ontology_terms`로 반환합니다. 정의, 별칭, 근거 ID, 프로젝트 범위와 버전을 제한된 크기로 제공하며 다른 프로젝트의 용어는 섞지 않습니다.
 
 Versioned ontology는 entity type과 relation의 변경 이력을 revision으로 보존합니다. Schema linking은 프로젝트마다 다른 type과 relation을 공통 schema에 정렬하고, entity linking은 DOI, 저장소 주소와 명시적 alias처럼 검증 가능한 식별자가 일치할 때만 같은 대상을 연결합니다. 모호한 후보는 자동으로 연결하지 않습니다.
 
@@ -341,7 +376,7 @@ Graphology는 SurrealDB의 원본에서 typed graph projection을 만들고 Page
 
 Query embedding이 실패하거나 vector가 없으면 rerank에서 모델을 재호출하지 않고 lexical/graph 순위를 반환합니다. 시간 필드는 중복 없는 wall-clock 구간입니다. `embedding_ms`와 `retrieval_ms`의 합은 검색 종료까지의 시간이고, `rerank_ms`는 그 이후 응답 처리 시간입니다. 검색과 embedding이 동시에 진행될 수 있으므로 `retrieval_ms`는 독립적인 DB 실행 시간이 아닙니다. `response_deadline_ms`는 broker admission 이후 시작하며, transport watchdog에는 해당 deadline 외에 기존 5분의 queue/IPC 여유 시간이 유지됩니다. Partial 응답 이후에도 실행 중인 native query는 종료될 때까지 broker read slot을 보유합니다.
 
-#### 로컬 RAG 검색 검증
+#### Auto Ontology 검색 검증
 
 60개 query 회귀 fixture로 lexical baseline과 전체 로컬 RAG 경로를 비교합니다. HNSW 근사 탐색의 변동과 검색 로직 변경을 분리하기 위해 embedding thread를 1개로 고정하고 exhaustive vector scoring을 사용했습니다. 아래 표는 fresh process에서 세 번 실행한 중앙값입니다.
 
@@ -370,7 +405,7 @@ Query embedding이 실패하거나 vector가 없으면 rerank에서 모델을 �
 | Browser broker 실행 | 0회 |
 | 작업 중 database owner 재시작 | 0회 |
 | Query RSS 증가 | +10.9 MiB |
-| Research worker 관측 peak RSS | 375.5 MiB |
+| Auto Ontology worker 관측 peak RSS | 375.5 MiB |
 | Idle drain 후 자동 재연결 | 통과 |
 | No-op sync / 파일 1개 증분 sync | 통과 / 통과 |
 
@@ -426,7 +461,7 @@ cypher-shell -f load.cypher
 
 ### 저장 범위와 보안
 
-Research 모드는 기본으로 활성화됩니다. `search`, `search_parallel`, `scholar_search`와 `extract` 결과는 자동 저장하지만, 세션 의도, 계획, 실험과 결정은 MCP host가 `project_memory`로 전달한 경우에만 저장합니다. 이후 versioning, ontology mapping과 lineage 연결은 자동으로 처리합니다. 검색 분기는 호출 인자가 아니라 서버 config로 고정합니다.
+Auto Ontology는 기본으로 활성화됩니다. `search`, `search_parallel`, `scholar_search`와 `extract` 결과는 자동 저장하지만, 세션 의도, 계획, 실험과 결정은 MCP host가 `project_memory`로 전달한 경우에만 저장합니다. 이후 versioning, ontology mapping과 lineage 연결은 자동으로 처리합니다. 검색 분기는 호출 인자가 아니라 서버 config로 고정합니다.
 
 이미지 검색, 이미지 임베딩과 시각 리랭킹은 포함하지 않습니다. OCR은 스캔 PDF에서 검색 가능한 텍스트를 복구할 때만 사용합니다.
 
@@ -442,7 +477,7 @@ Credential과 private-key 파일은 본문 색인에서 제외합니다. HTML ex
 
 ### 로컬 운영 CLI
 
-다음 명령은 MCP 세션과 같은 인증된 research broker를 사용합니다. 별도 embedded DB owner나 browser를 열지 않습니다.
+다음 명령은 MCP 세션과 같은 인증된 Auto Ontology broker를 사용합니다. 별도 embedded DB owner나 browser를 열지 않습니다.
 
 ```powershell
 npx google-surf-mcp doctor --json
@@ -470,13 +505,13 @@ npx google-surf-mcp daemon drain --json
 | `SURF_BROWSER_ENGINE` | `auto` | 브라우저 엔진: `auto`, `native`, `playwright`. Native Chrome은 검색 요청 완료 후 읽기 전용 CDP를 연결합니다. |
 | `CHROME_PATH` | 자동 감지 | Chrome 바이너리 절대 경로 |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | warm 프로필 위치 |
-| `SURF_RESEARCH` | `true` | 로컬 프로젝트 메모리, 저장, 색인, `project_memory_search`와 `project_memory` 활성화 |
-| `SURF_RETRIEVAL_MODE` | `hybrid` | 연구 검색 분기: `live` 또는 `hybrid`. `SURF_RESEARCH=true`일 때만 사용 |
+| `SURF_RESEARCH` | `true` | Auto Ontology의 로컬 프로젝트 메모리, 저장, 색인, `project_memory_search`와 `project_memory` 활성화 |
+| `SURF_RETRIEVAL_MODE` | `hybrid` | Auto Ontology 검색 분기: `live` 또는 `hybrid`. `SURF_RESEARCH=true`일 때만 사용 |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB 데이터 디렉터리 |
 | `SURF_RESEARCH_DB_ENDPOINT` | 미설정 | 선택 remote SurrealDB endpoint. `wss`/`https`가 필요하며 localhost만 `ws`/`http` 허용 |
-| `SURF_RESEARCH_DB_NAMESPACE` | `google_surf` | research catalog가 사용하는 SurrealDB namespace |
-| `SURF_RESEARCH_DB_DATABASE` | `research` | research catalog가 사용하는 SurrealDB database |
-| `SURF_RESEARCH_DB_TOKEN` | 미설정 | remote research DB bearer token. 또는 `SURF_RESEARCH_DB_USERNAME`과 `SURF_RESEARCH_DB_PASSWORD` 사용 |
+| `SURF_RESEARCH_DB_NAMESPACE` | `google_surf` | Auto Ontology catalog가 사용하는 SurrealDB namespace |
+| `SURF_RESEARCH_DB_DATABASE` | `research` | Auto Ontology catalog가 사용하는 SurrealDB database |
+| `SURF_RESEARCH_DB_TOKEN` | 미설정 | remote Auto Ontology DB bearer token. 또는 `SURF_RESEARCH_DB_USERNAME`과 `SURF_RESEARCH_DB_PASSWORD` 사용 |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | HNSW vector 검색과 최종 리랭킹에 쓰는 local 384차원 모델. 기본 model revision은 고정되며 `off`로 vector lane 비활성화 |
 | `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | ONNX CPU memory arena와 memory pattern을 비활성화. `false`는 최초 색인 속도를 높이는 대신 peak memory 증가 |
 | `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread 수. 1-16 범위 |
@@ -579,8 +614,8 @@ auth API는 인증 origin의 `/api/v1/auth`에, relay는 추론 origin의 `/v1`�
 - 셀렉터 깨짐: 런타임 strategy 재배열 (`SURF_SELF_HEALING`, deterministic)과 수동 repair workflow로 대응 (`SURF_LLM_HEAL` 선택, 사람이 리뷰)
 - Playwright 검색이 예상보다 느리면 `health().pool.fallback` 확인. `true`면 워커 풀이 single-context를 사용 중입니다. Native 검색은 인증된 로컬 browser broker 하나를 여러 MCP 세션이 공유합니다. Broker는 숨겨진 Chrome 프로세스 하나와 재사용 탭을 최대 4개 유지하며 검색 시작 시각을 조정합니다. CAPTCHA는 사용자 해결을 위해 같은 세션을 표시하고 다음 호출에서 숨김 guard를 복구합니다. 브라우저 충돌은 다음 호출에서 새 세션을 시작합니다.
 - SSRF: `extract`는 기본적으로 `localhost`, 사설 IP, AWS metadata 차단. `SURF_ALLOW_PRIVATE=true`로 우회
-- 캐시 정리: `npm run cache:clear`는 search/extract cache와 내려받은 vector model cache만 지우며 research DB는 유지
-- local research DB는 application-level 암호화를 하지 않습니다. 장비나 backup의 at-rest 보호가 필요하면 OS 계정 권한과 BitLocker 또는 FileVault를 사용하세요.
+- 캐시 정리: `npm run cache:clear`는 search/extract cache와 내려받은 vector model cache만 지우며 Auto Ontology DB는 유지
+- 로컬 Auto Ontology DB는 application-level 암호화를 하지 않습니다. 장비나 backup의 at-rest 보호가 필요하면 OS 계정 권한과 BitLocker 또는 FileVault를 사용하세요.
 
 ## Changelog
 

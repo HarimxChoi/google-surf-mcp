@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  scholarSearchTool, searchParallelTool, searchTool, type Deps, type PoolHandle,
+  applyParallelSearchExtraction, applySearchExtraction, scholarSearchTool, searchParallelTool, searchTool, type Deps, type PoolHandle,
 } from '../src/agent.js';
 import { UnifiedCache } from '../src/cache.js';
 import { createCascadeState } from '../src/cascade.js';
@@ -82,6 +82,39 @@ describe('provider routing', () => {
 
   beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'provider-tool-')); });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('does not extract out-of-scope API or cached search results', async () => {
+    const deps = makeDeps(root, { SURF_SEARCH_PROVIDER: 'searchapi', SURF_RESEARCH: 'false' });
+    deps.searchApi = fakeSearchApi();
+    deps.searchApi.searchGoogle = vi.fn(async () => [
+      { title: 'Wrong source', url: 'https://other.test/a', description: 'Outside scope' },
+      { title: 'Official source', url: 'https://example.org/a', description: 'Inside scope' },
+    ]);
+    deps.readSource = vi.fn(async url => ({ url, content: 'Verified source content.', extraction_quality: 'full_text' }));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await searchTool({ query: 'site:example.org source' }, deps);
+      expect(response.structuredContent?.meta).toMatchObject({ cache: attempt ? 'hit' : 'miss', degraded_reasons: ['site_scope_mismatch'] });
+      await applySearchExtraction(response, { extract_mode: 'full', extract_limit: 2 }, deps);
+    }
+    expect(deps.searchApi.searchGoogle).toHaveBeenCalledTimes(1);
+    expect(deps.readSource).toHaveBeenCalledTimes(1);
+    expect(deps.readSource).toHaveBeenCalledWith('https://example.org/a', 50_000, 'full');
+  });
+
+  it('filters each parallel query before sharing the extraction budget', async () => {
+    const deps = makeDeps(root, { SURF_SEARCH_PROVIDER: 'searchapi', SURF_RESEARCH: 'false' });
+    deps.searchApi = fakeSearchApi();
+    deps.searchApi.searchGoogle = vi.fn(async () => [
+      { title: 'A', url: 'https://a.test/source', description: 'Source A' },
+      { title: 'B', url: 'https://b.test/source', description: 'Source B' },
+    ]);
+    deps.readSource = vi.fn(async url => ({ url, content: 'Verified source content.', extraction_quality: 'full_text' }));
+    const response = await searchParallelTool({ queries: ['site:a.test source', 'site:b.test source'] }, deps);
+    await applyParallelSearchExtraction(response, { extract_mode: 'full', extract_limit: 2 }, deps);
+    expect(deps.readSource).toHaveBeenCalledTimes(2);
+    expect(deps.readSource).toHaveBeenCalledWith('https://a.test/source', 50_000, 'full');
+    expect(deps.readSource).toHaveBeenCalledWith('https://b.test/source', 50_000, 'full');
+  });
 
   it('keeps browser as the default and never calls SearchApi on browser failure', async () => {
     const deps = makeDeps(root);

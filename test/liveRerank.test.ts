@@ -3,6 +3,23 @@ import { rerankLiveResponse, rerankLiveRows } from '../src/liveRerank.js';
 import { formatToolResponse } from '../src/response.js';
 
 describe('standalone live reranking', () => {
+  it('also protects research-off responses from boilerplate and full-body echoes', () => {
+    const result = rerankLiveResponse(formatToolResponse({ query: 'DuckDB different columns', results: [{
+      title: 'DuckDB', url: 'https://duckdb.org/docs',
+      content: 'For different columns use `union_by_name = true`.\n- [Report an issue](https://example.org/?q=DuckDB+different+columns)',
+    }] }));
+    const row = (result.structuredContent?.results as Record<string, unknown>[])[0];
+    expect(row.description).toContain('union_by_name');
+    expect(row.description).not.toContain('Report an issue');
+    expect(row.content).toBeUndefined();
+  });
+
+  it('preserves explicit full-response bodies for the downstream shared size gate', () => {
+    const result = rerankLiveResponse(formatToolResponse({ query: 'body', results: [{
+      title: 'Full body', url: 'https://example.org', content: 'requested body',
+    }] }), false, 'full');
+    expect((result.structuredContent?.results as Record<string, unknown>[])[0].content).toBe('requested body');
+  });
   it('fuses provider order with query BM25 rank', () => {
     const rows = rerankLiveRows('warp quantization', [
       { title: 'General models', description: 'A broad model directory.' },

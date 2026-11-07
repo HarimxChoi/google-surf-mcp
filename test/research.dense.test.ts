@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LocalSearchHit } from '../src/research/contracts.js';
 import {
   cosineSimilarity, DEFAULT_RESEARCH_VECTOR_MODEL, DEFAULT_RESEARCH_VECTOR_REVISION,
-  LocalEmbeddingModel, type EmbeddingProvider,
+  LocalEmbeddingModel, embeddingIndexKey, type EmbeddingProvider,
 } from '../src/research/dense.js';
 import { ResearchService, tuneLocalQueries } from '../src/research/service.js';
 
@@ -63,6 +63,7 @@ describe('vector retrieval', () => {
     expect(model.modelId()).toBe(
       `${DEFAULT_RESEARCH_VECTOR_MODEL}@${DEFAULT_RESEARCH_VECTOR_REVISION}`,
     );
+    expect(model.fingerprint().runtime).toBe('transformers-4.2.0-pinned-tokenizer-v1');
   });
 
   it('reports embedding residency without loading the model and clears it on disposal', async () => {
@@ -200,7 +201,7 @@ describe('vector retrieval', () => {
       }
       await service.waitForIdle();
       const queries = vi.spyOn(await service.store.open(), 'query');
-      const hits = await service.store.searchProjectVector('small-scope', embeddings.modelId(), vector(1, 0), 10);
+      const hits = await service.store.searchProjectVector('small-scope', embeddingIndexKey(embeddings)!, vector(1, 0), 10);
       expect(hits.map((hit) => hit.title)).toEqual(['Target', 'Distractor']);
       expect(hits.map((hit) => hit.score)).toEqual([1, 0]);
       expect(queries.mock.calls.some(([sql]) => String(sql).includes('embedding <|'))).toBe(false);

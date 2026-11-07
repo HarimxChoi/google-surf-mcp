@@ -3,6 +3,15 @@ import type { SearchResult } from '../types.js';
 export type RetrievalMode = 'hybrid' | 'live';
 export type ExperimentStatus = 'running' | 'success' | 'failed' | 'inconclusive';
 export type AssertionValue = string | number | boolean | null;
+export interface AssertionAggregateInput {
+  operation: 'count' | 'min' | 'max' | 'sum' | 'mean';
+  predicate?: string;
+  subject?: string;
+  unit?: string;
+  status?: 'confirmed' | 'suggested';
+  valid_at?: string;
+  recorded_as_of?: string;
+}
 export type CatalogAssetKind = 'project' | 'plan' | 'task' | 'method' | 'experiment'
   | 'attempt' | 'arm' | 'measurement' | 'byte_ledger' | 'artifact' | 'document'
   | 'decision' | 'session';
@@ -244,11 +253,19 @@ export interface CatalogTimelineEvent {
 }
 
 export interface OntologyTermRecord {
+  knowledge_layer?: 'schema' | 'legacy_unclassified';
+  review?: { actor: string; method: 'human' | 'model' | 'rule' | 'host_unspecified'; reviewed_at: string };
+  domain?: string[];
+  range?: string[];
+  allowed_units?: string[];
   term_id: string;
   project_id?: string;
   kind: 'entity_type' | 'relation';
   name: string;
   aliases: string[];
+  definition?: string;
+  evidence_ids?: string[];
+  review_status?: 'draft' | 'reviewed';
   version: number;
   status: 'active' | 'superseded';
   supersedes_term_id?: string;
@@ -266,6 +283,8 @@ export interface EvidenceRecord {
 }
 
 export interface AssertionRecord {
+  unit?: string;
+  superseded_from_status?: 'suggested' | 'confirmed';
   assertion_id: string;
   project_id: string;
   subject: string;
@@ -678,6 +697,8 @@ export interface PriorResearchSearch {
 
 export interface ResearchSearchContext {
   prior_searches: PriorResearchSearch[];
+  ontology_terms?: Array<Pick<OntologyTermRecord, 'term_id' | 'name' | 'kind' | 'version' | 'project_id' | 'definition' | 'review_status' | 'aliases' | 'evidence_ids' | 'knowledge_layer' | 'review'> & { definition_truncated?: boolean }>;
+  assertions?: Array<Pick<AssertionRecord, 'assertion_id' | 'project_id' | 'subject' | 'predicate' | 'object' | 'value' | 'unit' | 'evidence_ids' | 'status' | 'recorded_at'> & { knowledge_layer: 'instance' }>;
 }
 
 export interface CaptureResult {

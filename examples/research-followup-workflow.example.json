@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "collection_id": "sqlite-source-followups",
+  "retrieval_mode": "live",
+  "session_id": "sqlite-source-followups",
+  "session_intent": "Inspect official sources for concurrency and missing constraints without repeating searches.",
+  "defaults": {
+    "search_parallel": { "limit": 5, "extract_mode": "full", "extract_limit": 4, "response_content": "summary" },
+    "extract": { "mode": "full", "response_content": "summary", "max_chars": 1500 }
+  },
+  "jobs": [
+    {
+      "id": "discover",
+      "tool": "search_parallel",
+      "queries": ["site:sqlite.org/wal.html concurrency one writer", "site:sqlite.org/wal.html shared memory network filesystem"],
+      "arguments": {
+        "research_goal": "Explain WAL reader/writer concurrency and deployment constraints.",
+        "requirements": [
+          { "id": "concurrency", "text": "Whether readers and a writer overlap, and whether multiple writers overlap", "query_indices": [0] },
+          { "id": "network", "text": "Same-host and network filesystem constraints", "query_indices": [1] }
+        ]
+      }
+    },
+    {
+      "id": "inspect-network-condition",
+      "tool": "extract",
+      "url": "https://www.sqlite.org/wal.html",
+      "arguments": { "query": "WAL shared-memory network filesystem same host requirement" }
+    },
+    {
+      "id": "inspect-writer-condition",
+      "tool": "extract",
+      "url": "https://www.sqlite.org/wal.html",
+      "arguments": { "query": "Only one writer at a time WAL concurrency SQLITE_BUSY" }
+    }
+  ]
+}

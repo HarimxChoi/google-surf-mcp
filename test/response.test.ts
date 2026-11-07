@@ -36,6 +36,14 @@ describe('formatToolResponse', () => {
     });
   });
 
+  it('keeps the JSON fallback lossless without indentation overhead', () => {
+    const payload = { results: [{ title: 'Unicode 한글', content: 'first\nsecond' }], meta: { count: 1 } };
+    const result = formatToolResponse(payload);
+    expect(result.content[0].text).toBe(JSON.stringify(payload));
+    expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+    expect(result.content[0].text.length).toBeLessThan(JSON.stringify(payload, null, 2).length);
+  });
+
   it('returns isError true with humanText + structured error', () => {
     const r = formatToolResponse(null, {
       code: 'NAV_TIMEOUT',

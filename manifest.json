@@ -5,7 +5,7 @@
   "display_name": "Google Surf",
   "version": "1.1.5",
   "description": "Web, academic and code search with graph RAG, data lineage, ontology and cross-project schema links.",
-  "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Research mode is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
+  "long_description": "Google Surf combines browser-based web search, content extraction, Scholar metadata, and codebase retrieval through search, search_parallel, and extract. Google Surf Auto Ontology is enabled by default and stores results in a local graph hybrid RAG with evidence-backed data lineage, versioned ontology, and precision-first schema linking across selected projects. Exact, BM25, vector, graph, and live web candidates are fused with RRF and one shared reranker. GitHub READMEs are read directly and one eligible small repository per call can be indexed automatically. Browser search needs no API key. SearchApi is an optional primary or fallback provider.",
   "author": {
     "name": "harimxchoi",
     "url": "https://github.com/HarimxChoi"
@@ -154,27 +154,27 @@
     },
     "research": {
       "type": "boolean",
-      "title": "Local research memory",
-      "description": "Enable local project memory, capture, indexing, project_memory_search, and project_memory.",
+      "title": "Google Surf Auto Ontology",
+      "description": "Enable Auto Ontology: local project memory, evidence capture, indexing, project_memory_search, and project_memory. Existing SURF_RESEARCH settings remain compatible.",
       "default": true,
       "required": false
     },
     "retrieval_mode": {
       "type": "string",
-      "title": "Research retrieval mode",
+      "title": "Auto Ontology retrieval mode",
       "description": "live uses the web provider only. hybrid combines live and project retrieval.",
       "default": "hybrid",
       "required": false
     },
     "research_root": {
       "type": "directory",
-      "title": "Research data directory",
+      "title": "Auto Ontology data directory",
       "description": "Embedded SurrealDB data directory. Defaults to <profile>/research.",
       "required": false
     },
     "research_vector_model": {
       "type": "string",
-      "title": "Research vector model",
+      "title": "Auto Ontology vector model",
       "description": "Local Hugging Face model for HNSW retrieval and shared reranking. Use off to disable.",
       "default": "Xenova/multilingual-e5-small",
       "required": false
@@ -216,21 +216,21 @@
     },
     "research_broker_idle_ms": {
       "type": "number",
-      "title": "Research broker idle lifetime",
-      "description": "Milliseconds to keep the shared research broker available after the last client disconnects.",
+      "title": "Auto Ontology broker idle lifetime",
+      "description": "Milliseconds to keep the shared Auto Ontology broker available after the last client disconnects.",
       "default": 60000,
       "required": false
     },
     "research_read_concurrency": {
       "type": "number",
-      "title": "Research read concurrency",
+      "title": "Auto Ontology read concurrency",
       "description": "Maximum concurrent broker reads. Identical in-flight reads share one operation.",
       "default": 4,
       "required": false
     },
     "research_query_timeout_ms": {
       "type": "number",
-      "title": "Research query timeout",
+      "title": "Auto Ontology query timeout",
       "description": "Embedded SurrealDB query timeout in milliseconds.",
       "default": 30000,
       "required": false

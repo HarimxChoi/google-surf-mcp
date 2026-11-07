@@ -41,7 +41,7 @@
     "research:vector-smoke": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/smoke-vector-retrieval.js",
     "research:vector-backends": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/benchmark-vector-backends.js",
     "research:memory-soak": "node scripts/soak-research-memory.mjs",
-    "smoke:mcp": "node scripts/smoke-mcp.mjs",
+    "smoke:mcp": "node scripts/smoke-mcp.mjs && node scripts/smoke-evidence.mjs && node scripts/smoke-source-network.mjs",
     "smoke:hooks": "node scripts/smoke-host-hooks.mjs",
     "smoke:extraction": "node scripts/smoke-extraction.mjs",
     "drift-check": "tsc -p tsconfig.scripts.json && node build-scripts/scripts/repair/index.js"

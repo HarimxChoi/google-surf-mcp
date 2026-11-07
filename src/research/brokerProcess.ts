@@ -120,6 +120,7 @@ const service = new ResearchService(config);
 const endpoint = researchBrokerEndpoint(config.root);
 const clients = new Set<Socket>();
 const coalescedReads = new Set([
+  'aggregateAssertions',
   'getAssertion', 'getCatalogRecord', 'getCatalogRecords', 'getEntity', 'getProject',
   'getProjectSummary', 'jobStatus', 'linkEntity', 'listProjects', 'projectContext',
   'passiveStatus', 'probe', 'search', 'searchBatch', 'searchGrouped', 'searchFamilies',

@@ -7,11 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { z } from 'zod';
-import { searchExtractLimitSchema } from './searchLimits.js';
+import { parallelExtractLimitSchema, parseSearchExtractLimit, searchExtractLimitSchema } from './searchLimits.js';
+import { RequirementsSchema } from './researchRequirements.js';
 
-const ToolSchema = z.enum(['search', 'project_memory_search', 'project_memory']);
+const ToolSchema = z.enum(['search', 'search_parallel', 'extract', 'project_memory_search', 'project_memory']);
 const SearchToolSchema = z.enum(['search', 'project_memory_search']);
 const SearchArgumentsSchema = z.object({
+  requirements: RequirementsSchema,
+  request_id: z.string().min(1).max(120).optional(),
   project_id: z.string().min(1).max(64).optional(),
   include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
   limit: z.number().int().min(1).max(20).default(10),
@@ -19,6 +22,23 @@ const SearchArgumentsSchema = z.object({
   extract_limit: searchExtractLimitSchema(),
   max_chars: z.number().int().min(200).max(50_000).optional(),
   response_content: z.enum(['summary', 'full']).default('full'),
+  evidence_mode: z.enum(['balanced', 'compact', 'coherent']).optional(),
+}).strict();
+const ParallelArgumentsSchema = SearchArgumentsSchema.omit({ extract_limit: true }).extend({
+  extract_limit: parallelExtractLimitSchema(),
+  research_goal: z.string().min(1).max(400).optional(),
+});
+const ExtractArgumentsSchema = z.object({
+  project_id: z.string().min(1).max(64).optional(),
+  mode: z.enum(['metadata', 'abstract', 'full']).default('full'),
+  max_chars: z.number().int().min(200).max(50_000).optional(),
+  response_content: z.enum(['summary', 'full']).default('summary'),
+  evidence_mode: z.enum(['balanced', 'compact', 'coherent']).optional(),
+  query: z.string().min(1).max(400).optional(),
+  body_handle: z.string().min(1).max(200).optional(),
+  refresh: z.boolean().optional(),
+  exclude_spans: z.array(z.object({ start: z.number().int().min(0), end: z.number().int().positive() }).refine(x => x.end > x.start)).max(16).optional(),
+  exclude_ranges: z.array(z.tuple([z.number().int().min(0), z.number().int().positive()]).refine(x => x[1] > x[0])).max(16).optional(),
 }).strict();
 const LocalArgumentsSchema = z.object({
   project_id: z.string().min(1).max(64).optional(),
@@ -29,7 +49,10 @@ const LocalArgumentsSchema = z.object({
 const ProjectRecordArgumentsSchema = z.object({
   action: z.literal('record'),
   project_id: z.string().min(1).max(64).optional(),
-  record_type: z.enum(['session', 'plan', 'experiment', 'decision', 'ontology']),
+  record_type: z.enum(['session', 'plan', 'experiment', 'decision', 'ontology', 'assertion']),
+  subject: z.string().min(1).max(2000).optional(), predicate: z.string().min(1).max(200).optional(), object: z.string().min(1).max(2000).optional(),
+  value: z.union([z.string(),z.number().finite(),z.boolean(),z.null()]).optional(), unit: z.string().min(1).max(80).optional(),
+  assertion_status: z.enum(['suggested','confirmed']).optional(),
   memory_handle: z.string().uuid().optional(),
   intent: z.string().min(1).max(2_000).optional(),
   title: z.string().min(1).max(200).optional(),
@@ -46,6 +69,11 @@ const ProjectRecordArgumentsSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   aliases: z.array(z.string().min(1).max(2_000)).min(1).max(50).optional(),
   ontology_kind: z.enum(['entity_type', 'relation']).optional(),
+  definition: z.string().min(1).max(2_000).optional(),
+  review_status: z.enum(['draft', 'reviewed']).optional(),
+  review: z.object({ actor:z.string().min(1).max(200), method:z.enum(['human','model','rule','host_unspecified']), reviewed_at:z.iso.datetime({offset:true}).optional() }).optional(),
+  domain:z.array(z.string().min(1).max(200)).max(20).optional(), range:z.array(z.string().min(1).max(200)).max(20).optional(), allowed_units:z.array(z.string().min(1).max(80)).max(20).optional(),
+  evidence_ids: z.array(z.string().min(1).max(200)).max(50).optional(),
   version: z.number().int().min(1).optional(),
   supersedes_term_id: z.string().min(1).max(200).optional(),
 }).strict().superRefine((value, context) => {
@@ -74,6 +102,7 @@ const ProjectRecordArgumentsSchema = z.object({
     required(Boolean(value.name), 'name', 'name required');
     required(Boolean(value.ontology_kind), 'ontology_kind', 'ontology_kind required');
   }
+  if (value.record_type === 'assertion') { required(Boolean(value.subject),'subject','subject required'); required(Boolean(value.predicate),'predicate','predicate required'); }
 });
 const ProjectRebuildArgumentsSchema = z.object({
   action: z.literal('rebuild'),
@@ -93,12 +122,26 @@ const ProjectExportArgumentsSchema = z.object({
   export_view: z.enum(['graph', 'ontology', 'lineage']).default('graph'),
 }).strict();
 const ProjectMemoryArgumentsSchema = z.discriminatedUnion('action', [
+  z.object({ action:z.literal('aggregate'), project_id:z.string().min(1).max(64).optional(), include_project_ids:z.array(z.string().min(1).max(64)).max(20).optional(), all_projects:z.boolean().optional(),
+    aggregate:z.object({ operation:z.enum(['count','min','max','sum','mean']),predicate:z.string().min(1).max(200).optional(),subject:z.string().min(1).max(2000).optional(),unit:z.string().min(1).max(80).optional(),status:z.enum(['confirmed','suggested']).optional(),valid_at:z.iso.datetime({offset:true}).optional(),recorded_as_of:z.iso.datetime({offset:true}).optional() }),expected_value:z.number().finite().optional() }).strict(),
   ProjectRecordArgumentsSchema,
   ProjectRebuildArgumentsSchema,
   ProjectExportArgumentsSchema,
 ]);
 const JobSchema = z.union([
   z.string().min(1).max(400),
+  z.object({
+    id: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/).optional(),
+    tool: z.literal('search_parallel'),
+    queries: z.array(z.string().min(1).max(400)).min(2).max(12),
+    arguments: z.record(z.string(), z.unknown()).optional(),
+  }).strict(),
+  z.object({
+    id: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/).optional(),
+    tool: z.literal('extract'),
+    url: z.string().url().regex(/^https?:\/\//),
+    arguments: z.record(z.string(), z.unknown()).optional(),
+  }).strict(),
   z.object({
     id: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/).optional(),
     tool: SearchToolSchema.optional(),
@@ -124,6 +167,8 @@ const SpecSchema = z.object({
   output: z.string().min(1).optional(),
   defaults: z.object({
     search: z.record(z.string(), z.unknown()).optional(),
+    search_parallel: z.record(z.string(), z.unknown()).optional(),
+    extract: z.record(z.string(), z.unknown()).optional(),
     project_memory_search: z.record(z.string(), z.unknown()).optional(),
     project_memory: z.record(z.string(), z.unknown()).optional(),
   }).strict().default({}),
@@ -208,6 +253,21 @@ export function normalizeCollectionSpec(input: unknown): CollectionSpec {
       if (parsed.session_id) args.session_id = parsed.session_id;
       if (parsed.session_intent) args.session_intent = parsed.session_intent;
       query = rawQuery;
+    } else if (tool === 'search_parallel' || tool === 'extract') {
+      if (tool === 'search_parallel') {
+        if (!('queries' in raw)) throw new Error('search_parallel requires queries');
+        const values = ParallelArgumentsSchema.parse(combined);
+        args = { ...values, queries: raw.queries,
+          extract_limit: parseSearchExtractLimit(values.extract_limit, 'parallel', values.extract_mode) };
+      } else {
+        if (!('url' in raw)) throw new Error('extract requires url');
+        args = { ...ExtractArgumentsSchema.parse(combined), url: raw.url };
+        if (args.refresh && args.body_handle) throw new Error('refresh cannot be combined with body_handle');
+      }
+      args.project_id ??= parsed.project_id;
+      if (!args.project_id) delete args.project_id;
+      if (parsed.session_id) args.session_id = parsed.session_id;
+      if (parsed.session_intent) args.session_intent = parsed.session_intent;
     } else if (tool === 'project_memory_search') {
       if (!rawQuery) throw new Error('project_memory_search requires query');
       args = LocalArgumentsSchema.parse(combined);
@@ -337,7 +397,7 @@ export async function runCollection(
       progress(`[${index + 1}/${spec.jobs.length}] skip ${job.id}`);
       continue;
     }
-    const subject = job.query ?? `${job.arguments.action}${job.arguments.record_type
+    const subject = job.query ?? job.arguments.url ?? (Array.isArray(job.arguments.queries) ? job.arguments.queries.join(' | ') : undefined) ?? `${job.arguments.action}${job.arguments.record_type
       ? `:${job.arguments.record_type}` : ''}`;
     progress(`[${index + 1}/${spec.jobs.length}] ${job.tool} ${subject}`);
     const startedAt = new Date();

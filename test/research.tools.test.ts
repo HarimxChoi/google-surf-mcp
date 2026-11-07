@@ -100,6 +100,7 @@ describe('project_memory tool', () => {
       name: 'model',
       version: 1,
       status: 'active',
+      review_status: 'draft',
     });
     expect(revised.structuredContent?.record).toMatchObject({ version: 2 });
     expect(await service.getOntologyTerm(firstId)).toMatchObject({ status: 'superseded' });

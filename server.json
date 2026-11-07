@@ -55,7 +55,7 @@
         },
         {
           "name": "SURF_RESEARCH",
-          "description": "Enable local project memory and hybrid retrieval. Defaults to true.",
+          "description": "Enable Google Surf Auto Ontology: local project memory, evidence capture, and hybrid retrieval. Defaults to true. The SURF_RESEARCH setting name is unchanged.",
           "isRequired": false,
           "format": "string"
         },
@@ -109,13 +109,13 @@
         },
         {
           "name": "SURF_RESEARCH_BROKER_IDLE_MS",
-          "description": "Shared research broker idle lifetime in milliseconds. Defaults to 60000.",
+          "description": "Shared Auto Ontology broker idle lifetime in milliseconds. Defaults to 60000.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "SURF_RESEARCH_READ_CONCURRENCY",
-          "description": "Maximum concurrent research broker reads. Defaults to 4.",
+          "description": "Maximum concurrent Auto Ontology broker reads. Defaults to 4.",
           "isRequired": false,
           "format": "string"
         },

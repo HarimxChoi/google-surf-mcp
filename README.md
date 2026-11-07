@@ -21,7 +21,7 @@ English | [Korean](./README.ko.md)
 
 *"Turn Google Search, Papers, and Codebases into an Automatic Local Knowledge Graph and lineage for AI Agents with Zero API Key, Zero External Server."*
 
-Google Surf stores search and extraction results in a project-scoped local knowledge graph.
+Google Surf Auto Ontology stores search and extraction results in a project-scoped local knowledge graph.
 
 As you search, papers, code, web sources, session intent, plans, experiments, and decisions accumulate in a personal PKM. New research searches stored knowledge and fresh web results together, reducing repeated work while continuing to discover new information.
 
@@ -41,9 +41,9 @@ Exact + BM25 + Vector + Code graph + Graph PPR
 
 Seven tools are available by default: `search` / `search_parallel` / `extract` / `scholar_search` / `project_memory_search` / `project_memory` / `health`.
 
-Research mode and automatic capture are enabled by default. Set `SURF_RESEARCH=false` to use search and extraction without opening the database or graph sidecar; the project memory tools are not registered in that mode.
+Auto Ontology and automatic capture are enabled by default. Set `SURF_RESEARCH=false` to use search and extraction without opening the database or graph sidecar; the project memory tools are not registered in that mode. Auto Ontology is the new name for research mode; existing `SURF_RESEARCH*` settings, storage paths, CLI commands, and `project_memory*` tool names remain unchanged.
 
-With research mode disabled, live `search` and `search_parallel` results still use a lightweight in-memory reranker. It fuses the provider order with query BM25 rank through RRF without loading the vector model or opening local storage.
+With Auto Ontology disabled, live `search` and `search_parallel` results still use a lightweight in-memory reranker. It fuses the provider order with query BM25 rank through RRF without loading the vector model or opening local storage.
 
 Browser search needs no API key. SearchApi can be configured as an optional primary provider or fallback.
 
@@ -218,12 +218,18 @@ Local clone variant:
 - `scholar_search(query, limit?)` - Google Scholar metadata search, max 10 papers. Supports browser, SearchApi primary, and fallback modes.
 - `search_parallel(queries[], limit?, extract_mode?, extract_limit?, response_content?, max_chars?)` - primary multi-query tool for broad live discovery and reading through a continuous four-tab queue. Set `extract_mode` in the same call when public web pages, PDFs, papers, or GitHub repositories must be read. Use local PDF tools only for local files or visual layout work, and clone repositories only for editing, building, testing, or full Git history. `limit` is 1-20 per query. The call-wide `extract_limit` defaults to 12 and allows up to 20 for abstract; full defaults to and allows 10. `response_content` defaults to `summary` to bound one-call output.
 - Integrated search extraction reports `requested`, `applied`, `skipped`, `truncated`, and `total_chars`. `remaining_urls` can be passed to `extract` without repeating the search.
-- `extract(url, max_chars?, mode?, response_content?)` - secondary extraction tool for an exact public URL when no new discovery is required. If sources still need to be found, use `search` or `search_parallel` with `extract_mode` instead.
-  - `mode="full"` (default): reads up to 1000000 characters for research capture. Research mode stores deterministic 4000-character chunks; `response_content="full"` returns up to 50000 characters and `summary` returns a 1500-character evidence excerpt.
-  - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when research mode is enabled.
+- Both live search tools accept up to 12 `requirements` (`id`, `text`, optional zero-based `query_indices`) and a `request_id`. The opt-in `meta.research_contract` links each requirement to candidate results, unresolved items, and bounded next actions. Lexical matches are not semantic verification: the host must decide whether the evidence answers the question. `health().runtime_identity` exposes the runtime `build_id` and actual tool-input `schema_hash` for reproducible traces.
+- `extract(url, max_chars?, mode?, response_content?, query?, body_handle?, exclude_spans?, refresh?)` - secondary extraction tool for an exact public URL when no new discovery is required. If sources still need to be found, use `search` or `search_parallel` with `extract_mode` instead.
+  - `mode="full"` (default): reads up to 1000000 characters for Auto Ontology capture. Auto Ontology stores deterministic 4000-character chunks; `response_content="full"` returns up to 50000 characters and `summary` returns a 1500-character evidence excerpt.
+  - `mode="abstract"`: ~1500-char survey (PDF page 1 or HTML meta description). Document metadata is included and stored with the survey when Auto Ontology is enabled.
   - `mode="metadata"`: metadata without body text. Returns available title, authors, publication, dates, DOI, description, keywords, canonical URL, and PDF properties including page count.
   - GitHub repository URLs read the README in metadata mode. Abstract and full use the same download gate and differ only in indexed source depth.
   - Response: content fields plus available document metadata. Failures return `{ error }`, never throw.
+  - `query` selects relevant passages before the final response limit. `body_handle` reuses the same captured source in this MCP process for up to five minutes; `exclude_spans` skips previously returned passages. `refresh=true` reads a new snapshot and cannot be combined with a handle. Expired or mismatched handles fail explicitly, without silently opening a browser.
+  - Summary `evidence_ranges` packs UTF-16 offsets as `[start, end]` pairs (inclusive start, exclusive end). Pass these back as `exclude_ranges`; detailed extraction retains object-form `evidence_spans` and accepts `exclude_spans` for compatibility. `captured_hash` hashes the captured clean text, not the original PDF binary. The transient cache has a 16 MiB conservative text-memory budget and does not open a database when `SURF_RESEARCH=false`. Prepared GitHub README snapshots use the same handle flow; project-local retrieval bodies are excluded from this public-source cache.
+  - Full capture with Auto Ontology disabled is bounded to 50,000 characters. Source reading uses a separate reusable headless context without warming Google; PDF, abstract and metadata reads that finish over HTTP do not launch it. Its HTTP resources use DNS-validated, IP-pinned GET/HEAD requests; private/reserved addresses, credentials in URLs, WebSockets, service workers, and automatic downloads are blocked. A deny-only local proxy rejects unrouted browser traffic. Login-dependent or POST-only pages can remain unavailable. This policy applies to source reading, not Google's separate native search window.
+  - `thin_text`, `navigation_only`, `blocked` and `consent_required` distinguish weak or inaccessible bodies from `full_text`. Thin factual text remains available; blocking/consent/navigation bodies are not activated as RAG evidence. `full_text` is a parsing status, not fact verification.
+
 - `project_memory_search(query, query_variants?, project_id?, include_project_ids?, all_projects?, limit?, request_id?, response_deadline_ms?)` - searches stored local knowledge only. Up to 19 optional variants run inside one broker request with batched query embeddings, RRF fusion, evidence-seeded graph expansion, and one final rerank against `query`. The response contains only bounded query-focused summaries from the final ranking; stored bodies stay in the database. A caller-supplied `request_id` makes a long query observable and cooperatively cancellable through `project_memory`. If a deadline arrives after retrieval has produced candidates, the completed lanes return as an explicitly partial result instead of being discarded. It never opens a browser or calls Google or SearchApi.
 - `project_memory(action, ...)` - manages durable project knowledge when `SURF_RESEARCH=true`.
   - `action="search"`: compatibility alias for `project_memory_search`.
@@ -232,9 +238,15 @@ Local clone variant:
   - `action="get"`: returns exact typed or legacy records through bounded UTF-8 byte spans. Set `body_bytes=0` for metadata only and use `next_body_offset` for lossless paging.
   - `action="show"`: always returns a bounded summary with counts and active record IDs. `detail_level="full"` is accepted for compatibility but never dumps every record body. Use `project_memory_search` for relevant bodies or `target_id` for one assertion or entity.
   - `action="record"`: stores the submitted body and returns only its ID, revision, and status. Receipts distinguish the original application from an idempotent replay.
+  - `record_type="ontology"` defines schema terms and optional domain/range/allowed units. `record_type="assertion"` stores separate subject/predicate/value facts with optional units and confirmed/suggested status. Untagged legacy definitions remain `legacy_unclassified`; they are not silently reclassified or discarded. Review attribution preserves actor and method; an unspecified host review does not imply human verification.
+  - `action="aggregate"`: reads every matching scoped assertion for `count`, `min`, `max`, `sum`, or `mean`, rather than aggregating top-k search hits. It reports population scope and a result hash, distinguishes empty data from numeric zero, checks units, and can compare an `expected_value`. This does not validate free-text reasoning.
   - `action="query_status"` / `action="query_cancel"`: inspects or cooperatively stops a local retrieval identified before execution by `request_id`.
   - `action="export"`: writes a standalone interactive HTML explorer, Graphviz DOT, D3 node-link JSON, or a Neo4j import bundle under `<research-root>/exports`.
-- `health()` - server status, including the local research runtime.
+- `health()` - server status, including the local Auto Ontology runtime.
+
+Embedding indexes are keyed by model, revision, dimensions, normalization, quantization, and runtime fingerprint. The current vector index supports 384 dimensions; incompatible dimensions or invalid vectors degrade that lane explicitly while lexical and graph retrieval remain available. A changed fingerprint requires rebuilding the derived vector index, not deleting source records. The vendored runtime forwards the pinned revision through tokenizer discovery, including revision-only offline caches; see [the local runtime patch](vendor/PATCHES.md).
+
+`SURF_ALLOW_PRIVATE=true` is an explicit local-test override for private-address reads. Do not enable it when processing untrusted public content.
 
 | Need | Tool |
 |---|---|
@@ -243,7 +255,29 @@ Local clone variant:
 | Compare new web results with stored project knowledge | `search` with `project_id` |
 | Run several new web queries | `search_parallel` |
 
+## Multi-part research and evidence gaps
+
+For a compound question, let the host agent split it into complementary subquestions and call `search_parallel` with the original `research_goal` and those `queries`. Keep product names, versions, exclusions, and comparison criteria in the relevant queries. This uses the host's existing reasoning; Surf does not add a paid planning model or silently generate extra queries.
+
+Quote signed literals such as `"-1"` and `"-2"` so Google does not interpret them as exclusion operators. Follow-up reads and new discovery address different gaps: reuse a known source when it can answer the missing aspect, but use a complementary query when the required source is absent. Keep the total query/read budget explicit; do not mark unresolved requirements complete just because another source was read.
+
+Inspect returned passages, then use `extract(query=..., body_handle=..., exclude_spans=...)` for unresolved aspects of an already-read source before searching again. `meta.evidence.questions` reports availability, lexical overlap, and body-quality issues, **not proof of answerability**. `meta.research_degraded` exposes unavailable memory stages; `memory_storage=not_confirmed` means no successful storage receipt was obtained. A degraded redirect is not an evidence gap and does not trigger another identical search with a larger limit. Google-only delayed redirects honor the advertised wait within a bounded deadline; CAPTCHA and login pages are not solved automatically.
+
+Ranked responses select query-focused source passages before one final output budget. Exact hashes, signed values, table headers and code remain linked to captured-text spans. Full captured bodies remain separate from the compact response; source reading and storage depth are not the amount sent to the model.
+
+`search`, `search_parallel`, and `extract` accept `evidence_mode`. The default `balanced` preserves the existing passage density. Opt-in `compact` selects up to five less-redundant, byte-efficient passages; it can omit details, so use a focused `query` and follow up through the same `body_handle`. It does not change capture depth or load another model, and it is not an exact LLM-token limit.
+
+Opt-in `coherent` keeps adjacent sentences in short paragraphs together, pairs code-form terms with their definitions, and reserves the first matching explanatory paragraph up to 500 characters within the same response budget. It can repeat previously seen context around an unseen condition and leave less room for other passages. Longer paragraphs, code, and tables retain the existing handling; no extra model is loaded. The default does not change.
+
+JSON text responses are minified. Search summaries omit redundant capture/expiry timestamps and equal-length aliases; detailed extraction receipts remain available through `extract`. Identical excerpts from the same URL and captured hash are returned once; `evidence_ref` points to the earlier result. Shared table headers and code fences may repeat as context during follow-up reads. Token savings depend on the host's serialization and the model's tokenizer, not just character count.
+
+For an unambiguous single-domain `site:example.org` query, live results are checked against that host and its subdomains before extraction, including cached results. Out-of-scope rows are omitted and reported as `site_scope_mismatch`, without repeating the search. Complex OR, multiple-site, and path-scoped expressions are left to the provider rather than reinterpreted locally.
+
 ## Replayable research collection
+
+The collection runner also accepts `search_parallel` discovery and `extract` follow-up jobs in one MCP connection. See [the source-followup workflow](./examples/research-followup-workflow.example.json). Known URLs remain replayable across restarts; transient handles do not.
+
+[The optional host policy](./examples/research-host-policy.md) covers requirement gaps, source reuse, primary-source conflicts, and bounded answers. It does not enable an extra model or change host settings automatically.
 
 `google-surf-collect` runs a versioned JSON specification through one persistent MCP session. A specification can mix live `search` jobs with local-only `project_memory_search` jobs. Live jobs can extract bodies in the same call, while local jobs reuse indexed project knowledge without opening Google.
 
@@ -272,7 +306,7 @@ Set `retrieval_mode` to `live` when prior project RAG state must not affect live
 
 This makes the collection procedure and returned snapshot replayable and auditable. Live web results can still change with time, locale, network route, and upstream ranking.
 
-## Graph hybrid RAG with ontology and lineage
+## Google Surf Auto Ontology
 
 ```mermaid
 flowchart TB
@@ -340,7 +374,7 @@ One SurrealDB instance is the authority for three distinct layers:
 - **Payloads:** exact bodies, source snapshots, manifests, and artifact references. Identical content is stored once and can be fetched by ID and byte span.
 - **Derived views:** exact, BM25, vector, code, and graph indexes plus the compact current-project view. These are versioned by source hash and can be rebuilt.
 
-A single local research broker owns the embedded RocksDB connection. Multiple MCP sessions connect through authenticated local IPC, run bounded reads concurrently, and serialize writes without opening another database process. Original evidence and historical occurrences remain addressable even when bodies, embeddings, or graph structures are deduplicated.
+A single local Auto Ontology broker owns the embedded RocksDB connection. Multiple MCP sessions connect through authenticated local IPC, run bounded reads concurrently, and serialize writes without opening another database process. Original evidence and historical occurrences remain addressable even when bodies, embeddings, or graph structures are deduplicated.
 
 ### Durable records and incremental indexing
 
@@ -349,6 +383,8 @@ A single local research broker owns the embedded RocksDB connection. Multiple MC
 `sync` accepts registered roots or explicit changed and removed paths. Unchanged roots and parent identities remain intact, a no-op does not rewrite derived indexes, and a one-file change publishes only the affected generation. Code, retrieval, and graph publication run under one durable job ID. `job_wait` uses a revision cursor, `job_cancel` stops at a safe stage boundary, and unfinished jobs resume after process restart. Under the worker soft-memory limit, foreground requests finish first; rebuildable index jobs checkpoint at a durable stage boundary and resume in the replacement worker without cancelling the committed record.
 
 ### Ontology and cross-project links
+
+Ontology records can include `definition`, project-owned `evidence_ids`, and `review_status` (`draft` by default). Mark a definition `reviewed` only after explicit host review; the server requires its definition and evidence but cannot independently certify its truth. Use `supersedes_term_id` for a changed definition or review. Project-aware web searches return up to six matching active terms in `research_context.ontology_terms`, with bounded definitions, aliases, evidence IDs, scope, and version. Unreviewed and legacy terms remain distinguishable from reviewed definitions; unrelated projects are not included.
 
 The versioned ontology preserves entity type and relation changes as revisions. Schema linking aligns project-specific types and relations with the shared schema. Entity linking connects the same paper, repository, or entity only when verifiable identifiers such as a DOI, repository URL, or explicit alias match. Ambiguous candidates are not linked automatically.
 
@@ -370,7 +406,7 @@ Project lanes read at most two scopes concurrently. Code BM25 rank metadata is s
 
 If query embedding fails or returns no vector, local search returns its lexical/graph ranking without retrying the model in reranking. Timing fields are non-overlapping wall-clock partitions: `embedding_ms` plus `retrieval_ms` reaches the end of retrieval, and `rerank_ms` covers the remaining response work. Retrieval may overlap embedding, so `retrieval_ms` is not standalone database execution time. A supplied `response_deadline_ms` starts after broker admission; the transport watchdog retains its five-minute queue/IPC allowance in addition to that deadline. Native queries that outlive a partial response retain their broker read slot until they settle.
 
-#### Research retrieval check
+#### Auto Ontology retrieval check
 
 The 60-query regression fixture compares the lexical baseline with the complete local RAG path. To separate retrieval changes from HNSW approximation, the check pins one embedding thread and uses exhaustive vector scoring. The table reports the median of three fresh-process runs:
 
@@ -399,7 +435,7 @@ The default remains HNSW for full-chunk semantic coverage. Compact indexes one r
 | Browser broker launches | 0 |
 | Active database owner restarts | 0 |
 | Query RSS delta | +10.9 MiB |
-| Peak observed research worker RSS | 375.5 MiB |
+| Peak observed Auto Ontology worker RSS | 375.5 MiB |
 | Idle drain and transparent reopen | Passed |
 | No-op sync / one-file incremental sync | Passed / Passed |
 
@@ -455,9 +491,9 @@ The offline importer creates typed node labels and relationship types. The onlin
 
 ### Storage scope and security
 
-Research mode is enabled by default. `search`, `search_parallel`, `scholar_search`, and `extract` results are captured automatically. Session intent, plans, experiments, and decisions are stored only when the MCP host sends them through `project_memory`; versioning, ontology mapping, and lineage linking then run automatically. Retrieval mode is server configuration, not a per-call argument.
+Auto Ontology is enabled by default. `search`, `search_parallel`, `scholar_search`, and `extract` results are captured automatically. Session intent, plans, experiments, and decisions are stored only when the MCP host sends them through `project_memory`; versioning, ontology mapping, and lineage linking then run automatically. Retrieval mode is server configuration, not a per-call argument.
 
-Image retrieval, image embeddings, and visual reranking are not part of research memory. OCR is used only to recover searchable text from scanned PDF pages.
+Image retrieval, image embeddings, and visual reranking are not part of Auto Ontology. OCR is used only to recover searchable text from scanned PDF pages.
 
 Credential and private-key files are excluded from body indexing. HTML exports omit source IDs, local paths, node bodies, plan text, and evidence quotes. The viewer initiates no network requests and opens stripped public HTTP or HTTPS source links only after user action.
 
@@ -471,7 +507,7 @@ Set `SURF_RESEARCH=false` to keep the database and sidecar closed and omit `proj
 
 ### Local operations CLI
 
-These commands use the same authenticated research broker as MCP sessions. They do not open another embedded database owner or browser:
+These commands use the same authenticated Auto Ontology broker as MCP sessions. They do not open another embedded database owner or browser:
 
 ```powershell
 npx google-surf-mcp doctor --json
@@ -499,13 +535,13 @@ Diagnostics also report whether the embedding model is loaded, its cached-vector
 | `SURF_BROWSER_ENGINE` | `auto` | Browser engine: `auto`, `native`, or `playwright`. Native Chrome performs the request before read-only CDP attachment. |
 | `CHROME_PATH` | auto-detected | absolute path to Chrome binary |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | where the warm profile lives |
-| `SURF_RESEARCH` | `true` | enables local project memory, capture, indexing, `project_memory_search`, and `project_memory`; set `false` for search and extraction only |
-| `SURF_RETRIEVAL_MODE` | `hybrid` | research search route: `live` or `hybrid`; used only when `SURF_RESEARCH=true` |
+| `SURF_RESEARCH` | `true` | enables Auto Ontology: local project memory, capture, indexing, `project_memory_search`, and `project_memory`; set `false` for search and extraction only |
+| `SURF_RETRIEVAL_MODE` | `hybrid` | Auto Ontology search route: `live` or `hybrid`; used only when `SURF_RESEARCH=true` |
 | `SURF_RESEARCH_ROOT` | `<profile>/research` | embedded SurrealDB data directory |
 | `SURF_RESEARCH_DB_ENDPOINT` | unset | optional remote SurrealDB endpoint; requires `wss`/`https`, except `ws`/`http` is allowed for localhost |
-| `SURF_RESEARCH_DB_NAMESPACE` | `google_surf` | SurrealDB namespace used by the research catalog |
-| `SURF_RESEARCH_DB_DATABASE` | `research` | SurrealDB database used by the research catalog |
-| `SURF_RESEARCH_DB_TOKEN` | unset | bearer token for a remote research database; alternatively set `SURF_RESEARCH_DB_USERNAME` and `SURF_RESEARCH_DB_PASSWORD` |
+| `SURF_RESEARCH_DB_NAMESPACE` | `google_surf` | SurrealDB namespace used by the Auto Ontology catalog |
+| `SURF_RESEARCH_DB_DATABASE` | `research` | SurrealDB database used by the Auto Ontology catalog |
+| `SURF_RESEARCH_DB_TOKEN` | unset | bearer token for a remote Auto Ontology database; alternatively set `SURF_RESEARCH_DB_USERNAME` and `SURF_RESEARCH_DB_PASSWORD` |
 | `SURF_RESEARCH_VECTOR_MODEL` | `Xenova/multilingual-e5-small` | local 384-dimensional model used by HNSW vector retrieval and final reranking. The default model revision is pinned; `off` disables the vector lane. |
 | `SURF_RESEARCH_VECTOR_LOW_MEMORY` | `true` | disables the ONNX CPU memory arena and memory pattern; set `false` to trade higher peak memory for faster initial indexing |
 | `SURF_RESEARCH_VECTOR_THREADS` | `4` | ONNX intra-op thread count, clamped to 1-16 |
@@ -608,8 +644,8 @@ The auth API lives at `/api/v1/auth` on the auth origin and the relay lives at `
 - Stale selectors: runtime per-strategy reorder (`SURF_SELF_HEALING`, deterministic) plus a manually dispatched repair workflow (`SURF_LLM_HEAL` optional, human review required, never auto-merged).
 - Playwright searches feel slower than expected: check `health().pool.fallback`. `true` means the worker pool is using a single context. Native search uses one authenticated local browser broker across MCP sessions. The broker keeps one hidden Chrome process with up to four reusable tabs for `search`, `search_parallel`, and `scholar_search`. Query starts are staggered. A CAPTCHA shows and preserves that session for user recovery, then the window guard is restored on the next call. A browser crash starts a new session on the next call.
 - SSRF: `extract` blocks `localhost`, private IPs, AWS metadata by default. Set `SURF_ALLOW_PRIVATE=true` to allow them.
-- Cache cleanup: `npm run cache:clear` removes search/extract and downloaded vector-model caches. It does not remove the research DB.
-- The local research DB is not application-encrypted. Use OS account permissions and disk encryption such as BitLocker or FileVault when the machine or backups need at-rest protection.
+- Cache cleanup: `npm run cache:clear` removes search/extract and downloaded vector-model caches. It does not remove the Auto Ontology DB.
+- The local Auto Ontology DB is not application-encrypted. Use OS account permissions and disk encryption such as BitLocker or FileVault when the machine or backups need at-rest protection.
 
 ## Changelog
 

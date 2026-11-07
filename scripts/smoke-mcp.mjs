@@ -15,11 +15,14 @@ const baseEnv = {
   SURF_SCHOLAR_PROVIDER: 'searchapi',
   SURF_RESEARCH_VECTOR_MODEL: 'off',
   SURF_RESEARCH_BROKER_IDLE_MS: '1000',
+  SEARCH_API: 'fixture-only-not-a-real-key',
+  SURF_PROFILE_ROOT: join(root, 'profiles'),
+  SURF_CACHE_ROOT: join(root, 'cache'),
 };
 const offClient = new Client({ name: 'google-surf-smoke-off', version: '1.0.0' });
 const offTransport = new StdioClientTransport({
   command: process.execPath,
-  args: ['build/cli.js'],
+  args: ['--import', './test/fixtures/searchapi-smoke.mjs', 'build/cli.js'],
   cwd: process.cwd(),
   env: { ...baseEnv, SURF_RESEARCH: 'false' },
   stderr: 'pipe',
@@ -101,6 +104,9 @@ try {
     }
   }
   const parallel = listed.tools.find((tool) => tool.name === 'search_parallel');
+  if (parallel?.inputSchema?.properties?.research_goal?.maxLength !== 400) {
+    throw new Error('search_parallel research goal contract missing');
+  }
   if (parallel?.inputSchema?.properties?.queries?.minItems !== 2
     || parallel?.inputSchema?.properties?.queries?.maxItems !== 12) {
     throw new Error('search_parallel query count contract mismatch');
@@ -116,13 +122,23 @@ try {
   if (!invalidLimit.isError || !invalidLimitText.includes(
     'extract_limit must be an integer between 1 and 10 for full parallel; received 11',
   )) throw new Error('search_parallel extract_limit error contract mismatch');
+  const evidence = await offClient.callTool({ name: 'search_parallel', arguments: {
+    queries: ['booking setup', 'fixture-failure', 'fixture-empty'], research_goal: 'Compare booking setup and limitations',
+    limit: 2, extract_mode: 'none',
+  } });
+  const states = evidence.structuredContent?.meta?.evidence?.questions;
+  if (evidence.isError || states?.[0]?.status !== 'sources_found'
+    || states?.[1]?.status !== 'degraded' || states?.[2]?.status !== 'empty'
+    || evidence.structuredContent?.meta?.evidence?.answerability !== 'not_assessed') {
+    throw new Error(`research-off evidence routing failed: ${JSON.stringify(evidence.structuredContent)}`);
+  }
 } finally {
   await offTransport.close();
 }
 const client = new Client({ name: 'google-surf-smoke', version: '1.0.0' });
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ['build/cli.js'],
+  args: ['--import', './test/fixtures/searchapi-smoke.mjs', 'build/cli.js'],
   cwd: process.cwd(),
   env: {
     ...baseEnv,
@@ -169,12 +185,30 @@ try {
   }
   const memoryDescription = listed.tools.find((tool) => tool.name === 'project_memory')
     ?.description ?? '';
+  for (const name of ['search', 'search_parallel', 'scholar_search']) {
+    const layer = listed.tools.find(tool => tool.name === name)?.outputSchema?.properties
+      ?.research_context?.properties?.ontology_terms?.items?.properties?.knowledge_layer;
+    if (!layer?.enum?.includes('schema') || !layer.enum.includes('legacy_unclassified')) {
+      throw new Error(`${name} legacy ontology output contract missing`);
+    }
+  }
   const brokerPhrase = 'multiple MCP sessions query the same knowledge base concurrently';
+  for (const [name, title] of Object.entries({
+    project_memory_search: 'Auto Ontology Local Search',
+    project_memory: 'Auto Ontology Project Memory',
+  })) {
+    if (listed.tools.find((tool) => tool.name === name)?.title !== title) {
+      throw new Error(`${name} Auto Ontology title mismatch`);
+    }
+  }
   for (const name of [
     'search', 'search_parallel', 'scholar_search', 'extract', 'project_memory_search', 'project_memory',
   ]) {
     const description = listed.tools.find((tool) => tool.name === name)?.description ?? '';
     if (!description.includes(brokerPhrase)) throw new Error(`${name} shared broker description missing`);
+    if (!description.includes('Google Surf Auto Ontology enabled (SURF_RESEARCH=true)')) {
+      throw new Error(`${name} Auto Ontology compatibility description missing`);
+    }
   }
   for (const phrase of [
     'PROJECT MEMORY MANAGEMENT', 'compatibility alias', 'project_memory_search',
@@ -235,6 +269,29 @@ try {
     arguments: { action: 'create', project_id: 'smoke', name: 'Smoke project' },
   });
   if (created.isError) throw new Error('project create failed');
+  for (const field of ['definition', 'review_status', 'evidence_ids']) {
+    if (!(field in memoryProperties)) throw new Error(`ontology contract missing: ${field}`);
+  }
+  const ontology = await client.callTool({ name: 'project_memory', arguments: {
+    action: 'record', record_type: 'ontology', project_id: 'smoke', ontology_kind: 'entity_type',
+    name: 'Booking', aliases: ['reservation'], definition: 'A tentative reservation.', review_status: 'draft',
+  } });
+  if (ontology.isError || ontology.structuredContent?.record?.review_status !== 'draft') {
+    throw new Error('ontology draft receipt failed');
+  }
+  const invalidReview = await client.callTool({ name: 'project_memory', arguments: {
+    action: 'record', record_type: 'ontology', project_id: 'smoke', ontology_kind: 'entity_type',
+    name: 'Booking', definition: 'Unverified review.', review_status: 'reviewed',
+  } });
+  if (!invalidReview.isError) throw new Error('ontology accepted review without evidence');
+  const scopedSearch = await client.callTool({ name: 'search', arguments: {
+    query: 'booking setup', project_id: 'smoke', limit: 2, extract_mode: 'none',
+  } });
+  if (scopedSearch.isError
+    || scopedSearch.structuredContent?.research_context?.ontology_terms?.[0]?.definition !== 'A tentative reservation.'
+    || scopedSearch.structuredContent?.meta?.evidence?.questions?.[0]?.status !== 'sources_found') {
+    throw new Error(`ontology search context failed: ${JSON.stringify(scopedSearch.structuredContent)}`);
+  }
   const profile = await client.callTool({
     name: 'project_memory',
     arguments: {
@@ -285,7 +342,7 @@ try {
     arguments: { action: 'show', project_id: 'smoke' },
   });
   if (detail.isError
-    || detail.structuredContent?.search_event_count !== 0
+    || detail.structuredContent?.search_event_count !== 1
     || detail.structuredContent?.plan_count !== 1
     || detail.structuredContent?.plans !== undefined) {
     throw new Error(`project compact show failed: ${JSON.stringify({
@@ -348,7 +405,7 @@ try {
     name: 'project_memory',
     arguments: { action: 'show', project_id: 'smoke' },
   });
-  if (afterSearch.isError || afterSearch.structuredContent?.search_event_count !== 0) {
+  if (afterSearch.isError || afterSearch.structuredContent?.search_event_count !== 1) {
     throw new Error('project local search mutated search history');
   }
   const visualization = await client.callTool({

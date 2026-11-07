@@ -15,6 +15,10 @@ import {
   SearchApiClient, SearchApiConfigError, SearchApiError, type SearchApiHandle,
 } from './searchApi.js';
 import { formatToolResponse, toErrorInfo } from './response.js';
+import { enforceSearchSiteScope } from './searchScope.js';
+import { runtimeIdentity } from './runtimeIdentity.js';
+import type { ResearchRequirement } from './researchRequirements.js';
+import { cleanCapturedText, evidenceBodiesFor, selectEvidence, type EvidenceMode, type EvidenceRange, type EvidenceSpan } from './evidence.js';
 import {
   MAX_PARALLEL_RESPONSE_RESULTS, MAX_REMAINING_URLS, SEARCH_RESPONSE_TEXT_BUDGET,
 } from './responseLimits.js';
@@ -56,6 +60,8 @@ export interface Deps {
   healing: StrategyHealing;
   acquireSeqCtx: (mode: StealthMode) => Promise<BrowserContext>;
   acquirePool: (mode: StealthMode) => Promise<PoolHandle>;
+  readSource?: (url: string, maxChars: number, mode?: ExtractMode) => Promise<ExtractResult>;
+  getReaderHealth?: () => Record<string, unknown>;
   closeSeq: () => Promise<void>;
   resetPool: () => Promise<void>;
   recoverHuman: (seedQuery?: string) => Promise<void>;
@@ -71,10 +77,70 @@ export interface SearchRunOptions {
 export type SearchExtractionMode = 'none' | 'abstract' | 'full';
 
 export interface SearchExtractionInput {
+  requirements?: ResearchRequirement[];
+  request_id?: string;
+  query?: string;
+  research_goal?: string;
   extract_mode?: SearchExtractionMode;
   extract_limit?: number;
   max_chars?: number;
   response_content?: 'summary' | 'full';
+  evidence_mode?: EvidenceMode;
+}
+
+export interface ExtractInputOptions {
+  url: string;
+  max_chars?: number;
+  mode?: ExtractMode;
+  query?: string;
+  body_handle?: string;
+  refresh?: boolean;
+  exclude_spans?: EvidenceSpan[];
+  exclude_ranges?: EvidenceRange[];
+  evidence_mode?: EvidenceMode;
+}
+
+export function readCachedExtraction(input: ExtractInputOptions, deps: Deps): CallToolResult | undefined {
+  if (input.refresh && input.body_handle) return formatToolResponse(null, {
+    code: 'INVALID_ARGUMENT', message: 'refresh cannot be combined with body_handle', retryable: false,
+  });
+  if (input.refresh) return undefined;
+  const result = evidenceBodiesFor(deps.config).get(extractionUrlKey(input.url.trim()), input.mode ?? 'full', input.body_handle);
+  if (result) return formatToolResponse({ ...result, meta: { ...asObject(result.meta), body_cache: 'hit' }, elapsed_ms: 0 });
+  if (input.body_handle) return formatToolResponse(null, {
+    code: 'INVALID_ARGUMENT', message: 'body_handle expired, was evicted, or does not match this URL and mode',
+    retryable: false, user_action: 'Use the known URL without body_handle to capture a new snapshot; do not repeat the stale handle.',
+  });
+  return undefined;
+}
+
+function retainExtraction(url: string, result: ExtractResult, mode: string, deps: Deps): Record<string, unknown> {
+  const captured_at = new Date().toISOString();
+  const body_handle = !['blocked', 'consent_required'].includes(String(result.extraction_quality))
+    ? evidenceBodiesFor(deps.config).put(extractionUrlKey(url), { ...result, captured_at }, mode)
+    : undefined;
+  return { ...result, captured_at, ...(body_handle ? {
+    body_handle, body_expires_at: evidenceBodiesFor(deps.config).get(extractionUrlKey(url), mode, body_handle)?.body_expires_at,
+  } : {}) };
+}
+
+export function retainSourceResponse(result: CallToolResult, mode: string, deps: Deps): CallToolResult {
+  if (result.isError || !result.structuredContent) return result;
+  const retain = (value: unknown): Record<string, unknown> => {
+    const row = asObject(value);
+    if (Array.isArray(row.results)) return { ...row, results: row.results.map(retain) };
+    if (typeof row.content !== 'string' || typeof row.url !== 'string' || !/^https?:\/\//i.test(row.url)
+      || row.document_id || (row.source_family && row.source_family !== 'live')) return row;
+    const content = cleanCapturedText(row.content);
+    const cached = evidenceBodiesFor(deps.config).get(extractionUrlKey(row.url), mode,
+      typeof row.body_handle === 'string' ? row.body_handle : undefined);
+    if (cached && cleanCapturedText(String(cached.content)) === content) return { ...row,
+      body_handle: cached.body_handle, body_expires_at: cached.body_expires_at };
+    const { body_handle: _handle, body_expires_at: _expires, captured_at: _at, captured_hash: _hash,
+      captured_length: _length, evidence_spans: _spans, evidence_ranges: _ranges, ...source } = row;
+    return retainExtraction(row.url, { ...source, content } as unknown as ExtractResult, mode, deps);
+  };
+  return formatToolResponse(retain(result.structuredContent));
 }
 
 export function initDeps(env: NodeJS.ProcessEnv = process.env): Pick<Deps, 'config' | 'cache' | 'cascade' | 'limiter' | 'tel' | 'healing'> {
@@ -177,6 +243,14 @@ async function executePoolWithCascade<T>(
 }
 
 export async function searchTool(
+  input: { query: string; limit?: number },
+  deps: Deps,
+  options: SearchRunOptions = {},
+): Promise<CallToolResult> {
+  return enforceSearchSiteScope(await runSearchTool(input, deps, options));
+}
+
+async function runSearchTool(
   input: { query: string; limit?: number },
   deps: Deps,
   options: SearchRunOptions = {},
@@ -541,6 +615,14 @@ export async function searchParallelTool(
   deps: Deps,
   options: SearchRunOptions = {},
 ): Promise<CallToolResult> {
+  return enforceSearchSiteScope(await runSearchParallelTool(input, deps, options));
+}
+
+async function runSearchParallelTool(
+  input: { queries: string[]; limit?: number },
+  deps: Deps,
+  options: SearchRunOptions = {},
+): Promise<CallToolResult> {
   const t0 = Date.now();
   const queries = input.queries.map(q => String(q).trim()).filter(Boolean);
   const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
@@ -603,7 +685,13 @@ export async function searchParallelTool(
           row.degraded_reasons?.length ? 'PARSER_STALE' : 'BROWSER_ERROR',
         )))).flat();
         const replacements = new Map(apiRows.map((row) => [row.query, row]));
-        const merged = results.map((row) => replacements.get(row.query) ?? { ...row, provider: 'browser' as const });
+        const merged = results.map((row) => {
+          const replacement = replacements.get(row.query);
+          return replacement && !replacement.error ? replacement : {
+            ...row, provider: 'browser' as const,
+            ...(replacement?.error ? { degraded_reasons: [...(row.degraded_reasons ?? []), 'fallback_failed'] } : {}),
+          };
+        });
         const provider = merged.every((row) => row.provider === 'searchapi') ? 'searchapi' : 'mixed';
         return parallelResponse(merged, t0, deps, provider);
       }
@@ -654,12 +742,22 @@ async function runSearchApiParallel(
   deps: Deps,
   fallbackReason?: string,
 ): Promise<PoolSearchResult[]> {
-  return await Promise.all(queries.map(async (query) => ({
-    query,
-    results: await searchApi(deps).searchGoogle(query, limit, deps.config.locale),
-    provider: 'searchapi' as const,
-    ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
-  })));
+  return await Promise.all(queries.map(async (query) => {
+    try {
+      return {
+        query, results: await searchApi(deps).searchGoogle(query, limit, deps.config.locale),
+        provider: 'searchapi' as const,
+        ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+      };
+    } catch (error) {
+      recordToolError(deps, 'search_parallel', error);
+      return {
+        query, results: [], provider: 'searchapi' as const,
+        error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+        ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+      };
+    }
+  }));
 }
 
 function parallelResponse(
@@ -692,16 +790,18 @@ function parallelResponse(
 }
 
 export async function extractTool(
-  input: { url: string; max_chars?: number; mode?: ExtractMode },
+  input: ExtractInputOptions,
   deps: Deps,
 ): Promise<CallToolResult> {
   const t0 = Date.now();
   const url = input.url.trim();
+  const cached = readCachedExtraction(input, deps);
+  if (cached) return cached;
   const mode: ExtractMode = input.mode ?? 'full';
   const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
   const responseMaxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
-  const maxChars = mode === 'full' && deps.config.researchEnabled
-    ? MAX_RESEARCH_CAPTURE_CHARS
+  const maxChars = mode === 'full'
+    ? deps.config.researchEnabled ? MAX_RESEARCH_CAPTURE_CHARS : 50_000
     : responseMaxChars;
 
   if (!url) {
@@ -712,8 +812,9 @@ export async function extractTool(
 
   try {
     const initialMode: StealthMode = deps.cascade.mode;
-    const pool = await deps.acquirePool(initialMode);
-    const result = await pool.extractOne(url, maxChars, mode);
+    const result = deps.readSource
+      ? await deps.readSource(url, maxChars, mode)
+      : await (await deps.acquirePool(initialMode)).extractOne(url, maxChars, mode);
     const failed = !!result.error && !result.content;
 
     if (failed) {
@@ -722,16 +823,19 @@ export async function extractTool(
         errorCode: 'EXTRACT_FAILED',
         retryable: true,
       }).catch(() => {});
-      return formatToolResponse(null, {
+      const failedResponse = formatToolResponse(null, {
         code: 'EXTRACT_FAILED',
         message: typeof result.error === 'string' ? result.error : 'unknown extract failure',
         retryable: true,
         retry_after_ms: 1000,
       });
+      return { ...failedResponse, structuredContent: { ...failedResponse.structuredContent,
+        url, extraction_quality: result.extraction_quality, quality_reason: result.quality_reason,
+      } };
     }
 
     return formatToolResponse(
-      { ...result, elapsed_ms: Date.now() - t0 },
+      { ...retainExtraction(url, result, mode, deps), elapsed_ms: Date.now() - t0 },
     );
   } catch (e) {
     recordToolError(deps, 'extract', e);
@@ -766,13 +870,15 @@ function extractionError(result: CallToolResult): string | undefined {
 
 function extractionPatch(result: CallToolResult): Record<string, unknown> {
   const error = extractionError(result);
-  if (error) return { extract_error: error };
+  if (error) return { extract_error: error, extraction_quality: result.structuredContent?.extraction_quality,
+    quality_reason: result.structuredContent?.quality_reason };
   const data = asObject(result.structuredContent);
   return Object.fromEntries([
     'content', 'excerpt', 'length', 'source_length', 'truncated', 'is_pdf', 'page_count', 'extraction_quality',
     'authors', 'publication', 'published_at', 'year', 'doi', 'description',
     'keywords', 'canonical_url', 'language', 'subject', 'creator', 'producer',
     'created_at', 'modified_at',
+    'quality_reason', 'body_handle', 'body_expires_at', 'captured_at',
   ].flatMap((key) => data[key] === undefined ? [] : [[key, data[key]]]));
 }
 
@@ -813,13 +919,15 @@ async function extractUrls(
   const patches = new Map<string, Record<string, unknown>>();
   if (urls.length) {
     try {
-      const pool = await deps.acquirePool(deps.cascade.mode);
+      const pool = deps.readSource ? undefined : await deps.acquirePool(deps.cascade.mode);
       await Promise.all(urls.map(async (url) => {
         try {
-          const result = await pool.extractOne(url, maxChars, mode);
+          const cached = evidenceBodiesFor(deps.config).get(extractionUrlKey(url), mode);
+          const result = cached ?? (deps.readSource
+            ? await deps.readSource(url, maxChars, mode) : await pool!.extractOne(url, maxChars, mode));
           patches.set(extractionUrlKey(url), result.error && !result.content
-            ? { extract_error: result.error }
-            : extractionPatch(formatToolResponse({ ...result })));
+            ? { extract_error: result.error, extraction_quality: result.extraction_quality, quality_reason: result.quality_reason }
+            : extractionPatch(formatToolResponse(cached ?? retainExtraction(url, result as ExtractResult, mode, deps))));
         } catch (error) {
           patches.set(extractionUrlKey(url), {
             extract_error: error instanceof Error ? error.message : String(error),
@@ -873,8 +981,8 @@ function extractionSettings(input: SearchExtractionInput, deps: Deps, scope: Sea
   const limit = parseSearchExtractLimit(input.extract_limit, scope, mode);
   const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
   const responseMaxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
-  const extractMaxChars = mode === 'full' && deps.config.researchEnabled
-    ? MAX_RESEARCH_CAPTURE_CHARS
+  const extractMaxChars = mode === 'full'
+    ? deps.config.researchEnabled ? MAX_RESEARCH_CAPTURE_CHARS : 50_000
     : responseMaxChars;
   return { mode, limit, extractMaxChars };
 }
@@ -951,17 +1059,26 @@ export async function applyParallelSearchExtraction(
   return withExtraction(result, results, extracted.summary, elapsed);
 }
 
-function shapeRowContent(row: Record<string, unknown>, maxChars: number): {
+function shapeRowContent(row: Record<string, unknown>, maxChars: number, query = '', excluded: EvidenceSpan[] = [], mode: EvidenceMode = 'balanced'): {
   row: Record<string, unknown>;
   truncated: boolean;
 } {
-  if (typeof row.content !== 'string' || row.content.length <= maxChars) {
-    return { row, truncated: false };
-  }
-  const content = row.content.slice(0, maxChars);
+  if (typeof row.content !== 'string') return { row, truncated: false };
+  const raw = cleanCapturedText(row.content);
+  const selected = query || excluded.length || mode === 'compact'
+    ? selectEvidence(raw, query, maxChars, excluded, mode)
+    : { ...selectEvidence(raw, '', 0), text: raw.slice(0, maxChars),
+      spans: raw ? [{ start: 0, end: Math.min(raw.length, maxChars) }] : [],
+      truncated: raw.length > maxChars };
+  const { excerpt: _excerpt, evidence_ranges: _ranges, ...metadata } = row;
   return {
-    row: { ...row, content, excerpt: content.slice(0, 200) },
-    truncated: true,
+    row: { ...metadata, content: selected.text, length: selected.text.length,
+      captured_hash: selected.captured_hash, captured_length: selected.captured_length,
+      evidence_spans: selected.spans,
+      ...(selected.truncated || row.truncated ? { truncated: true } : {}),
+      ...(excluded.length && !selected.text ? { no_additional_passages: true } : {}),
+    },
+    truncated: selected.truncated,
   };
 }
 
@@ -969,24 +1086,40 @@ function shapeSearchResultRow(
   value: unknown,
   contentMaxChars: number,
   rowTextBudget: number,
+  query: string,
+  responseContent: 'summary' | 'full',
+  evidenceMode: EvidenceMode,
 ): { row: Record<string, unknown>; truncated: boolean } {
   const row = asObject(value);
   const description = typeof row.description === 'string' ? row.description : '';
   const content = typeof row.content === 'string' ? row.content : '';
+  if (responseContent === 'summary') {
+    const selected = selectEvidence(content || description, query, Math.min(contentMaxChars, rowTextBudget), [], evidenceMode);
+    const { content: _content, excerpt: _excerpt, captured_at: _at, body_expires_at: _expires,
+      evidence_spans: _spans, evidence_ranges: _ranges, ...metadata } = row;
+    if (metadata.length === selected.captured_length) delete metadata.length;
+    if (metadata.source_length === selected.captured_length) delete metadata.source_length;
+    return { row: { ...metadata, title: String(row.title ?? '').slice(0, 300), url: String(row.url ?? '').slice(0, 2048),
+      description: selected.text, captured_hash: selected.captured_hash,
+      captured_length: selected.captured_length, evidence_ranges: selected.spans.map(s => [s.start, s.end]),
+      ...(selected.truncated || row.truncated ? { truncated: true } : {}),
+    }, truncated: selected.truncated };
+  }
   const descriptionLimit = content
     ? Math.min(240, Math.max(80, Math.floor(rowTextBudget / 4)))
     : rowTextBudget;
   const nextDescription = description.slice(0, descriptionLimit);
   const contentLimit = Math.min(contentMaxChars, Math.max(0, rowTextBudget - nextDescription.length));
-  const nextContent = content.slice(0, contentLimit);
-  const truncated = nextDescription.length < description.length || nextContent.length < content.length;
+  const shaped = shapeRowContent(row, contentLimit, query, [], evidenceMode);
+  const nextContent = typeof shaped.row.content === 'string' ? shaped.row.content : '';
+  const truncated = nextDescription.length < description.length || shaped.truncated;
   return {
     row: {
-      ...row,
+      ...shaped.row,
       title: typeof row.title === 'string' ? row.title.slice(0, 300) : row.title,
       url: typeof row.url === 'string' ? row.url.slice(0, 2_048) : row.url,
       description: nextDescription,
-      ...(content ? { content: nextContent, excerpt: nextContent.slice(0, 200) } : {}),
+      ...(content ? { content: nextContent } : {}),
       ...(truncated ? { truncated: true } : {}),
     },
     truncated,
@@ -1018,16 +1151,18 @@ function boundedParallelGroups(groups: Array<Record<string, unknown>>): {
 
 export function shapeExtractionResponse(
   result: CallToolResult,
-  input: Pick<SearchExtractionInput, 'max_chars' | 'response_content'>,
+  input: Pick<SearchExtractionInput, 'max_chars' | 'response_content' | 'query' | 'research_goal' | 'evidence_mode'> & { exclude_spans?: EvidenceSpan[]; exclude_ranges?: EvidenceRange[] },
   defaultResponse: 'summary' | 'full',
 ): CallToolResult {
   if (result.isError || !result.structuredContent) return result;
   const responseContent = input.response_content ?? defaultResponse;
+  const evidenceMode = input.evidence_mode ?? 'balanced';
   const fullMax = Math.min(Math.max(input.max_chars ?? 50_000, 200), 50_000);
   const responseMax = responseContent === 'summary' ? SUMMARY_RESPONSE_CHARS : fullMax;
   let responseTruncated = false;
+  const excluded = [...input.exclude_spans ?? [], ...(input.exclude_ranges ?? []).map(([start, end]) => ({ start, end }))];
   const shape = (row: unknown): Record<string, unknown> => {
-    const shaped = shapeRowContent(asObject(row), responseMax);
+    const shaped = shapeRowContent(asObject(row), responseMax, input.query, excluded, evidenceMode);
     responseTruncated ||= shaped.truncated;
     return shaped.row;
   };
@@ -1045,9 +1180,21 @@ export function shapeExtractionResponse(
       ? sourceGroups!.originalCount
       : data.results.length;
     const rowTextBudget = Math.max(200, Math.floor(SEARCH_RESPONSE_TEXT_BUDGET / Math.max(resultCount, 1)));
-    const shapeResult = (row: unknown): Record<string, unknown> => {
-      const shaped = shapeSearchResultRow(row, responseMax, rowTextBudget);
+    const seen = new Map<string, string>();
+    let duplicateChars = 0;
+    const shapeResult = (row: unknown, query: string): Record<string, unknown> => {
+      const shaped = shapeSearchResultRow(row, responseMax, rowTextBudget, query, responseContent, evidenceMode);
       responseTruncated ||= shaped.truncated;
+      if (responseContent === 'summary') {
+        const key = `${shaped.row.url}\0${shaped.row.captured_hash}\0${shaped.row.description}`;
+        const reference = seen.get(key), text = String(shaped.row.description ?? '');
+        if (reference && Buffer.byteLength(text) > Buffer.byteLength(reference) + 96) {
+          duplicateChars += text.length;
+          const { evidence_ranges: _ranges, ...metadata } = shaped.row;
+          return { ...metadata, description: '', evidence_ref: reference };
+        }
+        seen.set(key, String(shaped.row.url));
+      }
       return shaped.row;
     };
     shapedData = {
@@ -1057,22 +1204,30 @@ export function shapeExtractionResponse(
           const value = asObject(group);
           return {
             ...value,
-            results: Array.isArray(value.results) ? value.results.map(shapeResult) : [],
+            results: Array.isArray(value.results) ? value.results.map((row) => shapeResult(row,
+              [input.research_goal, value.query].filter(Boolean).join('\n'))) : [],
           };
         })
-        : data.results.map(shapeResult),
+        : data.results.map((row) => shapeResult(row, input.query ?? String(data.query ?? ''))),
       meta: {
         ...asObject(data.meta),
+        response_format: responseContent === 'summary' ? 'ranked_summaries' : 'ranked_passages',
         response: {
           format: 'bounded_ranked_results',
           returned_results: resultCount,
           omitted_results: originalCount - resultCount,
           text_budget_chars: SEARCH_RESPONSE_TEXT_BUDGET,
+          response_content: responseContent,
+          selector: 'query_passages_v1',
+          evidence_mode: evidenceMode,
+          range_unit: 'utf16',
+          ...(duplicateChars ? { omitted_duplicate_chars: duplicateChars } : {}),
         },
       },
     };
   } else {
     shapedData = shape(data);
+    if (input.evidence_mode) shapedData.meta = { ...asObject(shapedData.meta), evidence_mode: evidenceMode };
   }
   const meta = asObject(shapedData.meta);
   const extraction = asObject(meta.extraction);
@@ -1134,6 +1289,7 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
   };
   return formatToolResponse({
     version: VERSION,
+    runtime_identity: runtimeIdentity(),
     cascade: {
       mode: deps.cascade.mode,
       captchaCountInMode: deps.cascade.captchaCountInMode,
@@ -1148,6 +1304,8 @@ export async function healthTool(deps: Deps): Promise<CallToolResult> {
       queueSize: deps.limiter.queueSize,
     },
     cache: cacheStats,
+    evidence_cache: evidenceBodiesFor(deps.config).stats(),
+    extraction_reader: deps.getReaderHealth?.() ?? {},
     pool: deps.getPoolHealth(),
     telemetry: {
       enabled: deps.config.telemetryEnabled,

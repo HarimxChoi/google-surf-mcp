@@ -1,5 +1,6 @@
 import type { CallToolResult } from '../response.js';
 import { formatToolResponse } from '../response.js';
+import { selectEvidence } from '../evidence.js';
 import {
   RANKED_SUMMARY_MAX_CHARS, RANKED_SUMMARY_MIN_CHARS, SEARCH_RESPONSE_TEXT_BUDGET,
 } from '../responseLimits.js';
@@ -28,52 +29,6 @@ type RankedCandidate = {
 
 type LocalInput = LocalSearchHit[] | LocalSearchFamilies;
 
-function normalizedSegments(value: unknown): string[] {
-  if (typeof value !== 'string') return [];
-  return value
-    .replace(/--- (?:BEGIN|END) UNTRUSTED CONTENT ---/g, ' ')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
-    .split(/\r?\n+|(?<=[.!?])\s+/u)
-    .map((segment) => segment.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-}
-
-function queryTerms(query: string): string[] {
-  return [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) ?? [])]
-    .sort((a, b) => b.length - a.length);
-}
-
-function rankedSummary(query: string, row: RankedCandidate, maxChars: number): string {
-  const seen = new Set<string>();
-  const segments = [row.description, row.content, row.excerpt]
-    .flatMap(normalizedSegments)
-    .filter((segment) => {
-      const key = segment.toLocaleLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  const terms = queryTerms(query);
-  const ranked = segments
-    .map((segment, index) => ({
-      segment,
-      index,
-      score: terms.reduce((score, term) => score + (segment.toLocaleLowerCase().includes(term) ? 1 : 0), 0),
-    }))
-    .sort((a, b) => b.score - a.score || a.index - b.index);
-  const selected: string[] = [];
-  let length = 0;
-  for (const candidate of ranked) {
-    const separator = selected.length ? 3 : 0;
-    if (selected.length && length + separator + candidate.segment.length > maxChars) continue;
-    selected.push(candidate.segment);
-    length += separator + candidate.segment.length;
-    if (selected.length >= 3 || length >= maxChars * 0.8) break;
-  }
-  const summary = selected.join(' | ') || String(row.title ?? '');
-  return summary.slice(0, maxChars);
-}
-
 export function compactRankedResults(
   query: string,
   rows: RankedCandidate[],
@@ -84,9 +39,12 @@ export function compactRankedResults(
   );
   return rows.map((row) => {
     const { content: _content, excerpt: _excerpt, _rrf_score: _rrfScore, ...metadata } = row;
+    const selected = selectEvidence(row.content || row.description || row.excerpt || '', query, summaryLimit);
     return {
       ...metadata,
-      description: rankedSummary(query, row, summaryLimit),
+      description: selected.text || row.title,
+      captured_hash: selected.captured_hash, captured_length: selected.captured_length,
+      evidence_ranges: selected.spans.map(s => [s.start, s.end]),
     };
   });
 }

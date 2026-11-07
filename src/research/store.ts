@@ -7,7 +7,7 @@ import { isRetryableTransactionError, isTransactionConflict } from './errors.js'
 import type {
   ArtifactReference, CatalogAccessTier, CatalogAssetKind, CatalogAssetRecord, CatalogRecordReadback,
   CatalogRevisionRecord, CatalogTimelineEvent, CatalogWriteOperation, DurableWriteReceipt,
-  AssertionCorrectionRecord, AssertionRecord, CodeRelationRecord, CodeSymbolRecord,
+  AssertionAggregateInput, AssertionCorrectionRecord, AssertionRecord, CodeRelationRecord, CodeSymbolRecord,
   DecisionRecord, DocumentRecordReadback, EvidenceRecord,
   EntityAliasRecord, EntityOperationRecord, EntityRecord, ExperimentRunRecord,
   GraphAnalysis, GraphArtifact, GraphProjection, IntentRevisionRecord,
@@ -18,7 +18,8 @@ import type {
   RetrievalIndexItem, SearchEventRecord, SourceRecordReadback,
 } from './contracts.js';
 import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
-import { cosineSimilarity } from './dense.js';
+import { cosineSimilarity, validateEmbeddingBatch } from './dense.js';
+import { summarizeAssertionAggregate, type NumericGroup } from './aggregate.js';
 import { applyEmbeddedStorageDefaults } from './resources.js';
 
 const SCHEMA = `
@@ -1271,6 +1272,19 @@ export class ResearchStore {
       .sort((a, b) => a.name.localeCompare(b.name) || a.version - b.version);
   }
 
+  async findOntologyTerms(projectId: string, labels: string[]): Promise<OntologyTermRecord[]> {
+    const db = await this.open();
+    const [rows] = await db.query<[RecordWithId<OntologyTermRecord>[]]>(
+      `SELECT * FROM ontology_term
+       WHERE (project_id = $project OR project_id = NONE) AND status = 'active'
+       AND (string::lowercase(name) IN $labels
+         OR array::any(aliases, |$alias| string::lowercase($alias) IN $labels))
+       ORDER BY name, version DESC LIMIT 12;`,
+      { project: projectId, labels },
+    ).collect();
+    return rows.map((row) => withoutId(row));
+  }
+
   async putOntologyRevision(
     prior: OntologyTermRecord | undefined,
     term: OntologyTermRecord,
@@ -2105,6 +2119,7 @@ export class ResearchStore {
     embeddingModel: string,
     embedding: number[],
   ): Record<string, unknown> & { id: RecordId } {
+    validateEmbeddingBatch([embedding], 1);
     return {
       id: new RecordId('retrieval_vector', createHash('sha256')
         .update(`${item.project_id}\0${item.item_id}`).digest('hex')),
@@ -2927,6 +2942,45 @@ export class ResearchStore {
     return rows;
   }
 
+  async findContextAssertions(projectId: string, labels: string[]): Promise<AssertionRecord[]> {
+    const db = await this.open();
+    const [rows] = await db.query<[AssertionRecord[]]>(
+      `SELECT * OMIT id FROM assertion WHERE project_id = $project_id
+       AND status IN ['suggested', 'confirmed'] AND (string::lowercase(subject) IN $labels OR string::lowercase(predicate) IN $labels)
+       ORDER BY recorded_at DESC LIMIT 6`, { project_id: projectId, labels },
+    ).collect();
+    return rows;
+  }
+
+  async aggregateAssertions(projectIds: string[], input: AssertionAggregateInput) {
+    const db = await this.open();
+    const observedAt = new Date().toISOString();
+    const where = `project_id IN $project_ids AND ($predicate = NONE OR predicate = $predicate)
+      AND ($subject = NONE OR subject = $subject)
+      AND (status = $status OR ($historical = true AND status = 'superseded' AND superseded_from_status = $status))
+      AND recorded_at <= $recorded_as_of AND (recorded_until = NONE OR recorded_until > $recorded_as_of)
+      AND (valid_from = NONE OR valid_from <= $valid_at) AND (valid_to = NONE OR valid_to > $valid_at)`;
+    const params = { project_ids: projectIds, predicate: input.predicate, subject: input.subject, status: input.status ?? 'confirmed',
+      historical: Boolean(input.recorded_as_of), recorded_as_of: input.recorded_as_of ?? observedAt, valid_at: input.valid_at ?? observedAt };
+    const data = await this.transaction(db, async tx => {
+      if (input.recorded_as_of) {
+        const [unknown] = await tx.query<[Array<{ count: number }>]>(`SELECT count() AS count FROM assertion WHERE project_id IN $project_ids
+          AND ($predicate = NONE OR predicate = $predicate) AND ($subject = NONE OR subject = $subject)
+          AND recorded_at <= $recorded_as_of AND (recorded_until = NONE OR recorded_until > $recorded_as_of)
+          AND (status = 'forgotten' OR (status = 'superseded' AND superseded_from_status = NONE)) GROUP ALL`,params).collect();
+        if (unknown[0]?.count) throw new Error('historical assertion status is unavailable for legacy or forgotten records; inspect their revisions instead of treating an incomplete population as complete');
+      }
+      const [counts] = await tx.query<[Array<{ matched:number }>]>(`SELECT count() AS matched FROM assertion WHERE ${where} GROUP ALL`,params).collect();
+      if (input.operation === 'count') return summarizeAssertionAggregate(input,counts[0]?.matched ?? 0,[]);
+      const [groups] = await tx.query<[NumericGroup[]]>(`SELECT unit, count() AS numeric_count, math::sum(value) AS sum, math::min(value) AS min, math::max(value) AS max
+         FROM assertion WHERE ${where} AND type::is_number(value) GROUP BY unit LIMIT 101`,params).collect();
+      return summarizeAssertionAggregate(input, counts[0]?.matched ?? 0, groups);
+    });
+    return { ...data, population: { scope: 'all_matching_assertions', complete: true, project_ids: projectIds,
+      predicate: input.predicate ?? null, subject: input.subject ?? null, status: input.status ?? 'confirmed',
+      recorded_as_of: params.recorded_as_of, valid_at: params.valid_at }, observed_at: observedAt, source: 'database_aggregate', top_k_used: false };
+  }
+
   async findAssertion(input: {
     projectId: string;
     subject: string;
@@ -3105,7 +3159,17 @@ export class ResearchStore {
     embedding: number[],
     limit: number,
   ): Promise<LocalSearchHit[]> {
+    validateEmbeddingBatch([embedding], 1);
     const db = await this.open();
+    const assertFingerprint = async () => {
+      const [models] = await db.query<[Array<{ embedding_model: string }>]>(
+        'SELECT embedding_model FROM retrieval_vector WHERE project_id = $project_id GROUP BY embedding_model',
+        { project_id: projectId },
+      ).collect();
+      if (models.length && !models.some(row => row.embedding_model === embeddingModel)) {
+        throw new Error('embedding index fingerprint mismatch; rebuild derived indexes with the current provider; source records remain preserved');
+      }
+    };
     const cappedLimit = Math.min(Math.max(limit, 1), 100);
     if (this.vectorBackend !== 'exhaustive') {
       const [scope] = await db.query<[Array<Omit<RetrievalReference, 'score'> & { embedding: number[] }>]>(
@@ -3115,6 +3179,7 @@ export class ResearchStore {
         { project_id: projectId, embedding_model: embeddingModel, scope_limit: 1_025 },
       ).collect();
       if (scope.length <= 1_024) {
+        if (!scope.length) await assertFingerprint();
         const references = scope.map(({ embedding: stored, ...row }) => ({
           ...row, score: cosineSimilarity(stored, embedding),
         })).sort((left, right) => stableVectorScore(right.score) - stableVectorScore(left.score)
@@ -3152,6 +3217,7 @@ export class ResearchStore {
         )) === index)
         .slice(0, cappedLimit)
         .map(({ embedding: _embedding, ...row }) => row);
+      if (!ranked.length) await assertFingerprint();
       return await this.hydrateRetrieval(references, 'vector');
     }
     type KnnRow = Omit<RetrievalReference, 'score'> & { distance: number };

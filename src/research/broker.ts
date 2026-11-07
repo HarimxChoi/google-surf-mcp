@@ -22,6 +22,7 @@ export function researchBrokerTimeoutMs(method: string, args: unknown[]): number
 }
 
 export const RESEARCH_BROKER_METHODS = new Set([
+  'aggregateAssertions',
   'capture',
   'correctAssertion',
   'createPlan',
@@ -55,6 +56,7 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'previewForgetProject',
   'rebuildDerivedState',
   'recordDecision',
+  'recordAssertion',
   'recordOntologyTerm',
   'recordSessionIntent',
   'requestDrain',
@@ -78,6 +80,7 @@ export const RESEARCH_BROKER_METHODS = new Set([
 ]);
 
 export const RESEARCH_BROKER_READ_METHODS = new Set([
+  'aggregateAssertions',
   'getAssertion',
   'getCatalogRecord',
   'getCatalogRecords',

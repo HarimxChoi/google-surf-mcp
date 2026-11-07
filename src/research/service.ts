@@ -5,10 +5,11 @@ import { createRequire } from 'node:module';
 import { mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { fenceUntrustedContent } from '../response.js';
+import { usableEvidence } from '../extractionQuality.js';
 import { MAX_RESEARCH_CAPTURE_CHARS } from '../searchLimits.js';
 import { VERSION } from '../version.js';
 import type {
-  ArtifactReference, CatalogAccessTier, CatalogAssetKind, CatalogRecordReadback, CatalogTimelineEvent,
+  ArtifactReference, AssertionAggregateInput, CatalogAccessTier, CatalogAssetKind, CatalogRecordReadback, CatalogTimelineEvent,
   CatalogWriteOperation, DurableWriteReceipt, LegacyRecordReadback,
   AssertionCorrectionRecord, AssertionRecord, AssertionValue, CaptureResult, DecisionRecord, DocumentRecordReadback,
   EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord,
@@ -21,7 +22,7 @@ import type {
   ResearchSearchContext, ResearchSearchFilters, SearchEventRecord, SourceRecordReadback,
 } from './contracts.js';
 import { runCodeStructureBatchStream, type CodeSourceInput } from './codeStructure.js';
-import { cosineSimilarity, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
+import { cosineSimilarity, embeddingContract, embeddingIndexKey, validateEmbeddingBatch, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
 import { embeddedStorageEnvironment, embeddingBatchSize } from './resources.js';
 import { aliasId, entityId, normalizeEntityName, rankEntityCandidates } from './entities.js';
 import { buildGraphProjection, type ProjectGraphSource } from './graphProjection.js';
@@ -127,6 +128,7 @@ export interface ResearchPassiveStatus extends ResearchServiceStatus {
     remote_endpoint?: string;
     vector_index: 'hnsw' | 'exhaustive' | 'compact';
     vector_dimensions: number;
+    embedding_contract?: ReturnType<typeof embeddingContract>;
     embedding?: import('./dense.js').EmbeddingDiagnostics;
     storage_cache_budgets?: Record<string, string>;
     passive_health_opens_database: false;
@@ -270,6 +272,7 @@ interface EvidenceInput {
 }
 
 interface AssertionInput {
+  unit?: string;
   project_id: string;
   subject: string;
   predicate: string;
@@ -931,6 +934,7 @@ export class ResearchService {
         ...(remoteEndpoint ? { remote_endpoint: remoteEndpoint } : {}),
         vector_index: this.options.vectorBackend ?? 'hnsw',
         vector_dimensions: this.embeddings.dimensions(),
+        embedding_contract: embeddingContract(this.embeddings),
         ...(this.embeddings.diagnostics ? { embedding: this.embeddings.diagnostics() } : {}),
         ...(!remoteEndpoint ? { storage_cache_budgets: embeddedStorageEnvironment() } : {}),
         passive_health_opens_database: false,
@@ -1007,7 +1011,7 @@ export class ResearchService {
   }
 
   private async ready(): Promise<void> {
-    if (!this.options.enabled) throw new Error('research memory disabled');
+    if (!this.options.enabled) throw new Error('Auto Ontology is disabled (SURF_RESEARCH=false)');
     try {
       await this.store.open();
       this.state = 'ready';
@@ -3057,10 +3061,17 @@ export class ResearchService {
   }
 
   async recordOntologyTerm(input: {
+    review?: { actor: string; method: 'human' | 'model' | 'rule' | 'host_unspecified'; reviewed_at?: string };
+    domain?: string[];
+    range?: string[];
+    allowed_units?: string[];
     project_id?: string;
     kind: OntologyTermRecord['kind'];
     name: string;
     aliases?: string[];
+    definition?: string;
+    evidence_ids?: string[];
+    review_status?: 'draft' | 'reviewed';
     version?: number;
     supersedes_term_id?: string;
   }): Promise<OntologyTermRecord> {
@@ -3077,22 +3088,55 @@ export class ResearchService {
     if (!Number.isInteger(version) || version < 1) throw new Error('version must be a positive integer');
     if (prior && version <= prior.version) throw new Error('ontology revision version must increase');
     const scope = input.project_id ?? 'core';
+    const definition = input.definition === undefined ? undefined : cleanText(input.definition, 'definition', 2_000);
+    const evidenceIds = [...new Set(input.evidence_ids ?? [])];
+    const evidence = await Promise.all(evidenceIds.map((id) => this.store.getEvidence(id)));
+    if (evidence.some((row) => !row || !input.project_id || row.project_id !== input.project_id)) {
+      throw new Error('ontology evidence_ids must belong to the project');
+    }
+    if (input.review_status === 'reviewed' && (!definition || !evidenceIds.length)) {
+      throw new Error('reviewed ontology terms require definition and project evidence_ids; use draft for unverified definitions');
+    }
     const termId = createHash('sha256')
       .update(`${scope}\0${input.kind}\0${name}\0${version}`)
       .digest('hex')
       .slice(0, 24);
+    const existing = await this.store.getOntologyTerm(termId);
+    if (input.review && input.review_status !== 'reviewed') throw new Error('review metadata requires review_status=reviewed');
+    const review = input.review_status === 'reviewed' ? {
+      actor: input.review ? cleanText(input.review.actor, 'review actor', 200) : 'unspecified_host',
+      method: input.review?.method ?? 'host_unspecified' as const,
+      reviewed_at: cleanTime(input.review?.reviewed_at, 'reviewed_at') ?? existing?.review?.reviewed_at ?? new Date().toISOString(),
+    } : undefined;
     const term: OntologyTermRecord = {
+      knowledge_layer: 'schema',
+      ...(review ? { review } : {}),
+      ...Object.fromEntries(['domain', 'range', 'allowed_units'].filter(key => input[key as 'domain'] !== undefined)
+        .map(key => [key, [...new Set(input[key as 'domain']!.map(value => cleanText(value, key, 200)))].slice(0, 20)])),
       term_id: termId,
       ...(input.project_id ? { project_id: input.project_id } : {}),
       kind: input.kind,
       name,
       aliases: [...new Set((input.aliases ?? [])
         .map((alias) => cleanText(alias, 'alias', 200)))].slice(0, 50),
+      ...(definition ? { definition } : {}),
+      evidence_ids: evidenceIds,
+      review_status: input.review_status ?? 'draft',
       version,
       status: 'active',
       ...(input.supersedes_term_id ? { supersedes_term_id: input.supersedes_term_id } : {}),
       created_at: new Date().toISOString(),
     };
+    if (existing && (existing.definition !== undefined || definition !== undefined
+      || existing.evidence_ids?.length || evidenceIds.length
+      || existing.review_status === 'reviewed' || input.review_status === 'reviewed')) {
+      const { created_at: _oldTime, ...oldValue } = existing;
+      const { created_at: _newTime, ...newValue } = term;
+      if (stableJson({ evidence_ids: [], review_status: 'draft', ...oldValue }) !== stableJson(newValue)) {
+        throw new Error('ontology revision already exists; use supersedes_term_id to record a new definition or review');
+      }
+      return existing;
+    }
     await this.store.putOntologyRevision(prior, term);
     const projects = input.project_id
       ? [input.project_id]
@@ -3383,6 +3427,7 @@ export class ResearchService {
       project_id: project.project_id,
       subject: cleanText(input.subject, 'subject', 2_000),
       predicate: cleanText(input.predicate, 'predicate', 200),
+      ...(input.unit ? { unit: cleanText(input.unit, 'unit', 80) } : {}),
       ...target,
       status,
       source: input.source,
@@ -3395,6 +3440,17 @@ export class ResearchService {
     });
     await this.invalidateGraph(project.project_id);
     return stored;
+  }
+
+  async aggregateAssertions(projectIds: string[], input: AssertionAggregateInput) {
+    if (!projectIds.length) throw new Error('at least one project is required');
+    for (const id of projectIds) await this.ensureProject(id);
+    if (!['count', 'min', 'max', 'sum', 'mean'].includes(input.operation)) throw new Error('unsupported aggregate operation');
+    const normalized = { ...input, ...(input.predicate ? { predicate: cleanText(input.predicate, 'predicate', 200) } : {}),
+      ...(input.subject ? { subject: cleanText(input.subject, 'subject', 2000) } : {}),
+      ...(input.unit ? { unit: cleanText(input.unit, 'unit', 80) } : {}),
+      valid_at: cleanTime(input.valid_at, 'valid_at'), recorded_as_of: cleanTime(input.recorded_as_of, 'recorded_as_of') };
+    return await this.store.aggregateAssertions([...new Set(projectIds)].sort(), normalized);
   }
 
   async correctAssertion(input: AssertionCorrectionInput): Promise<{
@@ -3431,6 +3487,7 @@ export class ResearchService {
     if (validFrom && validTo && validFrom > validTo) throw new Error('valid_from must precede valid_to');
     const now = new Date().toISOString();
     const replacement: AssertionRecord = {
+      ...(target.unit ? { unit: target.unit } : {}),
       assertion_id: randomUUID(),
       project_id: project.project_id,
       subject: target.subject,
@@ -3456,6 +3513,7 @@ export class ResearchService {
     await this.store.putAssertionCorrection({
       ...target,
       status: 'superseded',
+      superseded_from_status: target.status,
       recorded_until: now,
     }, replacement, correction);
     await this.invalidateGraph(project.project_id);
@@ -3742,7 +3800,7 @@ export class ResearchService {
     const delta = await this.store.planRetrievalItemDelta(projectId, sourceFamily, items).catch((error) => {
       throw new Error(`retrieval item-state planning: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     });
-    const model = this.embeddings.modelId();
+    const model = embeddingIndexKey(this.embeddings);
     if (!model) {
       await this.store.commitRetrievalGeneration(projectId, sourceFamily, digest, delta);
       return undefined;
@@ -3823,6 +3881,7 @@ export class ResearchService {
         if (await this.knowledgeJobCancelled(job.job_id)) throw new Error(`job ${job.job_id} cancelled`);
         const batch = missing.slice(offset, offset + batchSize);
         const generated = await this.embeddings.embedPassages(batch.map((row) => row.item.text));
+        validateEmbeddingBatch(generated, batch.length);
         await this.store.putCachedEmbeddings(batch.map((row, index) => ({
           cache_key: row.cache_key,
           embedding: generated[index],
@@ -4614,12 +4673,14 @@ export class ResearchService {
     };
     const vector = async (): Promise<LocalSearchHit[][]> => {
       if (!lanes.has('vector') || !this.embeddings.enabled()) return [];
-      const model = this.embeddings.modelId();
+      let model: string | undefined;
       let queryVector: number[] | undefined;
       try {
+        model = embeddingIndexKey(this.embeddings);
         queryVector = preparedQueryVector
           ? await waitForQuery(Promise.resolve(preparedQueryVector), signal)
           : await this.searchRead(['embedding', cleanedQuery], () => this.embeddings.embedQuery(cleanedQuery), signal);
+        if (queryVector) validateEmbeddingBatch([queryVector], 1);
       } catch (error) {
         ensureNotAborted(signal);
         degradedLanes.add('vector');
@@ -4822,9 +4883,13 @@ export class ResearchService {
     let vectors: Array<number[] | undefined> = queries.map(() => undefined);
     embeddingPending = lanes.has('vector') && this.embeddings.enabled();
     const vectorWork = embeddingPending
-      ? this.searchRead(['query-embeddings', queries], async () => this.embeddings.embedQueries
-        ? await this.embeddings.embedQueries(queries)
-        : await Promise.all(queries.map((value) => this.embeddings.embedQuery(value))), controller.signal)
+      ? this.searchRead(['query-embeddings', queries], async () => {
+        embeddingIndexKey(this.embeddings);
+        const generated = this.embeddings.embedQueries ? await this.embeddings.embedQueries(queries)
+          : await Promise.all(queries.map((value) => this.embeddings.embedQuery(value)));
+        validateEmbeddingBatch(generated, queries.length);
+        return generated;
+      }, controller.signal)
         .then((generated) => { if (!controller.signal.aborted) vectors = generated; return generated; })
         .catch(() => vectors)
         .finally(() => {
@@ -5068,6 +5133,34 @@ export class ResearchService {
   ): Promise<ResearchSearchContext | undefined> {
     const project = await this.ensureProject(projectIdValue);
     const current = queries.map((query) => cleanText(query, 'query', 400));
+    const labels = new Set<string>();
+    for (const query of current) {
+      const words = query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
+      for (let start = 0; start < words.length; start++) {
+        for (let size = 1; size <= 5 && start + size <= words.length; size++) {
+          labels.add(words.slice(start, start + size).join(' '));
+        }
+      }
+    }
+    const ontology_terms = (await this.store.findOntologyTerms(project.project_id, [...labels]))
+      .slice(0, 6).map((term) => ({
+        term_id: term.term_id, name: term.name, kind: term.kind, version: term.version,
+        ...(term.project_id ? { project_id: term.project_id } : {}),
+        ...(term.definition ? { definition: term.definition.slice(0, 400) } : {}),
+        ...(term.definition && term.definition.length > 400 ? { definition_truncated: true } : {}),
+        aliases: term.aliases.slice(0, 5),
+        evidence_ids: (term.evidence_ids ?? []).slice(0, 5),
+        review_status: term.review_status ?? 'draft' as const,
+        knowledge_layer: term.knowledge_layer ?? 'legacy_unclassified' as const,
+        ...(term.review ? { review: term.review } : {}),
+      }));
+    const assertions = (await this.store.findContextAssertions(project.project_id, [...labels])).map(row => ({
+      assertion_id: row.assertion_id, project_id: row.project_id, subject: row.subject, predicate: row.predicate,
+      ...(row.object !== undefined ? { object: row.object } : {}),
+      ...(row.value !== undefined ? { value: typeof row.value === 'string' ? row.value.slice(0, 400) : row.value } : {}),
+      ...(row.unit ? { unit: row.unit } : {}), evidence_ids: row.evidence_ids.slice(0,5), status: row.status,
+      recorded_at: row.recorded_at, knowledge_layer: 'instance' as const,
+    }));
     const events = await this.store.listRecentSearchEvents(project.project_id, 50);
     const candidates = events.flatMap((event, eventIndex) => eventQueries(event).map((query) => {
       const similarity = Math.max(...current.map((value) => querySimilarity(value, query)));
@@ -5099,7 +5192,8 @@ export class ResearchService {
       })
       .slice(0, Math.min(Math.max(limit, 1), 3))
       .map(({ similarity: _similarity, eventIndex: _eventIndex, ...entry }) => entry);
-    return prior_searches.length ? { prior_searches } : undefined;
+    return prior_searches.length || ontology_terms.length || assertions.length
+      ? { prior_searches, ...(ontology_terms.length ? { ontology_terms } : {}), ...(assertions.length ? { assertions } : {}) } : undefined;
   }
 
   async rerankCandidates<T extends {
@@ -5124,6 +5218,7 @@ export class ResearchService {
     });
     if (!this.embeddings.enabled() || rows.length < 2) return visible(rows.slice(0, cappedLimit));
     try {
+      embeddingIndexKey(this.embeddings);
       const working = rows.slice(0, Math.max(cappedLimit, 12));
       let freshCount = working.filter((candidate) => candidate.fresh_web).length;
       for (const row of rows) {
@@ -5302,7 +5397,7 @@ export class ResearchService {
         const id = documentId(row.url);
         const kind = classify(row, input.tool);
         const content = row.content?.trim();
-        const active = !!content && row.extraction_quality !== 'metadata_only';
+        const active = !!content && usableEvidence(row.extraction_quality);
         const text = active
           ? `${row.title}\n${content}`.slice(0, MAX_RESEARCH_CAPTURE_CHARS)
           : undefined;

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { formatToolResponse } from '../src/response.js';
+import { shapeExtractionResponse } from '../src/agent.js';
 import {
   attachReceipt, attachRetrievalMode, compactRankedResults, fuseSearchResponse, localSearchResponse,
 } from '../src/research/integration.js';
@@ -12,6 +13,29 @@ import {
 import { ResearchService } from '../src/research/service.js';
 
 describe('research search integration', () => {
+  it('keeps the solution and code instead of keyword-rich documentation footer URLs', () => {
+    const query = 'How can I read Parquet files with different columns in DuckDB without loading all files into pandas?';
+    const [row] = compactRankedResults(query, [{
+      title: 'DuckDB Parquet tips', url: 'https://duckdb.org/docs/tips',
+      description: 'DuckDB reads Parquet files directly.',
+      content: `DuckDB reads Parquet files with column projection.\n\nWhen files have different columns, use \`union_by_name = true\`.\n\n\`\`\`sql\nSELECT * FROM read_parquet('*.parquet', union_by_name = true);\n\`\`\`\n\n- [Report an issue](https://github.com/issues/new?body=${encodeURIComponent(query)})`,
+    }]);
+    expect(row.description).toContain('union_by_name = true');
+    expect(row.description).toContain('SELECT');
+    expect(row.description).not.toContain('Report an issue');
+    expect(row.description).not.toContain('github.com');
+    expect(row.content).toBeUndefined();
+  });
+
+  it('handles empty, Korean and oversized passages under the same response budget', () => {
+    const rows = compactRankedResults('예약 취소 EXCLUDE', [
+      { title: 'Empty', url: 'https://example.org/empty', content: '' },
+      { title: 'Constraint', url: 'https://example.org/constraint', content: '예약 취소 상태에는 `EXCLUDE` 조건을 사용합니다.\n' + 'text '.repeat(5000) },
+    ]);
+    expect(rows[0].description).toBe('Empty');
+    expect(rows[1].description).toContain('EXCLUDE');
+    expect(rows.every((row) => String(row.description).length <= 1200)).toBe(true);
+  });
   it('compacts the legacy 12-result memory payload without losing ranked metadata', () => {
     const rows = Array.from({ length: 12 }, (_, index) => ({
       title: `WarpQuant result ${index}`,
@@ -78,7 +102,24 @@ describe('research search integration', () => {
     expect(result.structuredContent?.meta).toMatchObject({ retrieval_mode: 'hybrid' });
   });
 
-  it('returns only bounded summaries after research reranking', async () => {
+  it('returns live evidence with explicit memory degradation instead of a false storage receipt', async () => {
+    const service = new ResearchService({ enabled: false, root: 'unused', endpoint: 'mem://' });
+    vi.spyOn(service, 'researchSearchContext').mockRejectedValue(new Error('context unavailable'));
+    vi.spyOn(service, 'searchFamilies').mockRejectedValue(new Error('local timeout'));
+    vi.spyOn(service, 'capture').mockRejectedValue(new Error('storage unavailable'));
+    vi.spyOn(service, 'prepareRepositoryResults').mockImplementation(async (_id, _mode, rows) => ({ rows, decisions: [], queued: false }));
+    vi.spyOn(service, 'rerankCandidates').mockImplementation(async (_query, rows) => rows);
+    const args = { query: 'fact', project_id: 'test', limit: 20, retrieval_mode: 'hybrid' as const };
+    const result = await runSearchWithResearch(args, service, async () => formatToolResponse({ results: [{ title: 'Fact', url: 'https://example.org', description: 'fact' }] }));
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent?.meta).toMatchObject({ research_degraded: expect.arrayContaining(['context', 'local_retrieval', 'capture']), memory_storage: 'not_confirmed' });
+    expect(result.structuredContent?.memory).toBeUndefined();
+    const failure = await runSearchWithResearch(args, service, async () => formatToolResponse(null, { code: 'RATE_LIMITED', message: 'stop', retryable: false }));
+    expect(failure.isError).toBe(true);
+    expect(failure.structuredContent?.error).toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('preserves candidates until the shared final response gate', async () => {
     const service = new ResearchService({ enabled: false, root: 'unused', endpoint: 'mem://' });
     vi.spyOn(service, 'rerankCandidates').mockImplementation(async (_query, rows) => rows);
     const result = await runSearchWithResearch({
@@ -94,12 +135,16 @@ describe('research search integration', () => {
         content: `needle body ${'large payload '.repeat(2_000)}`,
       }],
     }));
-    const row = (result.structuredContent?.results as Array<Record<string, unknown>>)[0];
+    expect((result.structuredContent?.results as Array<Record<string, unknown>>)[0].content).toBeDefined();
+    const shaped = shapeExtractionResponse(result, { query: 'needle result' }, 'summary');
+    const row = (shaped.structuredContent?.results as Array<Record<string, unknown>>)[0];
 
     expect(row.description).toContain('needle');
-    expect(String(row.description).length).toBeLessThanOrEqual(1_200);
+    expect(String(row.description).length).toBeLessThanOrEqual(1_500);
     expect(row.content).toBeUndefined();
-    expect(result.structuredContent?.meta).toMatchObject({ response_format: 'ranked_summaries' });
+    expect(result.structuredContent?.meta).toMatchObject({ response_format: 'ranked_candidates' });
+    const full = shapeExtractionResponse(result, { query: 'needle result', response_content: 'full' }, 'summary');
+    expect((full.structuredContent?.results as Array<Record<string, unknown>>)[0].content).toContain('needle');
   });
 
   it('returns local evidence with a receipt when live search fails', async () => {
@@ -266,6 +311,21 @@ describe('research search integration', () => {
       await service.close();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('does not repeat degraded searches with a larger limit', async () => {
+    const service = new ResearchService({ enabled: false, root: 'unused', endpoint: 'mem://' });
+    const runLive = vi.fn(async () => formatToolResponse({ query: 'q', results: [], meta: { degraded_reasons: ['redirect_resolution_failed:7'] } }));
+    const single = await runSearchWithResearch({ query: 'q', limit: 6, retrieval_mode: 'hybrid' }, service, runLive);
+    expect(runLive).toHaveBeenCalledTimes(1);
+    expect(single.structuredContent?.meta).toMatchObject({ research_rounds: 1 });
+    const runParallel = vi.fn(async () => formatToolResponse({ results: [
+      { query: 'q', results: [], degraded_reasons: ['redirect_resolution_failed:7'] },
+      { query: 'other', results: [] },
+    ] }));
+    await runParallelWithResearch({ queries: ['q', 'other'], limit: 6, retrieval_mode: 'hybrid' }, service, runParallel);
+    expect(runParallel).toHaveBeenCalledTimes(1);
+    await service.close();
   });
 
   it('returns compact prior search context before capturing the current search', async () => {

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  applyParallelSearchExtraction, applySearchExtraction, extractTool, shapeExtractionResponse,
+  applyParallelSearchExtraction, applySearchExtraction, extractTool, readCachedExtraction, retainSourceResponse, shapeExtractionResponse,
   type Deps, type PoolHandle,
 } from '../src/agent.js';
 import { UnifiedCache } from '../src/cache.js';
@@ -63,6 +63,26 @@ describe('integrated search extraction', () => {
 
     expect(result).toBe(input);
     expect(deps.acquirePool).not.toHaveBeenCalled();
+  });
+
+  it('reuses captured bodies without worker startup and rejects mismatched handles', async () => {
+    const pool = makePool();
+    pool.extractOne = vi.fn(async (url) => ({ url, content: 'Alpha constraint is stable.\nBeta constraint is separate.', extraction_quality: 'full_text' }));
+    const deps = makeDeps(root, pool);
+    deps.config.researchEnabled = false;
+    const first = await extractTool({ url: 'https://example.com/body', max_chars: 200 }, deps);
+    const handle = String(first.structuredContent?.body_handle);
+    expect(handle).toMatch(/^transient:/);
+    const again = await extractTool({ url: 'https://example.com/body', body_handle: handle, query: 'Beta' }, deps);
+    expect(again.structuredContent?.meta).toMatchObject({ body_cache: 'hit' });
+    expect(pool.extractOne).toHaveBeenCalledTimes(1);
+    expect(pool.extractOne).toHaveBeenCalledWith('https://example.com/body', 50_000, 'full');
+    const mismatch = await extractTool({ url: 'https://other.test/body', body_handle: handle }, deps);
+    expect(mismatch.isError).toBe(true);
+    expect(pool.extractOne).toHaveBeenCalledTimes(1);
+    await extractTool({ url: 'https://example.com/body', refresh: true }, deps);
+    expect(pool.extractOne).toHaveBeenCalledTimes(2);
+    expect((await extractTool({ url: 'https://example.com/body', refresh: true, body_handle: handle }, deps)).isError).toBe(true);
   });
 
   it('extracts only the requested top URLs and isolates failures', async () => {
@@ -233,8 +253,10 @@ describe('integrated search extraction', () => {
     const shaped = shapeExtractionResponse(extracted, {}, 'summary');
     const row = (shaped.structuredContent?.results as Array<Record<string, unknown>>)[0];
 
-    expect((row.content as string)).toHaveLength(1_500);
-    expect(row.length).toBe(2_000);
+    expect(row.content).toBeUndefined();
+    expect(String(row.description).length).toBeLessThanOrEqual(1_500);
+    expect(row.captured_length).toBe(2_000);
+    expect(row.length).toBeUndefined();
     expect(shaped.structuredContent?.meta).toMatchObject({
       extraction: { total_chars: 2_000, response_content: 'summary', truncated: true },
     });
@@ -262,5 +284,56 @@ describe('integrated search extraction', () => {
         omitted_results: 204,
       },
     });
+  });
+
+  it('refreshes a source handle when repository preparation replaces the body', () => {
+    const deps = makeDeps(root, makePool()), url = 'https://github.com/example/repo';
+    const first = retainSourceResponse(formatToolResponse({ url, title: 'Repository', content: 'Original GitHub page.' }), 'full', deps);
+    const handle = String(first.structuredContent?.body_handle);
+    const unchanged = retainSourceResponse(first, 'full', deps);
+    expect(unchanged.structuredContent?.body_handle).toBe(handle);
+    const prepared = retainSourceResponse(formatToolResponse({ ...first.structuredContent, content: 'README implementation details.' }), 'full', deps);
+    expect(prepared.structuredContent?.body_handle).not.toBe(handle);
+    const read = readCachedExtraction({ url, body_handle: String(prepared.structuredContent?.body_handle) }, deps);
+    expect(read?.structuredContent?.content).toContain('README implementation details.');
+    expect(read?.structuredContent?.content).not.toContain('Original GitHub page.');
+  });
+
+  it('does not expose project-local result bodies through the public source cache', () => {
+    const deps = makeDeps(root, makePool()), url = 'https://example.org/private-note';
+    const result = retainSourceResponse(formatToolResponse({ results: [{ query: 'note', results: [
+      { url, content: 'Project-local context.', source_family: 'document', document_id: 'local-id' },
+    ] }] }), 'full', deps);
+    expect(result.structuredContent?.results).toBeDefined();
+    expect(readCachedExtraction({ url }, deps)).toBeUndefined();
+  });
+
+  it('references only identical same-source summaries without dropping source receipts', () => {
+    const content = 'A source constraint requires one writer and the same host. '.repeat(12);
+    const row = { title: 'Constraint', url: 'https://example.org/constraint', content,
+      captured_at: '2026-11-06T00:00:00Z', body_expires_at: '2026-11-06T00:05:00Z', body_handle: 'transient:test' };
+    const result = shapeExtractionResponse(formatToolResponse({ results: [
+      { query: 'constraint host', results: [row] }, { query: 'constraint host', results: [row] },
+    ] }), { response_content: 'summary' }, 'summary');
+    const groups = result.structuredContent!.results as Array<{ results: Array<Record<string, unknown>> }>;
+    const first = groups[0].results[0], second = groups[1].results[0];
+    expect(second.description).toBe(''); expect(second.evidence_ref).toBe(first.url);
+    expect(first.evidence_ranges).toBeDefined(); expect(first.evidence_spans).toBeUndefined();
+    expect(first.captured_hash).toBe(second.captured_hash);
+    expect(first.captured_at).toBeUndefined(); expect(first.body_expires_at).toBeUndefined();
+    expect(first.body_handle).toBe('transient:test');
+    expect(result.structuredContent!.meta).toMatchObject({ response: { omitted_duplicate_chars: expect.any(Number) } });
+  });
+
+  it('round-trips compact ranges into a detailed follow-up without losing offsets', () => {
+    const source = 'Alpha condition has one writer.\nBeta condition requires the same host.';
+    const result = shapeExtractionResponse(formatToolResponse({ query: 'Alpha', results: [{ url: 'https://example.org', content: source }] }), {}, 'summary');
+    const row = (result.structuredContent!.results as Array<Record<string, unknown>>)[0];
+    const next = shapeExtractionResponse(formatToolResponse({ url: row.url, content: source }), {
+      query: 'Beta', exclude_ranges: row.evidence_ranges as Array<[number, number]>,
+    }, 'full');
+    expect(next.structuredContent!.content).toContain('Beta'); expect(next.structuredContent!.content).not.toContain('Alpha');
+    expect(next.structuredContent!.evidence_spans).toBeDefined(); expect(next.structuredContent!.evidence_ranges).toBeUndefined();
+    expect(next.structuredContent!.captured_hash).toBe(row.captured_hash);
   });
 });

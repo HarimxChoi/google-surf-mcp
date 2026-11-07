@@ -17,6 +17,7 @@ describe('replayable research collection', () => {
     for (const name of [
       'research-collection.example.json',
       'project-memory-workflow.example.json',
+      'research-followup-workflow.example.json',
     ]) {
       const input = JSON.parse(readFileSync(join(process.cwd(), 'examples', name), 'utf8'));
       expect(normalizeCollectionSpec(input).jobs.length).toBeGreaterThan(0);
@@ -32,6 +33,17 @@ describe('replayable research collection', () => {
       isError: true,
       structuredContent: { error: { code: 'INTERNAL', message: 'Transaction conflict' } },
     })).toBe(false);
+  });
+
+  it('normalizes discovery and known-source followups without executable commands', () => {
+    const value = normalizeCollectionSpec({ schema_version: 1, collection_id: 'followups', session_id: 'stable', jobs: [
+      { tool: 'search_parallel', queries: ['aspect one', 'aspect two'], arguments: { extract_mode: 'full', evidence_mode: 'compact' } },
+      { tool: 'extract', url: 'https://example.com/source', arguments: { query: 'missing condition', response_content: 'summary', evidence_mode: 'balanced' } },
+    ] });
+    expect(value.jobs[0].arguments).toMatchObject({ queries: ['aspect one', 'aspect two'], extract_limit: 10, session_id: 'stable', evidence_mode: 'compact' });
+    expect(value.jobs[1].arguments).toMatchObject({ query: 'missing condition', url: 'https://example.com/source', session_id: 'stable', evidence_mode: 'balanced' });
+    expect(() => normalizeCollectionSpec({ schema_version: 1, collection_id: 'bad', jobs: [{ tool: 'extract', url: 'file:///private' }] })).toThrow();
+    expect(() => normalizeCollectionSpec({ schema_version: 1, collection_id: 'bad', jobs: [{ tool: 'search_parallel', queries: ['a', 'b'], arguments: { extract_mode: 'full', extract_limit: 11 } }] })).toThrow('between 1 and 10');
   });
 
   it('normalizes web and local jobs with stable scoped arguments', () => {

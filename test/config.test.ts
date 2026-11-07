@@ -146,7 +146,7 @@ describe('loadConfig', () => {
       .toThrow('must use wss/https');
   });
 
-  it('enables local research by default and supports an explicit opt-out', () => {
+  it('enables Auto Ontology by default and supports an explicit opt-out', () => {
     const researchRoot = resolve('research', 'surf');
     const configured = loadConfig({
       SURF_PROFILE_ROOT: resolve('profiles', 'surf'),

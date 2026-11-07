@@ -1,5 +1,6 @@
 import type { CallToolResult } from './response.js';
 import { formatToolResponse } from './response.js';
+import { compactRankedResults } from './research/integration.js';
 
 type SearchRow = {
   title?: unknown;
@@ -68,19 +69,26 @@ export function rerankLiveRows(query: string, rows: SearchRow[]): SearchRow[] {
     .map((entry) => entry.row);
 }
 
-export function rerankLiveResponse(result: CallToolResult, parallel = false): CallToolResult {
+export function rerankLiveResponse(result: CallToolResult, parallel = false, responseContent: 'summary' | 'full' = 'summary'): CallToolResult {
   if (result.isError || !result.structuredContent || !Array.isArray(result.structuredContent.results)) {
     return result;
   }
   const data = result.structuredContent;
   const sourceResults = data.results as unknown[];
+  const compact = (query: string, rows: SearchRow[]) => responseContent === 'full' ? rerankLiveRows(query, rows) : compactRankedResults(query,
+    rerankLiveRows(query, rows).map((row) => ({
+      ...row, title: String(row.title ?? ''), url: String(row.url ?? ''),
+      description: String(row.description ?? ''),
+      content: typeof row.content === 'string' ? row.content : undefined,
+    })),
+  );
   const results = parallel
     ? sourceResults.map((value: unknown) => {
       const group = value && typeof value === 'object' ? value as Record<string, unknown> : {};
       const rows = Array.isArray(group.results) ? group.results as SearchRow[] : [];
-      return { ...group, results: rerankLiveRows(String(group.query ?? ''), rows) };
+      return { ...group, results: compact(String(group.query ?? ''), rows) };
     })
-    : rerankLiveRows(String(data.query ?? ''), sourceResults as SearchRow[]);
+    : compact(String(data.query ?? ''), sourceResults as SearchRow[]);
   const meta = data.meta && typeof data.meta === 'object' ? data.meta as Record<string, unknown> : {};
   return formatToolResponse({
     ...data,

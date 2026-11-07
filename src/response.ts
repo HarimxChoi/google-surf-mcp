@@ -104,7 +104,7 @@ export function formatToolResponse(
 
   const payload = meta ? { ...data, meta } : data ?? {};
   return {
-    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
     structuredContent: payload as Record<string, unknown>,
   };
 }

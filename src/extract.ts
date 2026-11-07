@@ -1,9 +1,11 @@
 import { createRequire } from 'node:module';
 import { lookup } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
 import type { BrowserContext, Page } from 'playwright';
 import TurndownService from 'turndown';
 import { Agent } from 'undici';
 import { fenceUntrustedContent } from './response.js';
+import { classifyExtractedText, type ExtractionQuality } from './extractionQuality.js';
 import {
   isPdfMagic, isPdfContentType, extractPdfTiered, type PdfMode,
 } from './extract-pdf.js';
@@ -25,7 +27,7 @@ const turndown = new TurndownService({
 turndown.remove(['script', 'style', 'iframe', 'noscript']);
 
 export type ExtractMode = 'full' | 'abstract' | 'metadata';
-export type ExtractionQuality = 'full_text' | 'abstract' | 'meta_abstract' | 'metadata_only';
+export type { ExtractionQuality } from './extractionQuality.js';
 
 export interface ExtractResult extends DocumentMetadata {
   url: string;
@@ -37,6 +39,7 @@ export interface ExtractResult extends DocumentMetadata {
   is_pdf?: boolean;
   page_count?: number;
   extraction_quality?: ExtractionQuality;
+  quality_reason?: string;
   error?: string;
 }
 
@@ -48,6 +51,7 @@ interface ReadabilityOutput {
   length: number;
   byline?: string;
   siteName?: string;
+  linkRatio?: number;
 }
 
 const NAV_SELECTORS = [
@@ -68,6 +72,12 @@ const PRIVATE_PATTERNS = [
 ];
 
 const PRIVATE_HOSTS = new Set(['localhost', '0.0.0.0', '::1']);
+const blockedAddresses = new BlockList();
+for (const [address, prefix] of [['0.0.0.0',8], ['10.0.0.0',8], ['127.0.0.0',8], ['169.254.0.0',16],
+  ['172.16.0.0',12], ['192.168.0.0',16], ['100.64.0.0',10], ['192.0.0.0',24], ['192.0.2.0',24],
+  ['198.18.0.0',15], ['198.51.100.0',24], ['203.0.113.0',24], ['224.0.0.0',4], ['240.0.0.0',4]] as const) blockedAddresses.addSubnet(address,prefix,'ipv4');
+for (const [address, prefix] of [['::',128], ['::1',128], ['fc00::',7], ['fe80::',10], ['ff00::',8],
+  ['2001:db8::',32], ['2001::',32], ['2002::',16], ['64:ff9b::',96]] as const) blockedAddresses.addSubnet(address,prefix,'ipv6');
 
 export function checkUrl(url: string): string | null {
   let u: URL;
@@ -75,11 +85,12 @@ export function checkUrl(url: string): string | null {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     return `unsupported protocol: ${u.protocol}`;
   }
+  if (u.username || u.password) return 'credentialed URLs are not supported';
   if (process.env.SURF_ALLOW_PRIVATE === 'true') return null;
   if (PRIVATE_HOSTS.has(u.hostname.toLowerCase())) {
     return 'private/internal address blocked';
   }
-  if (PRIVATE_PATTERNS.some((r) => r.test(url))) {
+  if (PRIVATE_PATTERNS.some((r) => r.test(u.href)) || isPrivateAddress(u.hostname)) {
     return 'private/internal address blocked';
   }
   return null;
@@ -87,6 +98,8 @@ export function checkUrl(url: string): string | null {
 
 function isPrivateAddress(addr: string): boolean {
   const normalized = addr.toLowerCase().replace(/^\[|\]$/g, '');
+  const family = isIP(normalized);
+  if (family && blockedAddresses.check(normalized, family === 4 ? 'ipv4' : 'ipv6')) return true;
   if (normalized.startsWith('::ffff:')) return isPrivateAddress(normalized.slice(7));
   if (normalized === '::' || normalized === '::1') return true;
   if (/^(?:fc|fd|fe[89ab])/.test(normalized)) return true;
@@ -102,7 +115,11 @@ interface ResolvedAddress {
 }
 
 async function resolvePublicAddress(url: string): Promise<ResolvedAddress> {
-  const host = new URL(url).hostname.toLowerCase();
+  const host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (isIP(host)) {
+    if (isPrivateAddress(host)) throw new Error('resolved to private address');
+    return { address: host, family: isIP(host) as 4 | 6 };
+  }
   const addresses = await lookup(host, { all: true, verbatim: true });
   if (!addresses.length) throw new Error('dns resolution returned no addresses');
   if (addresses.some((entry) => isPrivateAddress(entry.address))) {
@@ -144,7 +161,7 @@ interface DiscoveryResult {
   metadata?: DocumentMetadata;
 }
 
-async function readBounded(r: Response): Promise<Buffer> {
+async function readBounded(r: Response, strict = false): Promise<Buffer> {
   if (!r.body) return Buffer.from(await r.arrayBuffer());
   const reader = r.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -155,8 +172,9 @@ async function readBounded(r: Response): Promise<Buffer> {
     if (!value) continue;
     chunks.push(value);
     total += value.byteLength;
-    if (total >= MAX_FETCH_BYTES) {
+    if (total > MAX_FETCH_BYTES || (!strict && total === MAX_FETCH_BYTES)) {
       try { await reader.cancel(); } catch {}
+      if (strict) throw new Error('browser resource exceeds 25 MiB');
       break;
     }
   }
@@ -168,6 +186,24 @@ class SsrfBlockedError extends Error {
     super(`${reason}: ${target}`);
     this.name = 'SsrfBlockedError';
   }
+}
+
+export async function fetchBrowserResource(url: string, headers: Record<string, string>, method = 'GET') {
+  const reason = checkUrl(url);
+  if (reason) throw new SsrfBlockedError(reason, url);
+  if (method !== 'GET' && method !== 'HEAD') throw new Error('source reader allows GET and HEAD only');
+  const resolved = process.env.SURF_ALLOW_PRIVATE === 'true' ? undefined : await resolvePublicAddress(url);
+  const dispatcher = resolved ? new Agent({ connect: { lookup: (_host, options, callback) => {
+    if (options.all) callback(null, [resolved]); else callback(null, resolved.address, resolved.family);
+  } } }) : undefined;
+  const safeHeaders = Object.fromEntries(Object.entries(headers).filter(([name]) => !['host', 'cookie', 'authorization', 'proxy-authorization', 'content-length'].includes(name.toLowerCase())));
+  try {
+    const response = await fetch(url, { method, headers: safeHeaders, redirect: 'manual', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      ...(dispatcher ? { dispatcher } : {}) } as RequestInit & { dispatcher?: Agent });
+    const body = await readBounded(response, true);
+    const responseHeaders = Object.fromEntries([...response.headers].filter(([name]) => !['content-encoding', 'content-length', 'transfer-encoding', 'set-cookie'].includes(name)));
+    return { status: response.status, headers: responseHeaders, body };
+  } finally { await dispatcher?.close().catch(() => {}); }
 }
 
 async function plainFetch(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<FetchResp | null> {
@@ -241,7 +277,10 @@ async function discoverViaFetch(
   maxChars: number,
 ): Promise<DiscoveryResult> {
   const r = await plainFetch(url);
-  if (!r || r.status >= 400) return { result: null };
+  if (!r) return { result: null };
+  if (r.status >= 400) return mode === 'metadata'
+    ? { result: { url: r.finalUrl, error: `http ${r.status}`, extraction_quality: 'blocked', quality_reason: `http_${r.status}` } }
+    : { result: null };
 
   if (isPdfContentType(r.ct) || isPdfMagic(r.buf)) {
     try {
@@ -292,6 +331,10 @@ async function discoverViaFetch(
   }
 
   if (metaAbstract) {
+    const quality = classifyExtractedText(metadata.title ?? '', metaAbstract.content);
+    if (quality.extraction_quality === 'blocked' || quality.extraction_quality === 'consent_required') {
+      return { result: { url: r.finalUrl, ...metadata, ...quality, error: quality.quality_reason } };
+    }
     const content = metaAbstract.content.slice(0, maxChars);
     return { result: {
       url: r.finalUrl,
@@ -319,7 +362,7 @@ async function discoverViaFetch(
 }
 
 export async function extract(
-  ctx: BrowserContext,
+  ctx: BrowserContext | (() => Promise<BrowserContext>),
   url: string,
   optsOrMaxChars: ExtractOptions | number = 50_000,
   legacyNavTimeoutMs?: number,
@@ -353,7 +396,8 @@ export async function extract(
 
   let page: Page | null = null;
   try {
-    page = await ctx.newPage();
+    const context = typeof ctx === 'function' ? await ctx() : ctx;
+    page = await context.newPage();
 
     const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
 
@@ -366,7 +410,7 @@ export async function extract(
     }
 
     if (resp && resp.status() >= 400) {
-      return { url, error: `http ${resp.status()}` };
+      return { url, error: `http ${resp.status()}`, extraction_quality: 'blocked', quality_reason: `http_${resp.status()}` };
     }
 
     await page.waitForTimeout(500);
@@ -379,7 +423,11 @@ export async function extract(
         if (!W.Readability) return null;
         const cloned = document.cloneNode(true) as Document;
         const reader = new W.Readability(cloned);
-        return reader.parse();
+        const output = reader.parse();
+        if (!output) return output;
+        const node = new DOMParser().parseFromString(output.content, 'text/html');
+        const linkLength = [...node.querySelectorAll('a')].reduce((sum, link) => sum + (link.textContent?.length ?? 0), 0);
+        return { ...output, linkRatio: linkLength / Math.max(1, output.textContent.length) };
       } catch {
         return null;
       }
@@ -387,6 +435,10 @@ export async function extract(
 
     if (article && article.content) {
       const raw = turndown.turndown(article.content);
+      const quality = classifyExtractedText(article.title || '', raw, article.linkRatio);
+      if (quality.extraction_quality === 'blocked' || quality.extraction_quality === 'consent_required') {
+        return { url, title: article.title, ...quality, error: quality.quality_reason };
+      }
       const md = raw.slice(0, maxChars);
       return {
         url,
@@ -399,7 +451,7 @@ export async function extract(
         length: md.length,
         source_length: raw.length,
         truncated: raw.length > maxChars,
-        extraction_quality: 'full_text',
+        ...quality,
       };
     }
 
@@ -408,7 +460,8 @@ export async function extract(
       const main = document.querySelector('main, article, [role="main"]') || document.body;
       const text = (main as HTMLElement).innerText || '';
       const title = document.title;
-      return { title, text: text.replace(/\n{3,}/g, '\n\n').trim() };
+      const linkLength = [...main.querySelectorAll('a')].reduce((sum, link) => sum + ((link as HTMLElement).innerText?.length ?? 0), 0);
+      return { title, text: text.replace(/\n{3,}/g, '\n\n').trim(), linkRatio: linkLength / Math.max(1, text.length) };
     }, NAV_SELECTORS);
 
     if (!fallback.text) {
@@ -416,6 +469,10 @@ export async function extract(
     }
 
     const text = fallback.text.slice(0, maxChars);
+    const quality = classifyExtractedText(fallback.title, fallback.text, fallback.linkRatio);
+    if (quality.extraction_quality === 'blocked' || quality.extraction_quality === 'consent_required') {
+      return { url, title: fallback.title, ...quality, error: quality.quality_reason };
+    }
     return {
       url,
       ...discovery.metadata,
@@ -425,7 +482,7 @@ export async function extract(
       length: text.length,
       source_length: fallback.text.length,
       truncated: fallback.text.length > maxChars,
-      extraction_quality: 'full_text',
+      ...quality,
     };
   } catch (e) {
     return { url, error: (e as Error).message.slice(0, 200) };

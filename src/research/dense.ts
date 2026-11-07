@@ -24,11 +24,33 @@ export interface EmbeddingProvider {
   enabled(): boolean;
   modelId(): string | undefined;
   dimensions(): number;
+  fingerprint?(): { revision?: string; normalization: string; quantization: string; runtime?: string };
   embedQuery(text: string): Promise<number[]>;
   embedQueries?(texts: string[]): Promise<number[][]>;
   embedPassages(texts: string[]): Promise<number[][]>;
   diagnostics?(): EmbeddingDiagnostics;
   dispose?(): Promise<void>;
+}
+
+export function embeddingContract(provider: EmbeddingProvider) {
+  const descriptor = { model: provider.modelId() ?? 'disabled', dimensions: provider.dimensions(),
+    ...(provider.fingerprint?.() ?? { normalization: 'provider_defined', quantization: 'provider_defined' }) };
+  return { ...descriptor, fingerprint: createHash('sha256').update(JSON.stringify(descriptor)).digest('hex'),
+    compatible: !provider.enabled() || descriptor.dimensions === RESEARCH_VECTOR_DIMENSIONS,
+    rebuild_action: 'Rebuild derived indexes after a provider or fingerprint change; source records are preserved.' };
+}
+
+export function embeddingIndexKey(provider: EmbeddingProvider): string | undefined {
+  if (!provider.enabled()) return undefined;
+  const contract = embeddingContract(provider);
+  if (!contract.compatible) throw new Error(`embedding configuration mismatch: provider dimension ${contract.dimensions}, index dimension ${RESEARCH_VECTOR_DIMENSIONS}; use a compatible provider before rebuilding derived indexes`);
+  return `${contract.model}#${contract.fingerprint}`;
+}
+
+export function validateEmbeddingBatch(vectors: number[][], count: number, dimensions = RESEARCH_VECTOR_DIMENSIONS): void {
+  if (vectors.length !== count || vectors.some(v => v.length !== dimensions || v.some(x => !Number.isFinite(x)))) {
+    throw new Error(`embedding output mismatch: expected ${count} finite vectors of ${dimensions} dimensions`);
+  }
 }
 
 export interface EmbeddingRuntimeOptions {
@@ -79,6 +101,11 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
 
   dimensions(): number {
     return RESEARCH_VECTOR_DIMENSIONS;
+  }
+
+  fingerprint() {
+    return { revision: this.revision ?? 'unspecified', normalization: 'l2-mean-e5-prefix-v1', quantization: 'q8',
+      runtime: 'transformers-4.2.0-pinned-tokenizer-v1' };
   }
 
   diagnostics(): EmbeddingDiagnostics {

@@ -24,9 +24,9 @@ function hit(id = 'evidence', family: LocalSearchHit['retrieval_family'] = 'exac
 function fixture() {
   const embeddings = {
     enabled: () => true, modelId: () => 'test/model', dimensions: () => 384,
-    embedQuery: vi.fn(async () => [1, 0]),
-    embedQueries: vi.fn(async (queries: string[]) => queries.map(() => [1, 0])),
-    embedPassages: vi.fn(async (texts: string[]) => texts.map(() => [1, 0])),
+    embedQuery: vi.fn(async () => [1,...Array(383).fill(0)]),
+    embedQueries: vi.fn(async (queries: string[]) => queries.map(() => [1,...Array(383).fill(0)])),
+    embedPassages: vi.fn(async (texts: string[]) => texts.map(() => [1,...Array(383).fill(0)])),
   };
   const service = new ResearchService({ enabled: true, root: 'unused-query-test-root', endpoint: 'mem://', embeddingProvider: embeddings });
   vi.spyOn(service as unknown as { ensureProject: (id: string) => Promise<ProjectRecord> }, 'ensureProject')
@@ -139,7 +139,7 @@ describe('lightweight query execution', () => {
     const f = fixture();
     f.embeddings.embedQueries.mockImplementation(async (queries) => {
       await new Promise((resolve) => setTimeout(resolve, 250));
-      return queries.map(() => [1, 0]);
+      return queries.map(() => [1,...Array(383).fill(0)]);
     });
     f.exact.mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -147,7 +147,7 @@ describe('lightweight query execution', () => {
     });
     f.embeddings.embedPassages.mockImplementation(async (texts) => {
       await new Promise((resolve) => setTimeout(resolve, 100));
-      return texts.map(() => [1, 0]);
+      return texts.map(() => [1,...Array(383).fill(0)]);
     });
     const pending = f.service.searchBatch('project', 'evidence', [], 5, [], undefined,
       { retrieval_lanes: ['exact', 'vector'] });

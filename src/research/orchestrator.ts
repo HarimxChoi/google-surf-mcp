@@ -4,7 +4,7 @@ import type {
   LocalSearchFamilies, LocalSearchHit, ResearchReceipt, ResearchSearchContext, RetrievalMode,
 } from './contracts.js';
 import {
-  attachReceipt, attachRetrievalMode, compactRankedResults, fuseLocalFamilies, fuseParallelResponse,
+  attachReceipt, attachRetrievalMode, fuseLocalFamilies, fuseParallelResponse,
   fuseSearchResponse, localSearchResponse,
 } from './integration.js';
 import { ResearchService } from './service.js';
@@ -82,6 +82,15 @@ function attachResearchContext(
   return formatToolResponse({ ...result.structuredContent, research_context: context });
 }
 
+function withWarnings(result: CallToolResult, warnings: Set<string>): CallToolResult {
+  if (!warnings.size || !result.structuredContent) return result;
+  const data = { ...result.structuredContent, meta: {
+    ...result.structuredContent.meta as Record<string, unknown>, research_degraded: [...warnings],
+    ...(warnings.has('capture') ? { memory_storage: 'not_confirmed' } : {}),
+  } };
+  return result.isError ? { ...result, structuredContent: data } : formatToolResponse(data);
+}
+
 function needsExpandedLive(
   liveRows: RankedCandidate[],
   local: LocalSearchFamilies | undefined,
@@ -98,6 +107,10 @@ function needsExpandedLive(
   return novel < Math.min(2, requestedLimit);
 }
 
+function degradedSources(value: Record<string, unknown> | undefined): boolean {
+  return Boolean(value?.error) || (Array.isArray(value?.degraded_reasons) && value.degraded_reasons.length > 0);
+}
+
 async function rerankResponse(
   service: ResearchService,
   query: string,
@@ -112,8 +125,8 @@ async function rerankResponse(
     : {};
   return formatToolResponse({
     ...result.structuredContent,
-    results: compactRankedResults(query, ranked),
-    meta: { ...meta, reranker: 'rrf_vector_tiebreak', response_format: 'ranked_summaries' },
+    results: ranked,
+    meta: { ...meta, reranker: 'rrf_vector_tiebreak', response_format: 'ranked_candidates' },
   });
 }
 
@@ -129,6 +142,7 @@ async function captureReceipt(
     queries?: string[];
   },
   result: CallToolResult,
+  warnings: Set<string>,
 ): Promise<ResearchReceipt | undefined> {
   if (result.isError || !result.structuredContent) return undefined;
   return await service.capture({
@@ -140,20 +154,21 @@ async function captureReceipt(
     query: args.query,
     queries: args.queries,
     payload: result.structuredContent,
-  });
+  }).catch(() => { warnings.add('capture'); return undefined; });
 }
 
 async function finishLocalSearch(
   service: ResearchService,
   args: SearchArgs,
   hits: LocalSearchHit[],
+  warnings: Set<string>,
 ): Promise<CallToolResult> {
   const ranked = await service.rerankCandidates(args.query, hits, args.limit);
   const includeContent = args.extract_mode === 'abstract' || args.extract_mode === 'full';
-  const visible = localSearchResponse(args.query, ranked, includeContent, true);
+  const visible = localSearchResponse(args.query, ranked, includeContent);
   const captureSource = localSearchResponse(args.query, ranked, true);
-  const receipt = await captureReceipt(service, 'search', args, captureSource);
-  return attachRetrievalMode(receipt ? attachReceipt(visible, receipt) : visible, args.retrieval_mode);
+  const receipt = await captureReceipt(service, 'search', args, captureSource, warnings);
+  return withWarnings(attachRetrievalMode(receipt ? attachReceipt(visible, receipt) : visible, args.retrieval_mode), warnings);
 }
 
 export async function runSearchWithResearch(
@@ -161,8 +176,9 @@ export async function runSearchWithResearch(
   service: ResearchService,
   runLive: (limit?: number) => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
+  const warnings = new Set<string>();
   const contextPromise = args.project_id
-    ? service.researchSearchContext(args.project_id, [args.query]).catch(() => undefined)
+    ? service.researchSearchContext(args.project_id, [args.query]).catch(() => { warnings.add('context'); return undefined; })
     : Promise.resolve(undefined);
   const localPromise = args.project_id && args.retrieval_mode === 'hybrid'
     ? service.searchFamilies(
@@ -170,13 +186,14 @@ export async function runSearchWithResearch(
       args.query,
       args.limit,
       args.include_project_ids,
-    ).catch(() => undefined)
+    ).catch(() => { warnings.add('local_retrieval'); return undefined; })
     : Promise.resolve(undefined);
   let live = await runLive(args.limit);
   const local = await localPromise;
   const context = await contextPromise;
   let rounds = 1;
-  if (!live.isError && needsExpandedLive(rows(live), local, args.limit)) {
+  if (!live.isError && !degradedSources(live.structuredContent?.meta as Record<string, unknown> | undefined)
+    && needsExpandedLive(rows(live), local, args.limit)) {
     const expanded = await runLive(Math.min(20, Math.max(10, args.limit * 2)));
     if (!expanded.isError && rows(expanded).length >= rows(live).length) live = expanded;
     rounds = 2;
@@ -186,12 +203,12 @@ export async function runSearchWithResearch(
       args.project_id,
       args.extract_mode ?? 'none',
       rows(live),
-    ).catch(() => undefined);
+    ).catch(() => { warnings.add('repository_ingest'); return undefined; });
     if (prepared) live = withRowsAndRepositoryDecisions(live, prepared.rows, prepared.decisions);
   }
   const localRows = local ? fuseLocalFamilies(local, args.limit) : [];
   if (live.isError && localRows.length) {
-    return attachResearchContext(await finishLocalSearch(service, args, localRows), context);
+    return attachResearchContext(await finishLocalSearch(service, args, localRows, warnings), context);
   }
   const includeContent = args.extract_mode === 'abstract' || args.extract_mode === 'full';
   const candidateLimit = Math.min(40, Math.max(args.limit, args.limit * 3));
@@ -199,17 +216,17 @@ export async function runSearchWithResearch(
     ? fuseSearchResponse(live, local!, candidateLimit, includeContent)
     : live;
   const result = await rerankResponse(service, args.query, fused, args.limit);
-  const receipt = await captureReceipt(service, 'search', args, live);
+  const receipt = await captureReceipt(service, 'search', args, live, warnings);
   const withMode = attachRetrievalMode(
     receipt ? attachReceipt(result, receipt) : result,
     args.retrieval_mode,
   );
-  if (!withMode.structuredContent) return withMode;
+  if (withMode.isError || !withMode.structuredContent) return withWarnings(withMode, warnings);
   const meta = withMode.structuredContent.meta as Record<string, unknown> | undefined;
-  return attachResearchContext(formatToolResponse({
+  return withWarnings(attachResearchContext(formatToolResponse({
     ...withMode.structuredContent,
     meta: { ...meta, research_rounds: rounds },
-  }), context);
+  }), context), warnings);
 }
 
 function parallelLocalResponse(
@@ -240,20 +257,22 @@ async function finishLocalParallel(
   service: ResearchService,
   args: ParallelArgs,
   local: Map<string, LocalSearchFamilies>,
+  warnings: Set<string>,
 ): Promise<CallToolResult> {
   const ranked = new Map(await Promise.all([...local].map(async ([query, families]) => [
     query,
     await service.rerankCandidates(query, fuseLocalFamilies(families, args.limit), args.limit),
   ] as const)));
   const includeContent = args.extract_mode === 'abstract' || args.extract_mode === 'full';
-  const visible = parallelLocalResponse(args, ranked, includeContent, true);
+  const visible = parallelLocalResponse(args, ranked, includeContent);
   const receipt = await captureReceipt(
     service,
     'search_parallel',
     args,
     parallelLocalResponse(args, ranked, true),
+    warnings,
   );
-  return attachRetrievalMode(receipt ? attachReceipt(visible, receipt) : visible, args.retrieval_mode);
+  return withWarnings(attachRetrievalMode(receipt ? attachReceipt(visible, receipt) : visible, args.retrieval_mode), warnings);
 }
 
 export async function runParallelWithResearch(
@@ -261,15 +280,16 @@ export async function runParallelWithResearch(
   service: ResearchService,
   runLive: (limit?: number) => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
+  const warnings = new Set<string>();
   const contextPromise = args.project_id
-    ? service.researchSearchContext(args.project_id, args.queries).catch(() => undefined)
+    ? service.researchSearchContext(args.project_id, args.queries).catch(() => { warnings.add('context'); return undefined; })
     : Promise.resolve(undefined);
   const loadLocal = async () => new Map(await Promise.all(args.queries.map(async (query) => [
     query,
     await service.searchFamilies(args.project_id!, query, args.limit, args.include_project_ids),
   ] as const)));
   const localPromise = args.project_id && args.retrieval_mode === 'hybrid'
-    ? loadLocal().catch(() => new Map<string, LocalSearchFamilies>())
+    ? loadLocal().catch(() => { warnings.add('local_retrieval'); return new Map<string, LocalSearchFamilies>(); })
     : Promise.resolve(new Map<string, LocalSearchFamilies>());
   let live = await runLive(args.limit);
   const local = await localPromise;
@@ -277,7 +297,7 @@ export async function runParallelWithResearch(
   const liveGroups = Array.isArray(live.structuredContent?.results)
     ? live.structuredContent.results as Array<Record<string, unknown>>
     : [];
-  const expand = !live.isError && liveGroups.some((group) => {
+  const expand = !live.isError && !liveGroups.some(degradedSources) && liveGroups.some((group) => {
     const query = String(group.query ?? '');
     const groupRows = Array.isArray(group.results) ? group.results as RankedCandidate[] : [];
     return needsExpandedLive(groupRows, local.get(query), args.limit);
@@ -302,7 +322,7 @@ export async function runParallelWithResearch(
         args.extract_mode ?? 'none',
         groupRows,
         !queued,
-      ).catch(() => undefined);
+      ).catch(() => { warnings.add('repository_ingest'); return undefined; });
       if (!prepared) {
         preparedGroups.push(group);
         continue;
@@ -319,7 +339,7 @@ export async function runParallelWithResearch(
     });
   }
   if (live.isError && local.size) {
-    return attachResearchContext(await finishLocalParallel(service, args, local), context);
+    return attachResearchContext(await finishLocalParallel(service, args, local, warnings), context);
   }
   const includeContent = args.extract_mode === 'abstract' || args.extract_mode === 'full';
   const candidateLimit = Math.min(40, Math.max(args.limit, args.limit * 3));
@@ -332,7 +352,7 @@ export async function runParallelWithResearch(
         const query = String(group.query ?? '');
         const candidates = Array.isArray(group.results) ? group.results as RankedCandidate[] : [];
         const ranked = await service.rerankCandidates(query, candidates, args.limit);
-        return { ...group, results: compactRankedResults(query, ranked) };
+        return { ...group, results: ranked };
       }));
     const meta = result.structuredContent.meta as Record<string, unknown> | undefined;
     result = formatToolResponse({
@@ -342,15 +362,15 @@ export async function runParallelWithResearch(
         ...meta,
         reranker: 'rrf_vector_tiebreak',
         research_rounds: expand ? 2 : 1,
-        response_format: 'ranked_summaries',
+        response_format: 'ranked_candidates',
       },
     });
   }
-  const receipt = await captureReceipt(service, 'search_parallel', args, live);
-  return attachResearchContext(
+  const receipt = await captureReceipt(service, 'search_parallel', args, live, warnings);
+  return withWarnings(attachResearchContext(
     attachRetrievalMode(receipt ? attachReceipt(result, receipt) : result, args.retrieval_mode),
     context,
-  );
+  ), warnings);
 }
 
 export async function captureOnly(
@@ -365,9 +385,10 @@ export async function captureOnly(
   },
   result: CallToolResult,
 ): Promise<CallToolResult> {
+  const warnings = new Set<string>();
   const context = tool === 'scholar_search' && args.project_id && args.query
-    ? await service.researchSearchContext(args.project_id, [args.query]).catch(() => undefined)
+    ? await service.researchSearchContext(args.project_id, [args.query]).catch(() => { warnings.add('context'); return undefined; })
     : undefined;
-  const receipt = await captureReceipt(service, tool, args, result);
-  return attachResearchContext(receipt ? attachReceipt(result, receipt) : result, context);
+  const receipt = await captureReceipt(service, tool, args, result, warnings);
+  return withWarnings(attachResearchContext(receipt ? attachReceipt(result, receipt) : result, context), warnings);
 }

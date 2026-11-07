@@ -63,34 +63,102 @@ function externalHttpUrl(value: string, base?: string): string | undefined {
   }
 }
 
-export async function resolveGoogleResultUrl(
+interface RedirectResolution {
+  url?: string;
+  reason?: string;
+}
+
+function googleRedirect(value: string, base?: string): URL | undefined {
+  try {
+    const url = new URL(value, base);
+    return url.origin === 'https://www.google.com' && !url.username && !url.password
+      && (url.pathname === '/goto' || url.pathname === '/url') ? url : undefined;
+  } catch { return undefined; }
+}
+
+function delayedRedirect(html: string): { delay: number; target: string } | undefined {
+  // Parse only Google's declarative refresh; never execute redirect-page scripts.
+  for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
+    const attributes = new Map([...tag.matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)]
+      .map((match) => [match[1].toLowerCase(), match[2] ?? match[3]]));
+    if (attributes.get('http-equiv')?.toLowerCase() !== 'refresh') continue;
+    const refresh = attributes.get('content')?.match(/^\s*(\d+(?:\.\d+)?)\s*;\s*url\s*=\s*(.+?)\s*$/i);
+    if (refresh) return { delay: Number(refresh[1]) * 1000, target: refresh[2].replace(/&amp;/g, '&') };
+  }
+  return undefined;
+}
+
+export async function resolveGoogleResult(
   value: string,
   fetchFn: typeof fetch = fetch,
-): Promise<string | undefined> {
+  wait: (ms: number) => Promise<void> = sleep,
+): Promise<RedirectResolution> {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    return undefined;
+    return { reason: 'invalid_url' };
   }
-  if (url.hostname !== 'www.google.com') return externalHttpUrl(value);
-  if (url.pathname !== '/goto' && url.pathname !== '/url') return undefined;
-
-  const direct = url.searchParams.get('q') || url.searchParams.get('url');
-  const directUrl = direct ? externalHttpUrl(direct) : undefined;
-  if (directUrl) return directUrl;
-
-  try {
-    const response = await fetchFn(url, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(3_000),
-    });
-    if (response.status < 300 || response.status >= 400) return undefined;
-    const location = response.headers.get('location');
-    return location ? externalHttpUrl(location, url.href) : undefined;
-  } catch {
-    return undefined;
+  if (url.hostname !== 'www.google.com') return { url: externalHttpUrl(value) };
+  if (!googleRedirect(value)) return { reason: 'unsupported_google_url' };
+  const visited = new Set<string>();
+  const deadline = Date.now() + 15_000;
+  for (let hop = 0; hop < 3; hop++) {
+    if (visited.has(url.href)) return { reason: 'redirect_loop' };
+    visited.add(url.href);
+    const direct = url.searchParams.get('q') || url.searchParams.get('url');
+    const directUrl = direct ? externalHttpUrl(direct) : undefined;
+    if (directUrl) return { url: directUrl };
+    try {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { reason: 'redirect_deadline' };
+      const response = await fetchFn(url, {
+        redirect: 'manual', signal: AbortSignal.timeout(Math.min(3_000, remaining)),
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        await response.body?.cancel();
+        if (!location) return { reason: 'missing_location' };
+        const external = externalHttpUrl(location, url.href);
+        if (external) return { url: external };
+        const next = googleRedirect(location, url.href);
+        if (!next) return { reason: 'unsupported_google_redirect' };
+        url = next;
+        continue;
+      }
+      if (response.status !== 200 || !response.headers.get('content-type')?.includes('text/html')) {
+        await response.body?.cancel();
+        return { reason: `redirect_http_${response.status}` };
+      }
+      const reader = response.body?.getReader();
+      let html = '';
+      if (reader) {
+        const decoder = new TextDecoder();
+        try {
+          while (html.length < 32_768 && !/<\/head>/i.test(html)) {
+            const part = await reader.read();
+            if (part.done) break;
+            html += decoder.decode(part.value, { stream: true });
+          }
+        } finally { await reader.cancel(); }
+      }
+      const refresh = delayedRedirect(html.slice(0, 32_768));
+      const next = refresh && googleRedirect(refresh.target, url.href);
+      if (!refresh || !next) return { reason: 'verification_required' };
+      if (refresh.delay > 8_000 || Date.now() + refresh.delay >= deadline || hop === 2) {
+        return { reason: 'verification_pending' };
+      }
+      await wait(refresh.delay);
+      url = next;
+    } catch {
+      return { reason: 'redirect_request_failed' };
+    }
   }
+  return { reason: 'redirect_hop_limit' };
+}
+
+export async function resolveGoogleResultUrl(value: string, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
+  return (await resolveGoogleResult(value, fetchFn)).url;
 }
 
 async function evaluateStrategy(
@@ -277,13 +345,16 @@ export async function pickAndScoreResults(
     accepted.push(r);
   }
   let unresolved = 0;
+  const resolutionFailures = new Map<string, number>();
   for (let offset = 0; offset < accepted.length && results.length < limit; offset += 4) {
     const batch = accepted.slice(offset, offset + 4);
-    const urls = await Promise.all(batch.map((result) => resolveGoogleResultUrl(result.url)));
+    const urls = await Promise.all(batch.map((result) => resolveGoogleResult(result.url)));
     for (let i = 0; i < batch.length && results.length < limit; i++) {
-      const resolved = urls[i];
+      const resolved = urls[i].url;
       if (!resolved) {
         unresolved++;
+        const reason = urls[i].reason ?? 'invalid_target';
+        resolutionFailures.set(reason, (resolutionFailures.get(reason) ?? 0) + 1);
         continue;
       }
       results.push({ ...batch[i], url: resolved });
@@ -295,6 +366,7 @@ export async function pickAndScoreResults(
   const degradedReasons = [
     ...degraded,
     ...(unresolved > 0 ? [`redirect_resolution_failed:${unresolved}`] : []),
+    ...[...resolutionFailures].map(([reason, count]) => `${reason}:${count}`),
   ];
   return {
     results,

@@ -4,7 +4,7 @@ import { ResearchQueryInterrupted } from './queryControl.js';
 import { adaptiveResponseBudget } from '../responseBudget.js';
 import { compactRankedResults } from './integration.js';
 import type {
-  ArtifactReference, AssertionValue, CatalogAccessTier, CatalogAssetKind, CatalogWriteOperation,
+  ArtifactReference, AssertionAggregateInput, AssertionValue, CatalogAccessTier, CatalogAssetKind, CatalogWriteOperation,
   ExperimentStatus, ProjectDocumentRole,
   ResearchSearchFilters,
 } from './contracts.js';
@@ -30,12 +30,24 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
     | 'context' | 'timeline' | 'diff' | 'sync' | 'job_status' | 'job_wait' | 'job_cancel'
     | 'query_status' | 'query_cancel' | 'verify'
     | 'current' | 'snapshot' | 'snapshot_import' | 'snapshot_rollback'
-    | 'doctor' | 'rebuild' | 'export' | 'forget';
+    | 'doctor' | 'aggregate' | 'rebuild' | 'export' | 'forget';
+  aggregate?: AssertionAggregateInput;
+  expected_value?: number;
+  subject?: string;
+  predicate?: string;
+  object?: string;
+  value?: AssertionValue;
+  unit?: string;
+  assertion_status?: 'suggested' | 'confirmed';
+  review?: { actor: string; method: 'human' | 'model' | 'rule' | 'host_unspecified'; reviewed_at?: string };
+  domain?: string[];
+  range?: string[];
+  allowed_units?: string[];
   detail_level?: 'summary' | 'full';
   export_format?: 'dot' | 'd3' | 'html' | 'neo4j';
   export_view?: 'graph' | 'ontology' | 'lineage';
   name?: string;
-  record_type?: 'session' | 'plan' | 'experiment' | 'decision' | 'ontology' | 'correction';
+  record_type?: 'session' | 'plan' | 'experiment' | 'decision' | 'ontology' | 'assertion' | 'correction';
   memory_handle?: string;
   intent?: string;
   title?: string;
@@ -67,6 +79,8 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
   source_ids?: string[];
   aliases?: string[];
   ontology_kind?: 'entity_type' | 'relation';
+  definition?: string;
+  review_status?: 'draft' | 'reviewed';
   version?: number;
   supersedes_term_id?: string;
   reason?: string;
@@ -362,6 +376,16 @@ export async function projectMemoryTool(
   signal?: AbortSignal,
 ): Promise<CallToolResult> {
   try {
+    if (input.action === 'aggregate') {
+      if (!input.aggregate) throw new Error('aggregate parameters required');
+      if (input.all_projects && (input.project_id || input.include_project_ids?.length)) throw new Error('all_projects cannot be combined with explicit projects');
+      const ids = input.all_projects ? (await service.listProjects()).filter(p => p.status !== 'forgotten' && p.project_id !== 'inbox').map(p => p.project_id)
+        : [requireProject(input), ...(input.include_project_ids ?? [])];
+      const aggregate = await service.aggregateAssertions(ids, input.aggregate);
+      return formatToolResponse({ aggregate: { ...aggregate,
+        ...(input.expected_value !== undefined ? { expected_matches: aggregate.value === input.expected_value } : {}) },
+        memory: `Aggregate: ${input.aggregate.operation} | Population: all matching assertions | Status: ${aggregate.status}` });
+    }
     if (input.action === 'create') {
       if (!input.name) throw new Error('name required');
       let project = await service.createProject(input.name, input.project_id);
@@ -417,7 +441,7 @@ export async function projectMemoryTool(
             + (separateAdapter ? adapterMemory.rss : 0),
           private_bytes_note: 'Current private bytes are not exposed portably by Node.js and are not inferred from RSS.',
         },
-        memory: 'Research doctor: passive | Database/model opened: no',
+        memory: 'Auto Ontology doctor: passive | Database/model opened: no',
       });
     }
 
@@ -864,12 +888,24 @@ export async function projectMemoryTool(
       });
     }
 
+    if (input.record_type === 'assertion') {
+      if (!input.subject || !input.predicate) throw new Error('subject and predicate required');
+      const assertion = await service.recordAssertion({ project_id: projectId, subject: input.subject, predicate: input.predicate,
+        object: input.object, value: input.value, unit: input.unit, source: 'explicit', status: input.assertion_status,
+        evidence_ids: input.evidence_ids, valid_from: input.valid_from, valid_to: input.valid_to });
+      return formatToolResponse({ record: { record_type: 'assertion', record_id: assertion.assertion_id, project_id: projectId,
+        knowledge_layer: 'instance', status: assertion.status, evidence_ids: assertion.evidence_ids }, memory: `Project: ${projectId} | Assertion recorded` });
+    }
     if (input.record_type === 'ontology') {
       if (!input.name || !input.ontology_kind) throw new Error('name and ontology_kind required');
       const term = await service.recordOntologyTerm({
         project_id: projectId,
         kind: input.ontology_kind,
         name: input.name,
+        definition: input.definition,
+        evidence_ids: input.evidence_ids,
+        review_status: input.review_status,
+        review: input.review, domain: input.domain, range: input.range, allowed_units: input.allowed_units,
         aliases: input.aliases,
         version: input.version,
         supersedes_term_id: input.supersedes_term_id,
@@ -881,6 +917,7 @@ export async function projectMemoryTool(
           project_id: projectId,
           kind: term.kind,
           name: term.name,
+          review_status: term.review_status,
           version: term.version,
           status: term.status,
         },
