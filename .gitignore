@@ -3,6 +3,8 @@ node_modules/
 build/
 build-scripts/
 artifacts/
+.codex/
+.vitest/
 docs/
 chrome-profiles/
 .tools/

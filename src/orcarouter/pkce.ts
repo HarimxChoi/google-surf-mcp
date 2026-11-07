@@ -296,7 +296,16 @@ async function startCallbackListener(): Promise<{
   });
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    let url: URL;
+    try {
+      const target = req.url ?? '/';
+      if (!target.startsWith('/') || target.startsWith('//')) throw new Error('invalid request target');
+      url = new URL(target, 'http://127.0.0.1');
+      if (url.origin !== 'http://127.0.0.1') throw new Error('invalid request origin');
+    } catch {
+      res.writeHead(400).end();
+      return;
+    }
     if (url.pathname !== CALLBACK_PATH) {
       res.writeHead(404).end();
       return;

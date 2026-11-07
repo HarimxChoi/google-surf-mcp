@@ -588,7 +588,7 @@ Diagnostics also report whether the embedding model is loaded, its cached-vector
 | `ANTHROPIC_API_KEY` | unset | Anthropic key used only when LLM repair is enabled with the Anthropic provider. |
 | `ORCAROUTER_API_KEY` | unset | OrcaRouter key used only when LLM repair is enabled with the OrcaRouter provider. |
 | `ORCA_KEY` | unset | Alias for `ORCAROUTER_API_KEY`. |
-| `SURF_ORCAROUTER_CREDENTIAL_FILE` | `<profileRoot>/.orcarouter/credential.json` | Where the connect flow stores the key it was issued. Written mode 0600; reused until revoked. |
+| `SURF_ORCAROUTER_CREDENTIAL_FILE` | `<profileRoot>/.orcarouter/credential.json` | Where the connect flow stores its key. Owner-only Windows ACL or POSIX mode 0600 is applied before writing; reused until revoked. |
 
 ### Embedded resource budget
 
@@ -603,7 +603,7 @@ Background indexing runs one job at a time. Queued captures in the same project 
 ```bash
 # 1. Paste an existing key
 ORCAROUTER_API_KEY=sk-orca-...
-# or, from the CLI (saved to <profileRoot>/.orcarouter/credential.json, mode 0600)
+# or, from the CLI (saved with owner-only permissions)
 google-surf-mcp orcarouter login
 
 # 2. Authorize an OrcaRouter account (OAuth 2.0 + PKCE, no client secret)

@@ -5,6 +5,7 @@ import {
   discoverModels,
   filterByCapability,
   MODELS_MAX_ITEMS,
+  MODELS_MAX_BYTES,
   parseCatalog,
   VERIFIED_SEED,
   type OrcaModel,
@@ -223,6 +224,87 @@ describe('live discovery', () => {
     const fetchMock = vi.fn(async () => new Response(huge, { status: 200 }));
     const catalog = await discoverModels({ endpoints, apiKey: 'k', fetchImpl: fetchMock as unknown as typeof fetch, now: AT });
     expect(catalog.status).toBe('malformed');
+  });
+
+  it('cancels an oversized stream before reading the remaining chunks', async () => {
+    let chunksRead = 0;
+    const chunkBytes = 1024 * 1024;
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunksRead++;
+        controller.enqueue(new Uint8Array(chunkBytes));
+        if (chunksRead === 8) controller.close();
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    const catalog = await discoverModels({
+      endpoints, apiKey: 'synthetic-key',
+      fetchImpl: vi.fn(async () => new Response(stream)) as unknown as typeof fetch,
+    });
+    expect(catalog.status).toBe('malformed');
+    expect(catalog.reason).toMatch(/size bound/);
+    expect(chunksRead).toBe(Math.floor(MODELS_MAX_BYTES / chunkBytes) + 1);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([MODELS_MAX_BYTES - 1, MODELS_MAX_BYTES])('accepts a valid catalog of %i bytes', async (size) => {
+    const prefix = '{"data":[{"id":"review/chat","supported_endpoint_types":["openai"]}],"padding":"';
+    const body = prefix + 'x'.repeat(size - Buffer.byteLength(prefix) - 2) + '"}';
+    expect(Buffer.byteLength(body)).toBe(size);
+    const bytes = new TextEncoder().encode(body);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, 123));
+        controller.enqueue(bytes.subarray(123));
+        controller.close();
+      },
+    });
+    const catalog = await discoverModels({
+      endpoints, apiKey: 'synthetic-key',
+      fetchImpl: vi.fn(async () => new Response(stream)) as unknown as typeof fetch,
+    });
+    expect(catalog.status).toBe('ok');
+    expect(catalog.models[0].id).toBe('review/chat');
+  });
+
+  it('enforces byte rather than character limits and rejects one extra byte', async () => {
+    const prefix = '{"data":[{"id":"review/chat"}],"padding":"';
+    for (const padding of [
+      'x'.repeat(MODELS_MAX_BYTES + 1 - Buffer.byteLength(prefix) - 2),
+      '\u00e9'.repeat(MODELS_MAX_BYTES / 2),
+    ]) {
+      const body = prefix + padding + '"}';
+      const cancel = vi.fn();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode(body)); },
+        cancel,
+      });
+      const catalog = await discoverModels({
+        endpoints, apiKey: 'synthetic-key',
+        fetchImpl: vi.fn(async () => new Response(stream)) as unknown as typeof fetch,
+      });
+      expect(catalog.status).toBe('malformed');
+      expect(catalog.reason).toMatch(/size bound/);
+      expect(cancel).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('keeps UTF-8 metadata intact across split chunks and degrades on read errors', async () => {
+    const body = new TextEncoder().encode('{"data":[{"id":"review/\u00e9","supported_endpoint_types":["openai"]}]}');
+    const split = body.indexOf(0xc3) + 1;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(body.subarray(0, split));
+        controller.enqueue(body.subarray(split));
+        controller.close();
+      },
+    });
+    const good = await discoverModels({ endpoints, apiKey: 'synthetic-key', fetchImpl: async () => new Response(stream) });
+    expect(good.models[0].id).toBe('review/\u00e9');
+    const broken = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error('fixture failure')); } });
+    const failed = await discoverModels({ endpoints, apiKey: 'synthetic-key', fetchImpl: async () => new Response(broken) });
+    expect(failed.status).toBe('malformed');
   });
 
   it('picks an OrcaRouter model from the catalog rather than a hardcoded example', async () => {

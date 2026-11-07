@@ -9,6 +9,7 @@
 // the same key boundary the rest of this project uses.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import {
   loadStoredCredential,
@@ -19,7 +20,7 @@ import {
   clearStoredCredential,
   needsReauth,
 } from './credentials.js';
-import { resolveEndpoints } from './endpoints.js';
+import { resolveEndpoints, type OrcaEndpoints } from './endpoints.js';
 import {
   defaultChatModel,
   discoverModels,
@@ -40,7 +41,7 @@ export interface UiServerHandle {
 }
 
 /** Server-side catalog cache: one fetch per capability serves every selector. */
-function createCatalogCache() {
+function createCatalogCache(endpoints: OrcaEndpoints) {
   const cached = new Map<string, { at: number; catalog: OrcaCatalog }>();
   return {
     async get(
@@ -50,7 +51,7 @@ function createCatalogCache() {
     ): Promise<OrcaCatalog> {
       const hit = cached.get(capability);
       if (hit && now() - hit.at < CATALOG_TTL_MS) return hit.catalog;
-      const catalog = await discoverModels({ endpoints: resolveEndpoints(), apiKey, capability });
+      const catalog = await discoverModels({ endpoints, apiKey, capability });
       cached.set(capability, { at: now(), catalog });
       return catalog;
     },
@@ -105,18 +106,50 @@ export interface UiServerOptions {
 export async function startUiServer(options: UiServerOptions = {}): Promise<UiServerHandle> {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => Date.now());
-  const cache = createCatalogCache();
+  const endpoints = resolveEndpoints(env);
+  const cache = createCatalogCache(endpoints);
+  const csrfToken = randomBytes(32).toString('base64url');
 
   async function catalogFor(apiKey: string | undefined, capability: OrcaCapability): Promise<OrcaCatalog> {
     return cache.get(apiKey, capability, now);
   }
 
   const server: Server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const host = `127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const origin = `http://${host}`;
+    let url: URL;
+    try {
+      const target = req.url ?? '/';
+      if (!target.startsWith('/') || target.startsWith('//')) throw new Error('invalid request target');
+      url = new URL(target, origin);
+      if (url.origin !== origin) throw new Error('invalid request origin');
+    } catch {
+      sendJson(res, 400, { error: 'invalid request URL' });
+      return;
+    }
+    if (req.headers.host !== host) {
+      sendJson(res, 403, { error: 'invalid Host' });
+      return;
+    }
+    if (req.method === 'POST' || req.method === 'DELETE') {
+      if (req.headers.origin !== origin || req.headers['x-orca-csrf'] !== csrfToken) {
+        sendJson(res, 403, { error: 'invalid mutation authorization' });
+        return;
+      }
+      if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+        sendJson(res, 415, { error: 'application/json required' });
+        return;
+      }
+    }
     try {
       if (url.pathname === '/' && req.method === 'GET') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(CONFIG_PAGE);
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-security-policy': "frame-ancestors 'none'",
+          'x-frame-options': 'DENY',
+        });
+        res.end(CONFIG_PAGE.replace('__ORCA_CSRF_TOKEN__', csrfToken));
         return;
       }
 
@@ -133,8 +166,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
           needsReauth: credential ? needsReauth(credential, env) : false,
           stored: loadStoredCredential(env) !== null,
           origins: {
-            auth: resolveEndpoints(env).authBase,
-            api: resolveEndpoints(env).apiBase,
+            auth: endpoints.authBase,
+            api: endpoints.apiBase,
           },
         });
         return;
@@ -230,6 +263,7 @@ const CONFIG_PAGE = String.raw`<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="orcarouter-csrf" content="__ORCA_CSRF_TOKEN__">
 <title>OrcaRouter provider</title>
 <style>
 :root{--bg:#0f1115;--surface:#171a21;--surface2:#1e222b;--text:#e8eaed;--muted:#9aa0a6;
@@ -343,6 +377,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;colo
 (function(){
   "use strict";
   var state = { attachment: null, text: null, mm: null };
+  var csrfToken = document.querySelector('meta[name="orcarouter-csrf"]').content;
 
   function el(id){ return document.getElementById(id); }
 
@@ -476,7 +511,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;colo
     }
     fetch("/api/key", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-orca-csrf": csrfToken },
       body: JSON.stringify({ key: value })
     }).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, data: d }; }); })
       .then(function(result){
@@ -499,7 +534,10 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;colo
   });
 
   el("clear-key").addEventListener("click", function(){
-    fetch("/api/key", { method: "DELETE" }).then(function(){
+    fetch("/api/key", {
+      method: "DELETE",
+      headers: { "content-type": "application/json", "x-orca-csrf": csrfToken }
+    }).then(function(){
       el("key-state").className = "state";
       el("key-state").textContent = "Stored credential cleared.";
       refreshStatus();

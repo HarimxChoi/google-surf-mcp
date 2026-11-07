@@ -558,7 +558,7 @@ npx google-surf-mcp daemon drain --json
 | `ANTHROPIC_API_KEY` | 미설정 | Anthropic provider를 선택했을 때만 사용하는 본인 API 키 |
 | `ORCAROUTER_API_KEY` | 미설정 | OrcaRouter provider를 선택했을 때만 사용하는 본인 API 키 |
 | `ORCA_KEY` | 미설정 | `ORCAROUTER_API_KEY` 별칭 |
-| `SURF_ORCAROUTER_CREDENTIAL_FILE` | `<profileRoot>/.orcarouter/credential.json` | connect 흐름이 발급받은 키를 저장하는 경로. mode 0600으로 기록되며 revoke 전까지 재사용 |
+| `SURF_ORCAROUTER_CREDENTIAL_FILE` | `<profileRoot>/.orcarouter/credential.json` | connect 흐름이 발급받은 키를 저장하는 경로. 기록 전에 Windows는 소유자 전용 ACL, POSIX는 mode 0600을 적용하며 revoke 전까지 재사용 |
 
 ### 임베디드 자원 예산
 
@@ -573,7 +573,7 @@ Embedded storage는 서버용 자동 예산 대신 RocksDB block cache 512 MiB, 
 ```bash
 # 1. 기존 키 입력
 ORCAROUTER_API_KEY=sk-orca-...
-# 또는 CLI로 저장 (<profileRoot>/.orcarouter/credential.json, mode 0600)
+# 또는 CLI로 저장 (소유자 전용 파일 권한 적용)
 google-surf-mcp orcarouter login
 
 # 2. OrcaRouter 계정 인증 (OAuth 2.0 + PKCE, client secret 불필요)

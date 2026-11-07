@@ -289,9 +289,26 @@ export async function discoverModels(options: DiscoveryOptions): Promise<Discove
 }
 
 async function readBounded(response: Response): Promise<string | null> {
-  const text = await response.text().catch(() => '');
-  if (text.length > MODELS_MAX_BYTES) return null;
-  return text;
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return Buffer.concat(chunks, size).toString('utf8');
+      size += value.byteLength;
+      if (size > MODELS_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return '';
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export function formatCatalogError(error: unknown, apiKey?: string): string {

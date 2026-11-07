@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -229,6 +229,35 @@ function browser(onAuthorizeUrl: (url: string) => void) {
 }
 
 describe('Flow A — loopback redirect end to end', () => {
+  it('returns 400 for unsafe raw URLs without consuming the pending authorization', async () => {
+    const fake = await fakeAuthServer({});
+    let announce: (url: string) => void;
+    const announced = new Promise<string>((resolve) => { announce = resolve; });
+    const connecting = connectLoopback({
+      appName: 'Google Surf MCP', env, timeoutMs: 5_000,
+      onAuthorizeUrl: (url) => announce(url),
+    }, resolveEndpoints({ ORCA_BASE_URL: fake.authBase }));
+    try {
+      const authorizeUrl = await announced;
+      const callback = new URL(authorizeUrl).searchParams.get('callback_url')!;
+      for (const path of ['//[', '//attacker.example/path', '/\\attacker.example/path', 'http://attacker.example/']) {
+        const status = await new Promise<number>((resolve, reject) => {
+          const req = request(callback, { path }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode!));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+        expect(status).toBe(400);
+      }
+      await fetch(authorizeUrl);
+      expect((await connecting).key).toBe('sk-orca-issued-by-fake-consent');
+    } finally {
+      fake.close();
+    }
+  });
+
   it('authorizes, exchanges and persists a reusable key', async () => {
     const fake = await fakeAuthServer({});
     try {

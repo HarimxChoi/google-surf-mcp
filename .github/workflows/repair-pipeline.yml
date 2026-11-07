@@ -21,9 +21,9 @@ jobs:
       SURF_LLM_MODEL: ${{ vars.SURF_LLM_MODEL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: 'npm'
@@ -90,7 +90,7 @@ jobs:
 
       - name: upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: repair-run-${{ github.run_id }}
           path: |

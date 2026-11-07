@@ -1,4 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -28,6 +29,27 @@ const ISSUED = 'sk-orca-pkce-issued-key-00000002';
 let root: string;
 let env: Record<string, string | undefined>;
 
+function expectPrivateFile(file: string): void {
+  if (process.platform !== 'win32') {
+    expect(statSync(file).mode & 0o077).toBe(0);
+    return;
+  }
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$acl = Get-Acl -LiteralPath $env:SURF_ORCA_TEST_FILE',
+    '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { @{sid=$_.IdentityReference.Value; type=$_.AccessControlType.ToString(); inherited=$_.IsInherited} })',
+    '@{protected=$acl.AreAccessRulesProtected; sid=$sid; rules=$rules} | ConvertTo-Json -Compress',
+  ].join('\n');
+  const result = JSON.parse(execFileSync(
+    join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { windowsHide: true, timeout: 10_000, encoding: 'utf8', stdio: 'pipe', env: { ...process.env, SURF_ORCA_TEST_FILE: file } },
+  ));
+  expect(result.protected).toBe(true);
+  expect(result.rules).toEqual([{ sid: result.sid, type: 'Allow', inherited: false }]);
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'orca-cred-'));
   env = { SURF_PROFILE_ROOT: root };
@@ -46,11 +68,34 @@ describe('credential storage', () => {
     expect(stored?.key).toBe(ISSUED);
     expect(stored?.source).toBe('pkce');
     expect(stored?.userId).toBe('user-42');
-    // The file is a secret: it must not be world-readable.
-    expect(statSync(credentialFile(env)).mode & 0o077).toBe(0);
+    expectPrivateFile(credentialFile(env));
 
     const raw = readFileSync(credentialFile(env), 'utf8');
     expect(raw).toContain('sk-orca-'); // it is the store, not a log
+  }, 20_000);
+
+  it('atomically replaces a private credential at a path containing spaces and quotes', () => {
+    const directory = join(root, "private ' directory");
+    env.SURF_ORCAROUTER_CREDENTIAL_FILE = join(directory, 'credential.json');
+    saveApiKeyCredential(PASTED, 'api', env);
+    savePkceCredential(ISSUED, 'api', undefined, env);
+    expect(loadStoredCredential(env)?.key).toBe(ISSUED);
+    expectPrivateFile(credentialFile(env));
+    expect(readdirSync(directory)).toEqual(['credential.json']);
+  }, 20_000);
+
+  it.runIf(process.platform === 'win32')('preserves the previous key when file protection fails', () => {
+    saveApiKeyCredential(PASTED, 'api', env);
+    const systemRoot = process.env.SystemRoot;
+    process.env.SystemRoot = join(root, 'unavailable-windows');
+    try {
+      expect(() => savePkceCredential(ISSUED, 'api', undefined, env)).toThrow();
+    } finally {
+      if (systemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = systemRoot;
+    }
+    expect(loadStoredCredential(env)?.key).toBe(PASTED);
+    expect(readdirSync(join(root, '.orcarouter'))).toEqual(['credential.json']);
   });
 
   it('reuses the stored key across restarts instead of re-authorizing', async () => {
