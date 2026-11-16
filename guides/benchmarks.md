@@ -17,6 +17,8 @@ The recorded 2026-11-05 comparison used 48 revision-pinned model-card/configurat
 
 Both contexts used the same `deepseek-flash` API identifier, temperature 0, thinking disabled, shared SQL-generation prompt, domain rules, schema, and read-only target database. The 120 questions covered 91 scalar results and 29 missing/unanswerable cases. Numeric results used a 1e-9 comparison tolerance; missing-value cases were scored separately from infrastructure failures. The API identifier is not an immutable model-weight snapshot.
 
+The README's DeepSeek V4.1 Flash (1017) label follows the [official 2026-10-17 change log](https://api-docs.deepseek.com/updates/), which maps `deepseek-flash` to DeepSeek-V4.1-Flash-1017 before these November runs. The saved requests record the API alias, not an independently pinned model revision.
+
 NVIDIA used official source revision `2a24f5d34ef6b6e168a7f22d308504d3ab36a198` with external provider/transport adapters. The primary embedding configurations differed: NVIDIA `nvidia/nemotron-3.5-embed-1b` (2048 dimensions), Surf `Xenova/multilingual-e5-small` q8 (384 dimensions). A separate matched-E5 NVIDIA run also scored 113/120. This is a shared SQL-evaluation track, not a comparison of default/native product agents or a general ontology-quality ranking.
 
 The paired outcomes were 110 correct for both, 6 Surf-only, 3 NVIDIA-only, and 1 missed by both. The three-question gap does not establish general superiority. The corpus and question templates overlap by entity; this small task-specific evaluation is historical, not a score for every later source change. The adjacent graphic uses the saved generated ontology records; graph shape is not itself a quality metric.

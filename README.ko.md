@@ -4,9 +4,6 @@
 
 [English](./README.md) | 한국어
 
-Google Surf MCP는 웹·논문·코드베이스를 검색하고, 읽은 자료를 Auto Ontology로 로컬 지식그래프에 정리합니다.
-API 키나 별도 DB 서버 없이 시작하고, 자료와 프로젝트 기록을 연결해 나만의 지식체계를 쌓아갑니다.
-
 [![npm version](https://img.shields.io/npm/v/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 [![ci](https://github.com/HarimxChoi/google-surf-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/HarimxChoi/google-surf-mcp/actions/workflows/ci.yml)
@@ -20,25 +17,28 @@ API 키나 별도 DB 서버 없이 시작하고, 자료와 프로젝트 기록�
 
 [설치](#빠른-시작) · [벤치마크](#검증-결과) · [전체 구조](#전체-구조) · [도구](#tools)
 
+Google Surf MCP는 웹·논문·코드베이스를 검색하고, 읽은 자료를 Auto Ontology로 로컬 지식그래프에 정리합니다.
+API 키나 별도 DB 서버 없이 시작하고, 자료와 프로젝트 기록을 연결해 나만의 지식체계를 쌓아갑니다.
+
 ## 검증 결과
-
-### Auto Ontology 비교
-
-<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology 비교: 동일한 120개 질문과 DeepSeek 모델을 사용해 NVIDIA 113/120, Google Surf 116/120." /></a>
-
-오픈웨이트 모델 릴리스 16종의 모델카드·설정 파일 48개로 각각 온톨로지를 구축했습니다. 각 시스템이 찾은 근거를 동일한 DeepSeek Flash(`deepseek-flash`) 모델, SQL 생성 프롬프트와 DB에 적용한 결과는 **Google Surf 116/120, NVIDIA Auto Ontology 113/120**이었습니다. 제품의 기본 에이전트끼리 비교한 결과는 아닙니다.
 
 ### Google AI Mode와 웹 검색 비교
 
 SQLite WAL의 동시 쓰기 제약, PyTorch의 `inference_mode()`와 `model.eval()` 차이 등 개발 질문 8개를 비교했습니다. 주제는 Python TaskGroup, SQLite, Kubernetes probe, Fetch, Redis TTL, Docker Compose, PyTorch, Rust입니다.
 
-Google Surf와 함께 사용한 답변 모델은 **DeepSeek Flash** (`deepseek-flash`, temperature 0, thinking 비활성화)입니다.
+Google Surf와 함께 사용한 답변 모델은 **[DeepSeek V4.1 Flash (1017)](https://api-docs.deepseek.com/updates/)** (`deepseek-flash`, temperature 0, thinking 비활성화)입니다.
 
 | 평가 | Google Surf + DeepSeek | Google AI Mode |
 | --- | ---: | ---: |
 | 결과 | **22/24** | **24/24** |
 
 질문당 필수 확인 항목 3개의 충족 수이며, 답변 전체의 정답률은 아닙니다. 2026-11-07 실행 기록으로, 현재 버전을 새로 측정한 결과는 아닙니다.
+
+### Auto Ontology 비교
+
+<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology 비교: 동일한 120개 질문과 DeepSeek 모델을 사용해 NVIDIA 113/120, Google Surf 116/120." /></a>
+
+오픈웨이트 모델 릴리스 16종의 모델카드·설정 파일 48개로 각각 온톨로지를 구축했습니다. 각 시스템이 찾은 근거를 동일한 DeepSeek V4.1 Flash (1017) 모델(`deepseek-flash`), SQL 생성 프롬프트와 DB에 적용한 결과는 **Google Surf 116/120, NVIDIA Auto Ontology 113/120**이었습니다. 제품의 기본 에이전트끼리 비교한 결과는 아닙니다.
 
 [평가 조건·웹 검색 순위·자원 측정](./guides/benchmarks.md)
 

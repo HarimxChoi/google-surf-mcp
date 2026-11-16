@@ -4,9 +4,6 @@
 
 English | [Korean](./README.ko.md)
 
-Google Surf MCP searches the web, papers, and codebases, then uses Auto Ontology to organize what you read into a local knowledge graph.
-Start without an API key or a separate database server, and build a personal knowledge base from connected sources and project records.
-
 [![npm version](https://img.shields.io/npm/v/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/google-surf-mcp)](https://www.npmjs.com/package/google-surf-mcp)
 [![ci](https://github.com/HarimxChoi/google-surf-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/HarimxChoi/google-surf-mcp/actions/workflows/ci.yml)
@@ -20,25 +17,28 @@ Start without an API key or a separate database server, and build a personal kno
 
 [Install](#quick-start) · [Benchmarks](#benchmarks) · [Architecture](#architecture) · [Tools](#tools)
 
+Google Surf MCP searches the web, papers, and codebases, then uses Auto Ontology to organize what you read into a local knowledge graph.
+Start without an API key or a separate database server, and build a personal knowledge base from connected sources and project records.
+
 ## Benchmarks
-
-### Auto Ontology comparison
-
-<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology benchmark: NVIDIA 113/120, Google Surf 116/120, using the same 120 questions and DeepSeek model." /></a>
-
-Both systems built ontologies from 48 revision-pinned model-card and configuration files covering 16 open-weight model releases. Their retrieved evidence was passed to the same DeepSeek Flash model (`deepseek-flash`), SQL-generation prompt, and database: **Google Surf 116/120, NVIDIA Auto Ontology 113/120**. This compares ontology-backed retrieval, not the products' default agents.
 
 ### Web search vs Google AI Mode
 
 Eight developer questions covered Python TaskGroup, SQLite WAL, Kubernetes probes, Fetch, Redis TTL, Docker Compose, PyTorch, and Rust. Examples included SQLite's concurrent-writer limitations and whether PyTorch's `inference_mode()` replaces `model.eval()`.
 
-The answer model paired with Google Surf was **DeepSeek Flash** (`deepseek-flash`, temperature 0, thinking disabled).
+The answer model paired with Google Surf was **[DeepSeek V4.1 Flash (1017)](https://api-docs.deepseek.com/updates/)** (`deepseek-flash`, temperature 0, thinking disabled).
 
 | Evaluation | Google Surf + DeepSeek | Google AI Mode |
 | --- | ---: | ---: |
 | Result | **22/24** | **24/24** |
 
 Three required checkpoints per question; the numbers count fully met checkpoints, not whole-answer accuracy. Recorded on 2026-11-07, not a new evaluation of the current release.
+
+### Auto Ontology comparison
+
+<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology benchmark: NVIDIA 113/120, Google Surf 116/120, using the same 120 questions and DeepSeek model." /></a>
+
+Both systems built ontologies from 48 revision-pinned model-card and configuration files covering 16 open-weight model releases. Their retrieved evidence was passed to the same DeepSeek V4.1 Flash (1017) model (`deepseek-flash`), SQL-generation prompt, and database: **Google Surf 116/120, NVIDIA Auto Ontology 113/120**. This compares ontology-backed retrieval, not the products' default agents.
 
 [Evaluation setup, live-ranking results, and resource measurements](./guides/benchmarks.md)
 
