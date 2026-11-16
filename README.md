@@ -18,14 +18,49 @@ Start without an API key or a separate database server, and build a personal kno
 </p>
 <p align="center">Sponsored by <a href="https://www.searchapi.io/?utm_source=github&utm_medium=sponsorship&utm_campaign=google_search_api&utm_content=HarimxChoi_google-surf-mcp">SearchApi</a></p>
 
-<a href="./assets/graph-pkm.png"><img src="./assets/graph-pkm.png" width="100%" alt="Integrated project knowledge graph" /></a>
+[Install](#quick-start) · [Benchmarks](#benchmarks) · [Architecture](#architecture) · [Tools](#tools)
 
-## Core features
+## Benchmarks
 
-- **Search and read:** Find web pages, papers, PDFs, GitHub repositories, and indexed local code. Tree-sitter links files, code symbols, imports, and function calls.
-- **Auto Ontology:** Organize sources and project records into a typed knowledge graph with evidence and data lineage.
-- **Cross-project search:** Find stored sources across selected projects using exact-match, keyword, semantic, and graph retrieval, with RRF fusion and a shared reranker.
-- **Explore and export:** Browse PKM, lineage, and ontology views; export HTML, PNG, JSON, Graphviz DOT, and Neo4j import bundles.
+### Auto Ontology comparison
+
+<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology benchmark: NVIDIA 113/120, Google Surf 116/120, using the same 120 questions and DeepSeek model." /></a>
+
+Both systems built ontologies from 48 revision-pinned model-card and configuration files covering 16 open-weight model releases. Their retrieved evidence was passed to the same DeepSeek Flash model (`deepseek-flash`), SQL-generation prompt, and database: **Google Surf 116/120, NVIDIA Auto Ontology 113/120**. This compares ontology-backed retrieval, not the products' default agents.
+
+### Web search vs Google AI Mode
+
+Eight developer questions covered Python TaskGroup, SQLite WAL, Kubernetes probes, Fetch, Redis TTL, Docker Compose, PyTorch, and Rust. Examples included SQLite's concurrent-writer limitations and whether PyTorch's `inference_mode()` replaces `model.eval()`.
+
+The answer model paired with Google Surf was **DeepSeek Flash** (`deepseek-flash`, temperature 0, thinking disabled).
+
+| Evaluation | Google Surf + DeepSeek | Google AI Mode |
+| --- | ---: | ---: |
+| Result | **22/24** | **24/24** |
+
+Three required checkpoints per question; the numbers count fully met checkpoints, not whole-answer accuracy. Recorded on 2026-11-07, not a new evaluation of the current release.
+
+[Evaluation setup, live-ranking results, and resource measurements](./guides/benchmarks.md)
+
+## Architecture
+
+<a href="./assets/architecture-en.png"><img src="./assets/architecture-en.png" width="100%" alt="Google Surf architecture: live discovery, source reading, and local project retrieval converge on bounded source-backed evidence." /></a>
+
+### Technology stack
+
+| Layer | Technologies |
+| --- | --- |
+| Runtime and protocol | TypeScript, Node.js 22.13+, MCP SDK, Zod |
+| Browser search | System Chrome, Playwright, shared browser broker and reusable tabs |
+| Source reading | HTTP, isolated headless BrowserContext, Mozilla Readability, Turndown |
+| Documents and OCR | LiteParse CPU OCR; optional Xberg for Office; OfficeParser fallback; hwp-convert; pdf-lib; Sharp |
+| Local storage | SurrealDB with embedded RocksDB, durable catalog and payloads, rebuildable indexes |
+| Retrieval and ranking | Exact match, BM25, Multilingual E5-small q8/ONNX, HNSW, graph retrieval, RRF, cached E5 reranking |
+| Code indexing | Tree-sitter for Python, TypeScript, and C++ structure |
+| Graph analysis | Graphology, PageRank, Louvain communities, provenance and lineage projections |
+| Network controls | Undici, DNS/IP-pinned reads, SSRF checks, deny-by-default source-reader proxy |
+
+OCR is configurable; Xberg does not add another OCR or embedding model. Live-only search uses BM25/RRF without loading E5. [Architecture details](./guides/auto-ontology.md) · [Lightweight configuration](./examples/lightweight-documents.env)
 
 ## Quick start
 
@@ -83,29 +118,13 @@ Providing `project_id` to web search does not make it local-only. Use `project_m
 
 [Tool parameters, limits, follow-up reads, and repeatable source collection](./guides/tools.md)
 
-## Architecture
-
-<a href="./assets/architecture-en.png"><img src="./assets/architecture-en.png" width="100%" alt="Google Surf architecture: live discovery, source reading, and local project retrieval converge on bounded source-backed evidence." /></a>
-
-### Technology stack
-
-| Layer | Technologies |
-| --- | --- |
-| Runtime and protocol | TypeScript, Node.js 22.13+, MCP SDK, Zod |
-| Browser search | System Chrome, Playwright, shared browser broker and reusable tabs |
-| Source reading | HTTP, isolated headless BrowserContext, Mozilla Readability, Turndown |
-| Documents and OCR | LiteParse CPU OCR; optional Xberg for Office; OfficeParser fallback; hwp-convert; pdf-lib; Sharp |
-| Local storage | SurrealDB with embedded RocksDB, durable catalog and payloads, rebuildable indexes |
-| Retrieval and ranking | Exact match, BM25, Multilingual E5-small q8/ONNX, HNSW, graph retrieval, RRF, cached E5 reranking |
-| Code indexing | Tree-sitter for Python, TypeScript, and C++ structure |
-| Graph analysis | Graphology, PageRank, Louvain communities, provenance and lineage projections |
-| Network controls | Undici, DNS/IP-pinned reads, SSRF checks, deny-by-default source-reader proxy |
-
-OCR is configurable; Xberg does not add another OCR or embedding model. Live-only search uses BM25/RRF without loading E5. [Architecture details](./guides/auto-ontology.md) · [Lightweight configuration](./examples/lightweight-documents.env)
-
 ## Google Surf Auto Ontology
 
+<a href="./assets/graph-pkm.png"><img src="./assets/graph-pkm.png" width="100%" alt="Integrated project knowledge graph" /></a>
+
 Search and extraction results are saved automatically. Plans, experiments, failures, and decisions are linked when your agent records them through `project_memory`.
+
+Search stored knowledge across selected projects with exact-match, keyword, semantic, and graph retrieval, RRF fusion, and a shared reranker.
 
 Projects stay separate by default. Selected projects can link knowledge using matching DOIs, repository URLs, or explicitly registered aliases; original records are not merged or moved.
 
@@ -119,36 +138,6 @@ The HTML explorer includes PKM, lineage, and ontology views with PNG/JSON downlo
 The feature was renamed from Research to Auto Ontology; existing `SURF_RESEARCH*` settings, `project_memory*` tools, CLI names, and storage paths still work.
 
 [Ontology, lineage, code indexing, and export details](./guides/auto-ontology.md)
-
-## Benchmark
-
-### Auto Ontology comparison
-
-<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology benchmark: NVIDIA 113/120, Google Surf 116/120, using the same 120 questions and DeepSeek SQL answerer." /></a>
-
-Recorded on 48 revision-pinned source files from 16 open-weight model releases. Each system's retrieved context was passed to the same `deepseek-flash` SQL-generation prompt and database: **Google Surf 116/120, NVIDIA Auto Ontology 113/120**. This compares ontology-backed retrieval in a shared evaluation setup, not the products' default agents.
-
-### Web answers vs Google AI Mode
-
-Eight reused regression questions, with three required checkpoints per question:
-
-| Recorded run | Google Surf + host | Google AI Mode |
-| --- | ---: | ---: |
-| Paired comparison, 2026-11-07 | 22/24 | 24/24 |
-| Later Host V2 replay; saved AI answers | 20/24 | 24/24 |
-
-These are fully met checkpoints, not whole-answer accuracy. The runs are historical, task-specific measurements, not a re-evaluation of the current release.
-
-### Live web result ranking
-
-Live web result ranking on 32 held-out queries:
-
-| Ranking | nDCG@5 | MRR | Precision@5 |
-| --- | ---: | ---: | ---: |
-| Original provider ranking | 0.8949 | 0.8203 | 0.6375 |
-| BM25 + RRF | **0.8971** | **0.8203** | **0.6500** |
-
-[Evaluation conditions, retrieval results, and resource measurements](./guides/benchmarks.md)
 
 ## Documentation
 
