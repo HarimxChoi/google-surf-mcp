@@ -9,6 +9,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { z } from 'zod';
 import { parallelExtractLimitSchema, parseSearchExtractLimit, searchExtractLimitSchema } from './searchLimits.js';
 import { RequirementsSchema } from './researchRequirements.js';
+import { ExcludedEvidenceRangeSchema } from './evidenceSchemas.js';
 
 const ToolSchema = z.enum(['search', 'search_parallel', 'extract', 'project_memory_search', 'project_memory']);
 const SearchToolSchema = z.enum(['search', 'project_memory_search']);
@@ -40,7 +41,7 @@ const ExtractArgumentsSchema = z.object({
   body_handle: z.string().min(1).max(200).optional(),
   refresh: z.boolean().optional(),
   exclude_spans: z.array(z.object({ start: z.number().int().min(0), end: z.number().int().positive() }).refine(x => x.end > x.start)).max(16).optional(),
-  exclude_ranges: z.array(z.tuple([z.number().int().min(0), z.number().int().positive()]).refine(x => x[1] > x[0])).max(16).optional(),
+  exclude_ranges: z.array(ExcludedEvidenceRangeSchema).max(16).optional(),
 }).strict();
 const LocalArgumentsSchema = z.object({
   project_id: z.string().min(1).max(64).optional(),

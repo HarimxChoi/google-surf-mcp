@@ -25,6 +25,7 @@ import { formatToolResponse } from './response.js';
 import { rerankLiveResponse } from './liveRerank.js';
 import { attachSearchEvidence } from './searchEvidence.js';
 import { RequirementsSchema } from './researchRequirements.js';
+import { ExcludedEvidenceRangeSchema } from './evidenceSchemas.js';
 import { trackSchema } from './runtimeIdentity.js';
 import { EXTRACTION_QUALITIES } from './extractionQuality.js';
 import { SourceReader } from './sourceReader.js';
@@ -592,7 +593,7 @@ const ExtractInput = {
   query: z.string().min(1).max(400).optional().describe('Question or missing aspect to locate inside the captured source. For a table identified in source_refs, use its exact label (for example Table 3-4) with evidence_mode=coherent and body_handle to read row context from the same snapshot instead of repeating web search. Response limits still apply.'),
   body_handle: z.string().min(1).max(200).optional().describe('Transient snapshot handle returned by a previous read. Bound to this URL and mode; expires after five minutes or bounded-cache eviction.'),
   exclude_spans: z.array(z.object({ start: z.number().int().min(0), end: z.number().int().positive() }).refine((span) => span.end > span.start, 'end must exceed start')).max(16).optional().describe('Previously read evidence content to omit. Shared table headers and code fences may repeat as context. Offsets are UTF-16 positions; end must exceed start.'),
-  exclude_ranges: z.array(z.tuple([z.number().int().min(0), z.number().int().positive()]).refine(range => range[1] > range[0], 'end must exceed start')).max(16).optional().describe('Compact alternative to exclude_spans: [start,end] pairs copied from evidence_ranges. UTF-16 offsets, end exclusive and greater than start; shared headers/fences may repeat.'),
+  exclude_ranges: z.array(ExcludedEvidenceRangeSchema).max(16).optional().describe('Compact alternative to exclude_spans: [start,end] pairs copied from evidence_ranges. UTF-16 offsets, end exclusive and greater than start; shared headers/fences may repeat.'),
   refresh: z.boolean().optional().describe('Explicitly capture a fresh URL instead of using the short-lived snapshot. Do not combine with body_handle.'),
   ...ProjectCaptureInput,
   max_chars: z.number().int().min(200).max(50_000).optional().describe(`Maximum returned characters when response_content=full. Defaults to 1500 for abstract and ${baseDeps.config.extractMaxChars} for full.`),
@@ -645,13 +646,13 @@ const EvidenceOutput = {
   captured_hash: z.string().optional(),
   captured_length: z.number().int().optional(),
   evidence_spans: z.array(z.object({ start: z.number().int(), end: z.number().int() })).optional(),
-  evidence_ranges: z.array(z.tuple([z.number().int(), z.number().int()])).optional().describe('Compact UTF-16 [start,end] pairs in captured clean text; end is exclusive.'),
+  evidence_ranges: z.array(z.array(z.number().int()).length(2)).optional().describe('Compact UTF-16 [start,end] pairs in captured clean text; end is exclusive.'),
   source_refs: z.object({
     pages: z.array(z.number().int().positive()),
     ocr_pages: z.array(z.number().int().positive()).optional(),
-    excerpt_pages: z.array(z.tuple([z.number().int().min(0), z.number().int().positive(), z.number().int().positive()])).optional().describe('UTF-16 [start,end,page] ranges in the returned content or description; unlike captured-text evidence_ranges. Gaps are unmapped excerpt separators.'),
+    excerpt_pages: z.array(z.array(z.number().int().min(0)).length(3).refine(range => range[1] > 0 && range[2] > 0)).optional().describe('UTF-16 [start,end,page] ranges in the returned content or description; unlike captured-text evidence_ranges. Gaps are unmapped excerpt separators.'),
     captions: z.array(z.object({ page: z.number().int().positive(), label: z.string(),
-      range: z.tuple([z.number().int().min(0), z.number().int().positive()]) })).optional(),
+      range: z.array(z.number().int().min(0)).length(2).refine(range => range[1] > 0) })).optional(),
     truncated: z.literal(true).optional(),
   }).optional().describe('Bounded source-page references. Caption labels are lexical candidates; caption ranges index captured text, while excerpt_pages indexes returned text. Not visual interpretation.'),
   quality_reason: z.string().optional(),

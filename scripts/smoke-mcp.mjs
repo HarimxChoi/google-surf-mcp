@@ -5,6 +5,25 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+function assertPortableToolSchemas(tools) {
+  const visit = (value, path) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value.items) || 'prefixItems' in value) {
+      throw new Error(`Tuple-form tool schema is not portable: ${path}`);
+    }
+    for (const [key, child] of Object.entries(value)) visit(child, `${path}.${key}`);
+  };
+  for (const tool of tools) {
+    visit(tool.inputSchema, `${tool.name}.inputSchema`);
+    visit(tool.outputSchema, `${tool.name}.outputSchema`);
+  }
+  const ranges = tools.find(tool => tool.name === 'extract')?.inputSchema.properties.exclude_ranges;
+  if (ranges?.maxItems !== 16 || ranges.items?.minItems !== 2 || ranges.items?.maxItems !== 2
+    || ranges.items?.items?.type !== 'integer' || ranges.items.items.minimum !== 0) {
+    throw new Error('extract compact range schema contract mismatch');
+  }
+}
+
 const root = mkdtempSync(join(tmpdir(), 'surf-mcp-smoke-'));
 const source = mkdtempSync(join(tmpdir(), 'surf-mcp-source-'));
 mkdirSync(join(source, 'src'));
@@ -35,6 +54,7 @@ try {
     if (!routing.includes(phrase)) throw new Error(`server routing instructions missing: ${phrase}`);
   }
   const listed = await offClient.listTools();
+  assertPortableToolSchemas(listed.tools);
   const names = listed.tools.map((tool) => tool.name).sort();
   const expected = [
     'extract', 'health', 'scholar_search', 'search', 'search_parallel',
@@ -130,6 +150,15 @@ try {
   if (!invalidLimit.isError || !invalidLimitText.includes(
     'extract_limit must be an integer between 1 and 10 for full parallel; received 11',
   )) throw new Error('search_parallel extract_limit error contract mismatch');
+  for (const exclude_ranges of [[[0]], [[0, 1, 2]], [[-1, 1]], [[1, 1]], [[2, 1]],
+    Array.from({ length: 17 }, () => [0, 1])]) {
+    const invalid = await offClient.callTool({ name: 'extract', arguments: {
+      url: 'https://example.org/source', exclude_ranges,
+    } });
+    if (!invalid.isError || !JSON.stringify(invalid.content).includes('Invalid arguments')) {
+      throw new Error('extract compact range runtime validation mismatch');
+    }
+  }
   const evidence = await offClient.callTool({ name: 'search_parallel', arguments: {
     queries: ['booking setup', 'fixture-failure', 'fixture-empty'], research_goal: 'Compare booking setup and limitations',
     limit: 2, extract_mode: 'none',
@@ -176,6 +205,7 @@ const transport = new StdioClientTransport({
 try {
   await client.connect(transport);
   const listed = await client.listTools();
+  assertPortableToolSchemas(listed.tools);
   const names = listed.tools.map((tool) => tool.name).sort();
   const expected = [
     'extract', 'health', 'project_memory', 'project_memory_search', 'scholar_search',

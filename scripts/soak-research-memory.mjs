@@ -84,7 +84,8 @@ function memorySample(phase, status) {
     phase,
     ...status.process,
     adapter_rss_bytes: status.adapter_process?.rss_bytes ?? 0,
-    observed_worker_rss_bytes: status.observed_worker_rss_bytes ?? status.process.rss_bytes,
+    observed_worker_rss_bytes: status.observed_worker_rss_bytes ?? status.process?.rss_bytes ?? null,
+    broker_observation: status.broker_observation ?? null,
     embedding: status.capabilities?.embedding ?? null,
     graph_cache_bytes: status.graph_cache_bytes ?? 0,
     storage_cache_budgets: status.capabilities?.storage_cache_budgets ?? null,
@@ -152,7 +153,11 @@ try {
   mkdirSync(sourceRoot, { recursive: true });
   writeFileSync(join(sourceRoot, 'soak.ts'), 'export const soak = "initial";\n', 'utf8');
   first = await connect('google-surf-memory-soak');
-  samples.push(memorySample('cold', await doctor(first.client)));
+  const cold = await doctor(first.client);
+  samples.push(memorySample('cold', cold));
+  if (cold.process || cold.observed_worker_rss_bytes !== null || existsSync(ownerPath)) {
+    throw new Error('cold doctor started or claimed to observe a research worker');
+  }
   const created = await first.client.callTool({
     name: 'project_memory',
     arguments: { action: 'create', project_id: 'memory-soak', name: 'Memory soak' },
@@ -229,6 +234,9 @@ try {
   samples.push(memorySample('reopen', afterReopen));
   const querySamples = samples.filter((sample) => sample.phase.startsWith('query-'));
   const queryRss = querySamples.map((sample) => sample.observed_worker_rss_bytes);
+  if (queryRss.some((rss) => !Number.isFinite(rss))) {
+    throw new Error('active memory query is missing its worker RSS observation');
+  }
   console.log(JSON.stringify({
     fixture: researchRoot,
     queries,
@@ -248,7 +256,7 @@ try {
       first_query_rss_bytes: queryRss[0] ?? null,
       last_query_rss_bytes: queryRss.at(-1) ?? null,
       query_rss_delta_bytes: queryRss.length > 1 ? queryRss.at(-1) - queryRss[0] : 0,
-      peak_observed_worker_rss_bytes: Math.max(...samples.map((sample) => sample.observed_worker_rss_bytes)),
+      peak_observed_worker_rss_bytes: Math.max(...samples.map((sample) => sample.observed_worker_rss_bytes).filter(Number.isFinite)),
     },
     samples,
   }, null, 2));
