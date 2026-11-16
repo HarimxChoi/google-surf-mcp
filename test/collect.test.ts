@@ -54,6 +54,17 @@ describe('replayable research collection', () => {
     expect(result.jobs.every(job => job.arguments.deep_read === true)).toBe(true);
   });
 
+  it('validates compact exclusion ranges without changing collection semantics', () => {
+    const spec = (exclude_ranges: unknown) => ({ schema_version: 1, collection_id: 'ranges', jobs: [
+      { tool: 'extract', url: 'https://example.org/paper.pdf', arguments: { exclude_ranges } },
+    ] });
+    expect(normalizeCollectionSpec(spec([[0, 10], [20, 30]])).jobs[0].arguments.exclude_ranges)
+      .toEqual([[0, 10], [20, 30]]);
+    for (const ranges of [[[0]], [[0, 1, 2]], [[-1, 1]], [[2, 1]], Array.from({ length: 17 }, () => [0, 1])]) {
+      expect(() => normalizeCollectionSpec(spec(ranges))).toThrow();
+    }
+  });
+
   it('normalizes web and local jobs with stable scoped arguments', () => {
     const input = {
       schema_version: 1,
