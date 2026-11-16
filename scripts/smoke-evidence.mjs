@@ -52,6 +52,7 @@ try {
       const search = await call('search', { query: 'LateEvidenceMarker WAL', limit: 1, extract_mode: 'full', extract_limit: 1, response_content: 'full', max_chars: 500 });
       assert.ok(!search.isError, JSON.stringify(search.structuredContent));
       const row = search.structuredContent.results[0];
+      assert.equal(typeof row.content, 'string', JSON.stringify({ row, meta: search.structuredContent.meta }));
       assert.match(row.content, /LateEvidenceMarker/);
       assert.ok(row.captured_length > 20000);
       assert.match(row.body_handle, /^transient:/);

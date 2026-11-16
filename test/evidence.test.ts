@@ -1,11 +1,53 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { EvidenceBodyCache, cleanCapturedText, evidenceTerms, selectEvidence } from '../src/evidence.js';
+import { EvidenceBodyCache, cleanCapturedSpan, cleanCapturedText, evidenceTerms, selectEvidence } from '../src/evidence.js';
 import { classifyExtractedText, usableEvidence } from '../src/extractionQuality.js';
 import { shapeExtractionResponse } from '../src/agent.js';
 import { formatToolResponse } from '../src/response.js';
 
 describe('query-focused source passages', () => {
+  it.each(['balanced', 'compact', 'coherent'] as const)('preserves a soft-wrapped condition in %s mode', (mode) => {
+    const source = 'The USB current limit increases automatically from the default 600mA to\n1.6A for devices connected to the four ports.\n\nOther product details.';
+    const selected = selectEvidence(source, 'USB current limit', 220, [], mode);
+    expect(selected.text).toContain('600mA');
+    expect(selected.text).toContain('1.6A');
+    expect(selected.text.length).toBeLessThanOrEqual(220);
+    expect(selected.spans.map(span => source.slice(span.start, span.end)).join('\n\n')).toBe(selected.text);
+  });
+
+  it('retains separate list items and columnar rows', () => {
+    const source = 'Header\n| Model | Limit |\n| Alpha | 16 |\n\n- First condition.\n- Second condition.\n\nMemory type      HBM2e\nMemory size      80 GB';
+    const selected = selectEvidence(source, 'Memory type', 80);
+    expect(selected.text).toContain('Memory type      HBM2e');
+    expect(selected.text.length).toBeLessThanOrEqual(80);
+  });
+
+  it('keeps adjacent table values with a matched row in coherent mode', () => {
+    const source = '| Specification | Value |\n| Memory type | HBM2e |\n| Memory size | 80 GB |\n| Bandwidth | 2,000 GB/s |';
+    const selected = selectEvidence(source, 'Memory type bandwidth', 300, [], 'coherent');
+    expect(selected.text).toContain('| Memory type | HBM2e |');
+    expect(selected.text).toContain('| Memory size | 80 GB |');
+    expect(selected.text).toContain('| Bandwidth | 2,000 GB/s |');
+    expect(selected.spans.map(span => source.slice(span.start, span.end)).join('\n\n')).toBe(selected.text);
+  });
+
+  it('keeps CRLF and whitespace-only paragraph boundaries separate', () => {
+    const source = 'Unrelated heading\r\n\r\nNative context: 8192 tokens\r\nrequires no extension.\r\n \r\nExtended context: 32768 tokens.';
+    const selected = selectEvidence(source, 'Native context no extension', 90, [], 'coherent');
+    expect(selected.text).toContain('Native context: 8192 tokens\r\nrequires no extension.');
+    expect(selected.text).not.toContain('Unrelated heading');
+    expect(selected.spans.map(span => source.slice(span.start, span.end)).join('\n\n')).toBe(selected.text);
+  });
+
+  it.each(['\n\n', '\r\n\r\n', '\r\n \r\n'])('does not join separate tables across %j', (gap) => {
+    const source = `| Old | Value |\n| A | 1 |${gap}| Device | Limit |\n| Cedar | 8192 |`;
+    const selected = selectEvidence(source, 'Cedar', 58, [], 'coherent');
+    expect(selected.text).toContain('| Device | Limit |');
+    expect(selected.text).toContain('| Cedar | 8192 |');
+    expect(selected.text).not.toContain('| Old | Value |');
+    expect(selectEvidence(source, 'Old', 58, [], 'coherent').text).not.toContain('| Device | Limit |');
+  });
+
   it('optionally preserves adjacent conditions as a short coherent paragraph', () => {
     const paragraph = 'Set key to hold the string value. If key already holds a value, it is overwritten. Any previous time to live associated with the key is discarded on successful SET operation.';
     const source = `${paragraph}\n\nKEEPTTL retains the expiry.\n\nOnly set the key if it already exists.`;
@@ -15,6 +57,20 @@ describe('query-focused source passages', () => {
     expect(result.spans.map(s => source.slice(s.start, s.end)).join('\n\n')).toBe(result.text);
     expect(result.captured_hash).toBe(selectEvidence(source, 'SET key KEEPTTL', 400).captured_hash);
     expect(selectEvidence(source, 'SET key KEEPTTL', 400)).toEqual(selectEvidence(source, 'SET key KEEPTTL', 400, [], 'balanced'));
+  });
+  it('anchors the most relevant short paragraph rather than the first weak match', () => {
+    const intro = 'Voltage control is part of the product overview. This introduction describes general features for developers.';
+    const answer = 'GPIO45 high selects 1.8V when EFUSE override is disabled. GPIO45 is ignored when EFUSE override is enabled.';
+    const source = intro + '\n\n' + answer;
+    const selected = selectEvidence(source, 'voltage control GPIO45 EFUSE override', 140, [], 'coherent');
+    expect(selected.text).toBe(answer);
+  });
+  it('skips non-fitting passages in bulk without changing exact bounded ranges', () => {
+    const source = Array.from({ length: 500 }, (_, n) => `A long unrelated passage ${n} needs no attention and cannot fit.`).join('\n\n') + '\n\nneedle = -42';
+    const selected = selectEvidence(source, 'needle -42', 24);
+    expect(selected.text).toContain('needle = -42');
+    expect(selected.text.length).toBeLessThanOrEqual(24);
+    expect(selected.spans.map(span => source.slice(span.start, span.end)).join('\n\n')).toBe(selected.text);
   });
   it('repeats coherent context only when an unseen sentence remains', () => {
     const first = 'Set key to hold the string value.';
@@ -69,6 +125,19 @@ describe('query-focused source passages', () => {
     expect(selectEvidence('word', 'word', 0).text).toBe('');
     expect(cleanCapturedText('\n--- BEGIN UNTRUSTED CONTENT ---\nTTL -1\n--- END UNTRUSTED CONTENT ---\n')).toBe('TTL -1');
     expect(evidenceTerms('TTL이 -1 -2 H×F')).toEqual(expect.arrayContaining(['ttl', '-1', '-2', 'h', 'f']));
+  });
+
+  it('canonicalizes nested wrappers once without losing CRLF body text or unmatched markers', () => {
+    const body = 'TTL -1\r\nTarget calibration is 0.73.';
+    const open = '--- BEGIN UNTRUSTED CONTENT ---\r\n', close = '\r\n--- END UNTRUSTED CONTENT ---';
+    for (const depth of [1, 2, 1000]) {
+      const clean = cleanCapturedText(open.repeat(depth) + body + close.repeat(depth));
+      expect(clean).toBe(body); expect(cleanCapturedText(clean)).toBe(clean);
+    }
+    expect(cleanCapturedText(open + close)).toBe('');
+    expect(cleanCapturedText(open + body)).toBe(open + body);
+    expect(cleanCapturedText(body + close)).toBe(body + close);
+    expect(cleanCapturedSpan(open + 'CONTENT' + close)).toEqual({ start: open.length, end: open.length + 7 });
   });
 
   it('offers compact selection without changing balanced defaults', () => {
@@ -140,6 +209,24 @@ describe('bounded transient source snapshots', () => {
     expect(cache.get('https://one.test', 'full', old)).toBeUndefined();
     expect(cache.stats().bytes).toBeLessThanOrEqual(20);
     expect(cache.put('https://large.test', { content: 'x'.repeat(30) }, 'full')).toBeUndefined();
+  });
+  it('reuses bounded Office metadata without inventing body text or sharing modes', () => {
+    const cache = new EvidenceBodyCache(4096);
+    const value = { document_catalog: { version: 1, format: 'pptx', source_sha256: 'a'.repeat(64),
+      producer_properties: [], presentation: { slide_count: 27 } } };
+    const id = cache.put('https://one.test/deck.pptx', value, 'metadata')!;
+    expect(id).toMatch(/^transient:/);
+    expect(cache.get('https://one.test/deck.pptx', 'metadata', id)?.document_catalog).toEqual(value.document_catalog);
+    expect(cache.get('https://one.test/deck.pptx', 'metadata', id)?.content).toBeUndefined();
+    expect(cache.get('https://one.test/deck.pptx', 'full', id)).toBeUndefined();
+    expect(cache.put('https://other.test', {}, 'metadata')).toBeUndefined();
+  });
+  it('accounts for metadata memory as well as body text', () => {
+    const cache = new EvidenceBodyCache(100);
+    expect(cache.put('https://one.test', { content: 'small', title: 'large metadata'.repeat(20) }, 'full')).toBeUndefined();
+    const native = { document_catalog: { version: 1, format: 'docx', source_sha256: 'a'.repeat(64) } };
+    expect(cache.put('https://one.test', native, 'metadata')).toBeUndefined();
+    expect(cache.stats().bytes).toBe(0);
   });
 });
 

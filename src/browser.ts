@@ -317,7 +317,7 @@ export const isBlocked = (url: string) =>
   url.includes('/sorry/') || isConsent(url);
 
 // Consent is dismissible; calling it a block charges the cascade a captcha.
-export async function detectBlock(page: Page): Promise<boolean> {
+export async function detectBlock(page: Page, strict = false): Promise<boolean> {
   if (isConsent(page.url())) return false;
   if (isBlocked(page.url())) return true;
   try {
@@ -325,7 +325,8 @@ export async function detectBlock(page: Page): Promise<boolean> {
       !!document.querySelector('form#captcha-form, iframe[src*="recaptcha"]') ||
       /unusual traffic|systems have detected|are not a robot/i.test(document.body?.innerText ?? ''),
     );
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return false;
   }
 }

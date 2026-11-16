@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { cascadeStatePath } from './cascadeStore.js';
 import { DEFAULT_RESEARCH_VECTOR_MODEL } from './research/dense.js';
+import { documentOcrSettings } from './documentSettings.js';
 import {
   DEFAULT_RESEARCH_QUERY_TIMEOUT_MS,
   MAX_RESEARCH_QUERY_TIMEOUT_MS,
@@ -172,7 +173,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       || env.SURF_SEARCH_API_KEY?.trim()
       || undefined,
     extractMaxChars: parseInt0(env.SURF_EXTRACT_MAX_CHARS, 50_000, 200, 50_000),
-    extractOcr: parseBool(env.SURF_EXTRACT_OCR, false),
+    extractOcr: documentOcrSettings(env).policy !== 'off',
     researchEnabled: parseBool(env.SURF_RESEARCH, true),
     researchRetrievalMode: parseResearchRetrievalMode(env.SURF_RETRIEVAL_MODE),
     researchRoot: resolve(env.SURF_RESEARCH_ROOT || join(profileRoot, 'research')),

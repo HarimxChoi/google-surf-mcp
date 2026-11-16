@@ -9,6 +9,12 @@ import { classifyExtractedText, type ExtractionQuality } from './extractionQuali
 import {
   isPdfMagic, isPdfContentType, extractPdfTiered, type PdfMode,
 } from './extract-pdf.js';
+import { isImageMagic, extractImage } from './extract-image.js';
+import type { ExtractionProvenance } from './extractionProvenance.js';
+import type { DocumentSourceMap } from './documentSourceMap.js';
+import type { DocumentCatalog } from './documentCatalog.js';
+import { isNativeDocumentCandidate } from './documentFormats.js';
+import { readBinaryDocument } from './documentReader.js';
 import {
   findCitationPdfUrl, findAbstractFromMeta,
   domainPdfTransform, findDocumentMetadata, findPmcUrlFromPubmed,
@@ -40,6 +46,16 @@ export interface ExtractResult extends DocumentMetadata {
   page_count?: number;
   extraction_quality?: ExtractionQuality;
   quality_reason?: string;
+  content_format?: 'text' | 'markdown';
+  is_image?: boolean;
+  image_width?: number;
+  image_height?: number;
+  extraction_method?: 'ocr';
+  extraction_provenance?: ExtractionProvenance;
+  source_map?: DocumentSourceMap;
+  document_format?: 'docx' | 'pptx' | 'hwp' | 'hwpx';
+  document_catalog?: DocumentCatalog;
+  contains_sensitive_content?: boolean;
   error?: string;
 }
 
@@ -161,8 +177,17 @@ interface DiscoveryResult {
   metadata?: DocumentMetadata;
 }
 
-async function readBounded(r: Response, strict = false): Promise<Buffer> {
-  if (!r.body) return Buffer.from(await r.arrayBuffer());
+class SourceSizeError extends Error {}
+
+async function readBounded(r: Response): Promise<Buffer> {
+  if (Number(r.headers.get('content-length')) > MAX_FETCH_BYTES) {
+    await r.body?.cancel(); throw new SourceSizeError('source resource exceeds 25 MiB');
+  }
+  if (!r.body) {
+    const bytes = Buffer.from(await r.arrayBuffer());
+    if (bytes.length > MAX_FETCH_BYTES) throw new SourceSizeError('source resource exceeds 25 MiB');
+    return bytes;
+  }
   const reader = r.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -172,10 +197,9 @@ async function readBounded(r: Response, strict = false): Promise<Buffer> {
     if (!value) continue;
     chunks.push(value);
     total += value.byteLength;
-    if (total > MAX_FETCH_BYTES || (!strict && total === MAX_FETCH_BYTES)) {
+    if (total > MAX_FETCH_BYTES) {
       try { await reader.cancel(); } catch {}
-      if (strict) throw new Error('browser resource exceeds 25 MiB');
-      break;
+      throw new SourceSizeError('source resource exceeds 25 MiB');
     }
   }
   return Buffer.concat(chunks);
@@ -200,7 +224,7 @@ export async function fetchBrowserResource(url: string, headers: Record<string, 
   try {
     const response = await fetch(url, { method, headers: safeHeaders, redirect: 'manual', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       ...(dispatcher ? { dispatcher } : {}) } as RequestInit & { dispatcher?: Agent });
-    const body = await readBounded(response, true);
+    const body = await readBounded(response);
     const responseHeaders = Object.fromEntries([...response.headers].filter(([name]) => !['content-encoding', 'content-length', 'transfer-encoding', 'set-cookie'].includes(name)));
     return { status: response.status, headers: responseHeaders, body };
   } finally { await dispatcher?.close().catch(() => {}); }
@@ -249,7 +273,7 @@ async function plainFetch(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<Fe
       }
       let buf: Buffer;
       try { buf = await readBounded(r); }
-      catch { return null; }
+      catch (error) { if (error instanceof SourceSizeError) throw error; return null; }
       finally { await dispatcher?.close().catch(() => {}); }
       return {
         status: r.status,
@@ -289,6 +313,41 @@ async function discoverViaFetch(
     } catch (e) {
       return { result: { url: r.finalUrl, error: `pdf parse failed: ${(e as Error).message.slice(0, 120)}` } };
     }
+  }
+
+  if (isImageMagic(r.buf) || r.ct.toLowerCase().startsWith('image/')) {
+    if (!isImageMagic(r.buf)) return { result: { url: r.finalUrl, error: 'unsupported image format',
+      extraction_quality: 'metadata_only', quality_reason: 'unsupported_image_format' } };
+    try {
+      return { result: await extractImage(new Uint8Array(r.buf), r.finalUrl, mode, maxChars) };
+    } catch (error) {
+      return { result: { url: r.finalUrl, error: `image parse failed: ${(error as Error).message.slice(0, 120)}`,
+        extraction_quality: 'metadata_only', quality_reason: 'image_parse_failed' } };
+    }
+  }
+
+  if (isNativeDocumentCandidate(r.buf, r.ct, r.finalUrl)) {
+    const document = await readBinaryDocument(r.buf, 'native', mode, maxChars);
+    return { result: { ...document, url: r.finalUrl } };
+  }
+
+  const mime = r.ct.split(';', 1)[0].trim().toLowerCase();
+  const charset = r.ct.match(/charset\s*=\s*"?([^;"\s]+)/i)?.[1]?.toLowerCase();
+  if (['text/plain', 'text/markdown', 'application/json', 'application/x-ndjson', 'application/xml', 'text/xml'].includes(mime)
+    && (!charset || ['utf-8', 'utf8', 'us-ascii'].includes(charset))) {
+    if (mode === 'metadata') return { result: { url: r.finalUrl, extraction_quality: 'metadata_only' } };
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(r.buf); }
+    catch { return { result: { url: r.finalUrl, error: 'plain text is not valid UTF-8',
+      extraction_quality: 'metadata_only', quality_reason: 'invalid_text_encoding' } }; }
+    const limit = mode === 'abstract' ? Math.min(2000, maxChars) : maxChars;
+    let end = Math.max(0, Math.min(limit, text.length));
+    if (end > 0 && end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    const content = text.slice(0, end);
+    return { result: { url: r.finalUrl, content, excerpt: content.slice(0, 200), length: content.length,
+      source_length: text.length, truncated: end < text.length,
+      content_format: mime === 'text/markdown' ? 'markdown' : 'text',
+      ...classifyExtractedText('', text), ...(mode === 'abstract' && text.trim() ? { extraction_quality: 'abstract' as const } : {}) } };
   }
 
   const html = r.buf.toString('utf-8');
@@ -383,6 +442,7 @@ export async function extract(
     discovery = await discoverViaFetch(url, mode, maxChars);
   } catch (e) {
     if (e instanceof SsrfBlockedError) return { url, error: e.message };
+    if (e instanceof SourceSizeError) return { url, error: e.message, extraction_quality: 'metadata_only', quality_reason: 'source_size_limit' };
     throw e;
   }
   const discovered = discovery.result;

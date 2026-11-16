@@ -234,11 +234,29 @@ async function waitForTarget(port: number, hostnames: string[], child: ChildProc
   throw new Error(`Chrome did not load ${hostnames[0]} before timeout`);
 }
 
-async function targetPage(browser: Browser, hostnames: string[]): Promise<Page> {
+function matchesRequestedPage(currentUrl: string, targetUrl: string): boolean {
+  try {
+    const current = new URL(currentUrl), target = new URL(targetUrl);
+    return current.origin === target.origin && current.pathname === target.pathname
+      && [...target.searchParams].every(([name, value]) => current.searchParams.get(name) === value);
+  } catch { return false; }
+}
+
+function isSearchGate(url: string): boolean {
+  try {
+    const current = new URL(url);
+    return current.hostname === 'consent.google.com'
+      || /(^|\.)google\.com$/.test(current.hostname) && /^\/sorry(?:\/|$)/.test(current.pathname);
+  } catch { return false; }
+}
+
+async function targetPage(browser: Browser, hostnames: string[], targetUrl: string): Promise<Page> {
   const pages = browser.contexts().flatMap((context) => context.pages());
-  const page = pages.find((candidate) => {
+  const candidates = pages.filter((candidate) => {
     try { return hostnames.includes(new URL(candidate.url()).hostname); } catch { return false; }
   });
+  const page = candidates.find(candidate => matchesRequestedPage(candidate.url(), targetUrl))
+    ?? candidates.find(candidate => isSearchGate(candidate.url())) ?? candidates[0];
   if (!page) throw new Error(`Chrome target page missing for ${hostnames[0]}`);
   return page;
 }
@@ -377,7 +395,8 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     let page: Page | undefined;
     try {
       page = await this.pageForLane(session, lane);
-      if (!created || lane !== 0) {
+      if (!created || lane !== 0
+        || !matchesRequestedPage(page.url(), targetUrl) && !isSearchGate(page.url())) {
         await this.waitForNavigationSlot();
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12_000 });
       }
@@ -401,9 +420,11 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
   }
 
   private async exposeCaptcha(session: NativeSession, page: Page): Promise<void> {
+    if (session.captchaPage && session.captchaPage !== page && !session.captchaPage.isClosed()) return;
     session.captchaPage = page;
     session.windowGuard?.kill();
     session.windowGuard = undefined;
+    await page.bringToFront().catch(() => {});
     if (session.child.pid) await this.setWindowState(session.child.pid, 3);
   }
 
@@ -412,7 +433,12 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     const page = session?.captchaPage;
     if (!session || !page) return;
     if (this.sessionAlive(session) && !page.isClosed()) {
-      const blocked = await detectBlock(page).catch(() => false);
+      let blocked: boolean;
+      try { blocked = await detectBlock(page, true); }
+      catch {
+        await this.exposeCaptcha(session, page);
+        throw new CaptchaError('native-captcha-check-unavailable', NATIVE_CAPTCHA_ACTION);
+      }
       if (blocked) {
         await this.exposeCaptcha(session, page);
         throw new CaptchaError('native-awaiting-user', NATIVE_CAPTCHA_ACTION);
@@ -482,9 +508,8 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
       await waitForTarget(port, hostnames, child);
       await new Promise<void>((resolve) => setTimeout(resolve, this.settleMs));
       browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 7_500 });
-      const page = await targetPage(browser, hostnames);
-      const webdriver = await page.evaluate(() => navigator.webdriver).catch(() => true);
-      if (webdriver) throw new Error('native Chrome exposed navigator.webdriver');
+      const page = await targetPage(browser, hostnames, targetUrl);
+      await this.verifyPageAutomationState(page);
       const session: NativeSession = { child, browser, pages: [page], windowGuard, dead: false };
       child.once('exit', () => { session.dead = true; });
       browser.once('disconnected', () => { session.dead = true; });
@@ -497,6 +522,22 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
       await clearProfileLocks(this.profileDir);
       windowGuard?.kill();
       throw error;
+    }
+  }
+
+  private async verifyPageAutomationState(page: Page): Promise<void> {
+    const deadline = Date.now() + 7_500;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (await page.evaluate(() => navigator.webdriver)) throw new Error('native Chrome exposed navigator.webdriver');
+        return;
+      } catch (error) {
+        // A navigation invalidates the execution context, not the automation flag.
+        if (attempt >= 2 || Date.now() >= deadline || page.isClosed()
+          || !/Execution context was destroyed/.test(error instanceof Error ? error.message : String(error))) throw error;
+        await page.waitForLoadState('domcontentloaded', { timeout: Math.max(1, deadline - Date.now()) });
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
   }
 

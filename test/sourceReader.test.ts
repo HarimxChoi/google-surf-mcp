@@ -6,11 +6,12 @@ import { SourceReader } from '../src/sourceReader.js';
 
 vi.mock('../src/extract.js', () => ({ extract: vi.fn(), checkUrlAsync: vi.fn() }));
 vi.mock('playwright', () => ({ chromium: { launch: vi.fn() } }));
+vi.mock('../src/browser.js', () => ({ detectSystemChrome: () => 'system-chrome' }));
 const mockedExtract = vi.mocked(extract);
 const context = {} as BrowserContext;
 const config = () => loadConfig({ SURF_IDLE_CLOSE_MS: '100' });
 const readers: SourceReader[] = [];
-beforeEach(() => { vi.useFakeTimers(); mockedExtract.mockReset(); });
+beforeEach(() => { vi.useFakeTimers(); mockedExtract.mockReset(); vi.mocked(chromium.launch).mockReset(); });
 afterEach(async () => { for (const reader of readers.splice(0)) await reader.dispose(); vi.useRealTimers(); });
 
 describe('isolated source reader lifecycle', () => {
@@ -25,9 +26,38 @@ describe('isolated source reader lifecycle', () => {
     const reader = new SourceReader(config()); readers.push(reader);
     await reader.read('https://example.org', 500);
     expect(chromium.launch).toHaveBeenCalledWith(expect.objectContaining({ headless: true }));
+    expect(vi.mocked(chromium.launch).mock.calls[0][0]?.executablePath).toBeUndefined();
     expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ serviceWorkers: 'block', acceptDownloads: false }));
     expect(sourceContext.route).toHaveBeenCalledWith('**/*', expect.any(Function));
     expect(sourceContext.routeWebSocket).toHaveBeenCalledWith('**/*', expect.any(Function));
+  });
+
+  it('falls back to system Chrome only when the bundled executable is missing', async () => {
+    const sourceContext = { route: vi.fn(async () => {}), routeWebSocket: vi.fn(async () => {}) } as unknown as BrowserContext;
+    const browser = { newContext: vi.fn(async () => sourceContext), close: vi.fn(async () => {}) };
+    vi.mocked(chromium.launch).mockRejectedValueOnce(new Error("Executable doesn't exist at bundled/chrome"))
+      .mockResolvedValueOnce(browser as never);
+    mockedExtract.mockImplementation(async lazy => {
+      await (lazy as () => Promise<BrowserContext>)(); return { url: 'https://example.org', content: 'Fact' };
+    });
+    const reader = new SourceReader(config()); readers.push(reader);
+    await reader.read('https://example.org', 500);
+    expect(chromium.launch).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(chromium.launch).mock.calls[1][0]).toMatchObject({ executablePath: 'system-chrome', headless: true });
+  });
+
+  it.each([false, true])('does not retry unrelated or explicitly configured executable failures (%s)', async explicit => {
+    const settings = config();
+    if (explicit) settings.chromePath = 'configured-chrome';
+    const error = new Error(explicit ? "Executable doesn't exist at configured-chrome" : 'browser crashed');
+    vi.mocked(chromium.launch).mockRejectedValueOnce(error);
+    mockedExtract.mockImplementation(async lazy => {
+      await (lazy as () => Promise<BrowserContext>)(); return { url: 'https://example.org' };
+    });
+    const reader = new SourceReader(settings); readers.push(reader);
+    await expect(reader.read('https://example.org', 500)).rejects.toBe(error);
+    expect(chromium.launch).toHaveBeenCalledOnce();
+    expect(reader.stats()).toMatchObject({ initialized: false, active: 0 });
   });
 
   it('does not initialize a browser for HTTP-only metadata', async () => {

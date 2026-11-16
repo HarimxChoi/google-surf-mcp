@@ -19,14 +19,65 @@ export function evidenceTerms(value: string): string[] {
     .filter((word) => !STOP.has(word) && /[\p{L}\p{N}]/u.test(word)))];
 }
 
+export function cleanCapturedSpan(value: string): EvidenceSpan {
+  const opening = /\s*--- BEGIN UNTRUSTED CONTENT ---\r?\n/y;
+  const closing = '--- END UNTRUSTED CONTENT ---';
+  let start = 0, end = value.length;
+  // One canonical window keeps repeated callers and source-map offsets aligned.
+  for (;;) {
+    opening.lastIndex = start;
+    if (!opening.test(value)) break;
+    let limit = end;
+    while (limit > start && /\s/.test(value[limit - 1])) limit--;
+    const close = limit - closing.length;
+    if (close < opening.lastIndex || value.slice(close, limit) !== closing || value[close - 1] !== '\n') break;
+    let bodyEnd = close - 1;
+    if (value[bodyEnd - 1] === '\r') bodyEnd--;
+    if (bodyEnd < opening.lastIndex) break;
+    start = opening.lastIndex; end = bodyEnd;
+  }
+  return { start, end };
+}
+
 export function cleanCapturedText(value: string): string {
-  const match = value.match(/^\s*--- BEGIN UNTRUSTED CONTENT ---\r?\n([\s\S]*)\r?\n--- END UNTRUSTED CONTENT ---\s*$/);
-  return match ? match[1] : value;
+  const { start, end } = cleanCapturedSpan(value);
+  return value.slice(start, end);
 }
 
 interface Passage { spans: EvidenceSpan[]; primary: EvidenceSpan[]; text: string; terms: Set<string>; index: number; score: number }
 
-function passages(text: string, maxChars: number, mode: EvidenceMode, excluded: EvidenceSpan[]): Passage[] {
+function sourceLines(text: string): Array<{ index: number; 0: string }> {
+  const output: Array<{ index: number; 0: string }> = [];
+  let pending: { start: number; end: number; last: string } | undefined;
+  let code = false;
+  const flush = () => {
+    if (pending) output.push({ index: pending.start, 0: text.slice(pending.start, pending.end) });
+    pending = undefined;
+  };
+  for (const line of text.matchAll(/[^\n]+(?:\n|$)/g)) {
+    const start = line.index!, body = line[0].trimEnd(), end = start + body.length;
+    if (!body.trim()) { flush(); continue; }
+    const fence = /^\s*```/.test(body);
+    const structured = code || fence || /^\s*(?:[#|`]|[-*+]\s|\d+[.)]\s)/.test(body)
+      || /\S[ \t]{2,}\S/.test(body);
+    if (structured) {
+      flush(); output.push({ index: start, 0: body });
+      if (fence) code = !code;
+      continue;
+    }
+    // Keep PDF soft wraps together without changing original source offsets.
+    if (pending && !/\n\s*\n/.test(text.slice(pending.end, start))
+      && !/[.!?\u3002\uff01\uff1f][)\]"']*$/.test(pending.last)) {
+      pending.end = end; pending.last = body;
+    } else {
+      flush(); pending = { start, end, last: body };
+    }
+  }
+  flush();
+  return output;
+}
+
+function passages(text: string, maxChars: number, mode: EvidenceMode, excluded: EvidenceSpan[], boundaries: number[]): Passage[] {
   const output: Passage[] = [];
   const add = (spans: EvidenceSpan[], primary = spans) => {
     const body = spans.map((span) => text.slice(span.start, span.end)).join('\n');
@@ -44,13 +95,18 @@ function passages(text: string, maxChars: number, mode: EvidenceMode, excluded: 
     }
     flush();
   };
-  const lines = [...text.matchAll(/[^\n]+(?:\n|$)/g)];
+  const lines = sourceLines(text);
   let code: EvidenceSpan[] | undefined;
   let tableHeader: EvidenceSpan | undefined;
   let lineIndex = -1;
+  let boundaryIndex = 0;
   for (const line of lines) {
     lineIndex++;
     const start = line.index!, end = start + line[0].trimEnd().length;
+    if (boundaries[boundaryIndex] <= start) {
+      tableHeader = undefined;
+      while (boundaries[boundaryIndex] <= start) boundaryIndex++;
+    }
     if (/^\s*```/.test(line[0])) {
       if (code) { code.push({ start, end }); addCode(code, true); code = undefined; }
       else code = [{ start, end }];
@@ -59,9 +115,26 @@ function passages(text: string, maxChars: number, mode: EvidenceMode, excluded: 
     if (code) { code.push({ start, end }); continue; }
     if (/^\s*(?:[-*]\s*)?\[?(?:report an issue|edit this page|edit on github|view markdown|copy markdown|privacy policy|cookie settings|copyright)\b/i.test(line[0])) continue;
     if (/^\s*\|/.test(line[0])) {
+      const previous = lines[lineIndex - 1];
+      if (!previous || !/^\s*\|/.test(previous[0])
+        || /\n\s*\n/.test(text.slice(previous.index + previous[0].trimEnd().length, start))) tableHeader = undefined;
       if (/^\s*\|?[\s:|-]+\|\s*$/.test(line[0])) continue;
       if (!tableHeader) { tableHeader = { start, end }; add([tableHeader]); }
-      else add([tableHeader, { start, end }], [{ start, end }]);
+      else {
+        const row = { start, end };
+        const context = [tableHeader, row];
+        if (mode === 'coherent') {
+          for (const adjacent of [lines[lineIndex - 1], lines[lineIndex + 1]]) {
+            if (!adjacent || !/^\s*\|/.test(adjacent[0]) || /^\s*\|?[\s:|-]+\|\s*$/.test(adjacent[0])) continue;
+            const span = { start: adjacent.index, end: adjacent.index + adjacent[0].trimEnd().length };
+            if (/\n\s*\n/.test(span.start > end ? text.slice(end, span.start) : text.slice(span.end, start))) continue;
+            if (context.some(item => item.start === span.start)) continue;
+            if (mergeSpans([...context, span]).reduce((sum, item) => sum + item.end - item.start + 2, 0)
+              <= Math.min(500, maxChars)) context.push(span);
+          }
+        }
+        add(mergeSpans(context), [row]);
+      }
       continue;
     }
     tableHeader = undefined;
@@ -76,13 +149,13 @@ function passages(text: string, maxChars: number, mode: EvidenceMode, excluded: 
       }
     }
     if (mode === 'coherent' && end - start <= Math.max(80, Math.min(500, maxChars))) {
-      const primary = [...SENTENCES.segment(line[0].trimEnd())].map(segment => ({
+      const primary = [...SENTENCES.segment(line[0].trimEnd().replace(/[\r\n]/g, ' '))].map(segment => ({
         start: start + segment.index, end: start + segment.index + segment.segment.length,
       })).filter(span => !excluded.some(skip => span.start < skip.end && skip.start < span.end));
       if (primary.length) add([{ start, end }], primary);
       continue;
     }
-    for (const segment of SENTENCES.segment(line[0].trimEnd())) {
+    for (const segment of SENTENCES.segment(line[0].trimEnd().replace(/[\r\n]/g, ' '))) {
       let cursor = start + segment.index;
       const limit = cursor + segment.segment.length;
       const target = Math.max(80, Math.min(500, maxChars));
@@ -123,12 +196,15 @@ export function selectEvidence(
   maxChars: number,
   excluded: EvidenceSpan[] = [],
   mode: EvidenceMode = 'balanced',
+  pageBoundaries: number[] = [],
 ): EvidenceSelection {
   const text = cleanCapturedText(value);
   const hash = createHash('sha256').update(text).digest('hex');
   const budget = Math.max(0, Math.floor(maxChars));
   const terms = evidenceTerms(query);
-  const candidates = passages(text, budget, mode, excluded).filter((passage) => !passage.primary.some((span) =>
+  const boundaries = [...new Set(pageBoundaries.filter(value => Number.isSafeInteger(value) && value > 0 && value < text.length))].sort((a, b) => a - b);
+  let candidates = passages(text, budget, mode, excluded, boundaries);
+  candidates = candidates.filter((passage) => !passage.primary.some((span) =>
     excluded.some((skip) => span.start < skip.end && skip.start < span.end)));
   const average = candidates.reduce((n, p) => n + p.terms.size, 0) / Math.max(candidates.length, 1);
   const frequencies = new Map(terms.map((term) => [term, candidates.filter((p) => p.terms.has(term)).length]));
@@ -146,10 +222,14 @@ export function selectEvidence(
   const covered = new Set<string>();
   let spans: EvidenceSpan[] = [], content = '';
   if (mode === 'coherent') {
-    const anchor = candidates.findIndex(p => p.spans.length === 1 && p.score > 0
-      && p.text.length >= 80 && p.text.length <= Math.min(500, budget)
-      && !/^\s*(?:[#|]|[-*+]\s|\d+[.)]\s|```)/.test(p.text)
-      && [...SENTENCES.segment(p.text)].length > 1);
+    let anchor = -1;
+    candidates.forEach((p, index) => {
+      if (p.spans.length === 1 && p.score > 0
+        && p.text.length >= 80 && p.text.length <= Math.min(500, budget)
+        && !/^\s*(?:[#|]|[-*+]\s|\d+[.)]\s|```)/.test(p.text)
+        && [...SENTENCES.segment(p.text)].length > 1
+        && (anchor < 0 || p.score > candidates[anchor].score)) anchor = index;
+    });
     if (anchor >= 0) {
       const [paragraph] = candidates.splice(anchor, 1);
       selected.push(paragraph); spans = paragraph.spans; content = paragraph.text;
@@ -157,6 +237,10 @@ export function selectEvidence(
     }
   }
   while (candidates.length && selected.length < (mode === 'compact' ? 5 : 12)) {
+    // The selected union only grows, so a non-fitting candidate cannot become fitting later.
+    candidates = candidates.filter(p => (!selected.length || !terms.length || p.score > 0)
+      && mergeSpans([...spans, ...p.spans]).reduce((size, span, index) => size + span.end - span.start + (index ? 2 : 0), 0) <= budget);
+    if (!candidates.length) break;
     const scores = new Map(candidates.map(p => {
       const relevance = p.score + terms.filter((t) => p.terms.has(t) && !covered.has(t)).length * .7;
       if (mode !== 'compact') return [p, relevance] as const;
@@ -193,8 +277,15 @@ export class EvidenceBodyCache {
   }
   put(url: string, value: Record<string, unknown>, mode: string): string | undefined {
     this.prune();
-    if (typeof value.content !== 'string' || !value.content) return undefined;
-    const size = Math.max(Buffer.byteLength(value.content, 'utf8'), value.content.length * 2);
+    const body = typeof value.content === 'string' ? value.content : '';
+    const catalog = value.document_catalog as { version?: number; source_sha256?: string; format?: string } | undefined;
+    const officeMetadata = mode === 'metadata' && catalog?.version === 1
+      && ['docx', 'pptx'].includes(String(catalog.format)) && /^[a-f0-9]{64}$/.test(String(catalog.source_sha256));
+    if (!body && !officeMetadata) return undefined;
+    const { content: _content, ...metadata } = value;
+    const serializedMetadata = JSON.stringify(metadata);
+    const size = Math.max(Buffer.byteLength(body, 'utf8'), body.length * 2)
+      + Math.max(Buffer.byteLength(serializedMetadata, 'utf8'), serializedMetadata.length * 2);
     if (size > this.maxBytes) return undefined;
     while (this.entries.size && (this.bytes + size > this.maxBytes || this.entries.size >= 32)) this.remove(this.entries.keys().next().value!);
     const id = `transient:${randomUUID()}`;

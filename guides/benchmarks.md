@@ -6,6 +6,37 @@ Recorded search, retrieval, vector-backend, and broker checks with their origina
 
 ## Numbers
 
+### NVIDIA Auto Ontology comparison
+
+The recorded 2026-11-05 comparison used 48 revision-pinned model-card/configuration snapshots from 16 open-weight model releases, with 40 development questions and 120 held-out evaluation questions. The models in the corpus were the subject matter, not the answer generators.
+
+| Context supplied to the shared SQL answerer | Correct / 120 |
+|---|---:|
+| Google Surf Auto Ontology | 116 |
+| NVIDIA Auto Ontology | 113 |
+
+Both contexts used the same `deepseek-flash` API identifier, temperature 0, thinking disabled, shared SQL-generation prompt, domain rules, schema, and read-only target database. The 120 questions covered 91 scalar results and 29 missing/unanswerable cases. Numeric results used a 1e-9 comparison tolerance; missing-value cases were scored separately from infrastructure failures. The API identifier is not an immutable model-weight snapshot.
+
+NVIDIA used official source revision `2a24f5d34ef6b6e168a7f22d308504d3ab36a198` with external provider/transport adapters. The primary embedding configurations differed: NVIDIA `nvidia/nemotron-3.5-embed-1b` (2048 dimensions), Surf `Xenova/multilingual-e5-small` q8 (384 dimensions). A separate matched-E5 NVIDIA run also scored 113/120. This is a shared SQL-evaluation track, not a comparison of default/native product agents or a general ontology-quality ranking.
+
+The paired outcomes were 110 correct for both, 6 Surf-only, 3 NVIDIA-only, and 1 missed by both. The three-question gap does not establish general superiority. The corpus and question templates overlap by entity; this small task-specific evaluation is historical, not a score for every later source change. The adjacent graphic uses the saved generated ontology records; graph shape is not itself a quality metric.
+
+Saved execution anchors: Surf service SHA-256 `320caf53340bed765e4879e01aef5988f9c6ae5de77714cd1ad4983d584283b4`, tools SHA-256 `a87896a7ebd380774fd22badfefdf7518f6237eb2b88b2a7782777482deab126`. These are local evaluation-source hashes, not a claimed public release commit. The graphic SHA-256 is `1c35263eac4f4e4f45988959d819e51f51b8be516ee5768d2ced0a1494a2aea7`. This page summarizes saved runs; it is not a complete reproduction bundle.
+
+### Web answers vs Google AI Mode
+
+| Recorded run | Questions | Required checkpoints | Surf + host fully met | AI Mode fully met |
+|---|---:|---:|---:|---:|
+| 2026-11-06 baseline | 12 | 36 | 18 | 35 |
+| 2026-11-07 paired regression set | 8 | 24 | 22 | 24 |
+| Later Host V2 replay of that set | 8 | 24 | 20 | 24 (saved answers) |
+
+Each question had three required factual/conditional checkpoints. A partial or contradicted checkpoint was not counted as fully met. These totals do not mean every additional claim in an answer was correct. The eight questions were reused regressions, not a fresh hold-out sample; the twelve-question set combined eight regressions and four additions. Do not combine the sets into an improvement percentage.
+
+Topics included Python TaskGroup, SQLite WAL, Kubernetes probes, Fetch, Redis TTL, Compose readiness, PyTorch inference/eval, and Rust poisoning. The Surf host was `deepseek-flash`, temperature 0, non-thinking, with private/project memory off. Outer limits were 180 seconds, at most 3 Surf searches, 6 source reads and 3 host calls, with a 1,200-character Korean answer and up to 6 cited sources. AI Mode used one fresh visible request; its internal model, compute, search count, cache and personalization were not observable. Equal outer task limits do not imply equal internal compute.
+
+The paired run used runtime build SHA-256 `f69310d2886dada395a3d2bfffe4846e2567c68ee4e320e01476f7bab53fe944`; Host V2 used `f539cf3e7d6e0945378708295faeec521f075ab35c734a2ef698d1462e071495`. V2 changed post-hoc prompts and source forwarding and reused the earlier AI answers. Later four-question document diagnostics are a different population, and the new same-eight-question comparison remained incomplete. None of these is a new current-release score.
+
 ### Search speed
 
 | | result |

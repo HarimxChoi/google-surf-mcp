@@ -248,6 +248,7 @@ export async function projectMemorySearchTool(
           url: hit.url,
           description: hit.description,
           content: hit.content,
+          source_map: hit.source_map,
           document_id: hit.document_id,
           record_id: hit.record_id,
           revision_id: hit.revision_id,
@@ -312,6 +313,7 @@ export async function projectMemorySearchTool(
       url: hit.url,
       description: hit.description,
       content: hit.content,
+      source_map: hit.source_map,
       document_id: hit.document_id,
       record_id: hit.record_id,
       revision_id: hit.revision_id,
@@ -425,9 +427,10 @@ export async function projectMemoryTool(
     }
 
     if (input.action === 'doctor') {
-      const doctor = await service.passiveStatus();
+      const doctor = await service.peekStatus();
       const adapterMemory = process.memoryUsage();
-      const separateAdapter = doctor.process.pid !== process.pid;
+      const worker = 'process' in doctor ? doctor.process : undefined;
+      const separateAdapter = !worker || worker.pid !== process.pid;
       return formatToolResponse({
         doctor: {
           ...doctor,
@@ -437,8 +440,8 @@ export async function projectMemoryTool(
             rss_bytes: adapterMemory.rss,
             heap_used_bytes: adapterMemory.heapUsed,
           } : null,
-          observed_worker_rss_bytes: doctor.process.rss_bytes
-            + (separateAdapter ? adapterMemory.rss : 0),
+          observed_worker_rss_bytes: worker
+            ? worker.rss_bytes + (separateAdapter ? adapterMemory.rss : 0) : null,
           private_bytes_note: 'Current private bytes are not exposed portably by Node.js and are not inferred from RSS.',
         },
         memory: 'Auto Ontology doctor: passive | Database/model opened: no',
@@ -460,6 +463,13 @@ export async function projectMemoryTool(
       const projectId = requireProject(input);
       const recordId = input.record_id ?? input.target_id;
       if (!recordId) throw new Error('record_id required');
+      if (input.query !== undefined) {
+        if ([input.body_offset, input.body_bytes, input.artifact_offset, input.artifact_limit].some(value => value !== undefined)) {
+          throw new Error('query-focused get cannot combine raw paging fields; omit them for a bounded source read, or omit query for exact byte paging');
+        }
+        const record = await service.readProjectEvidence(projectId, recordId, input.query, input.revision);
+        return formatToolResponse({ record, memory: `Project: ${projectId} | Focused record: ${recordId} | Status: ready` });
+      }
       const record = await service.getCatalogRecord(
         projectId,
         recordId,
@@ -476,6 +486,7 @@ export async function projectMemoryTool(
     }
 
     if (input.action === 'get_batch') {
+      if (input.query !== undefined) throw new Error('query-focused reads use action=get with one record_id; use project_memory_search for grouped retrieval, or omit query for exact batch paging');
       const projectId = requireProject(input);
       if (!input.record_ids?.length) throw new Error('record_ids required');
       const records = await service.getCatalogRecords(projectId, input.record_ids, {

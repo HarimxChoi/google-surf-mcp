@@ -45,6 +45,14 @@ describe('replayable research collection', () => {
     expect(() => normalizeCollectionSpec({ schema_version: 1, collection_id: 'bad', jobs: [{ tool: 'extract', url: 'file:///private' }] })).toThrow();
     expect(() => normalizeCollectionSpec({ schema_version: 1, collection_id: 'bad', jobs: [{ tool: 'search_parallel', queries: ['a', 'b'], arguments: { extract_mode: 'full', extract_limit: 11 } }] })).toThrow('between 1 and 10');
   });
+  it('preserves explicit deep-read opt-in for search, parallel and known-source collection jobs', () => {
+    const result = normalizeCollectionSpec({ schema_version: 1, collection_id: 'deep', jobs: [
+      { tool: 'search', query: 'source', arguments: { extract_mode: 'full', deep_read: true } },
+      { tool: 'search_parallel', queries: ['source', 'other'], arguments: { extract_mode: 'full', deep_read: true } },
+      { tool: 'extract', url: 'https://example.org/paper.pdf', arguments: { deep_read: true, query: 'Table 3-4' } },
+    ] });
+    expect(result.jobs.every(job => job.arguments.deep_read === true)).toBe(true);
+  });
 
   it('normalizes web and local jobs with stable scoped arguments', () => {
     const input = {

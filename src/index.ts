@@ -482,7 +482,14 @@ function buildDeps(): Deps {
 }
 
 
-const server = new McpServer({ name: NAME, version: VERSION });
+const server = new McpServer({ name: NAME, version: VERSION }, {
+  instructions:
+    'Choose by source: new public information -> search (one query) or search_parallel (2-12 queries), with extract_mode when reading is needed; known public URL -> extract; indexed local knowledge -> project_memory_search, never live web. If local tools are absent, Auto Ontology must be enabled; do not substitute live search. ' +
+    'Known stored record -> project_memory get with query or bounded spans; project overview -> context; complete-population counts/calculations -> aggregate, not top-k hits. ' +
+    'Ranking is automatic: live-only search uses BM25/RRF without E5; local search adds configured E5/vector and graph lanes before final ranking. Batch related angles with query_variants and independent questions with queries. ' +
+    'Document reading uses native parsers and configured CPU LiteParse OCR, not an external vision model by default. Check extraction_quality, quality_reason and degraded_lanes; unread images and missing text are not evidence. Read another captured span before repeating discovery. ' +
+    'On CAPTCHA, stop further web requests, let the user solve the visible challenge in the same browser session, then retry after confirmation; do not repeatedly refresh, relaunch browsers or assume recovery from a page-read error.',
+});
 server.server.onerror = (e: unknown) => console.error('[mcp]', e);
 
 process.on('SIGINT', () => { shutdown().finally(() => process.exit(0)); });
@@ -516,13 +523,17 @@ const SearchExtractionModeField = z.enum(['none', 'abstract', 'full']).default('
 );
 
 const EvidenceModeField = z.enum(['balanced', 'compact', 'coherent']).optional().describe(
-  'Passage selection policy. balanced is the unchanged default. compact prefers fewer byte-efficient passages and may omit details. coherent keeps adjacent sentences in short paragraphs together; previously seen context can repeat around unseen facts. Use query/body_handle for follow-up. This is not an exact model-token limit.',
+  'Passage selection policy. balanced is the default. compact prefers fewer byte-efficient passages and may omit details. Use coherent for multi-sentence conditions and table values: it preserves short paragraphs and bounded neighboring rows. With a verified PDF page map, an exact table label in query (for example Table 3-4) prioritizes bounded native table row windows. Previously seen context can repeat around unseen facts. Use query/body_handle for follow-up. This is not an exact model-token limit.',
+);
+const DeepReadField = z.boolean().optional().describe(
+  'Opt in to capture up to 1,000,000 source characters for full reads even when Auto Ontology is off (default 50,000). Returned max_chars is unchanged. Uses the bounded transient cache, not a database. A clipped body_handle requires refresh=true without that handle.',
 );
 const SingleSearchExtractionFields = {
   requirements: RequirementsSchema.describe('Up to 12 host-defined facts or conditions to investigate. Unique IDs; optional query_indices maps each requirement to query positions. Returned lexical candidates are not proof; the host must assess unresolved items.'),
   request_id: z.string().min(1).max(120).optional().describe('Caller correlation ID for the research response contract; not a database query cancellation handle.'),
   evidence_mode: EvidenceModeField,
   extract_mode: SearchExtractionModeField,
+  deep_read: DeepReadField,
   extract_limit: searchExtractLimitSchema().describe(
     `Maximum unique result URLs to extract. Integer ${MIN_SEARCH_EXTRACT_LIMIT}-${MAX_SEARCH_EXTRACT_LIMIT}, default ${DEFAULT_SEARCH_EXTRACT_LIMIT}.`,
   ),
@@ -538,6 +549,7 @@ const ParallelSearchExtractionFields = {
   requirements: RequirementsSchema.describe('Up to 12 host-defined requirements with unique IDs and optional zero-based query_indices. Returns candidate evidence references and next actions, never automatic semantic completion.'),
   request_id: z.string().min(1).max(120).optional(),
   evidence_mode: EvidenceModeField,
+  deep_read: DeepReadField,
   extract_mode: z.enum(['none', 'abstract', 'full']).default('none').describe(
     'Content depth in this search call. Use none only when titles and snippets are enough, abstract for relevance evidence, and full when the user asks to read originals, full text, document bodies, or code, or to compare source contents. Use abstract or full here instead of following search with separate extraction, PDF download, or repository clone. For GitHub results, none reads the README; abstract and full use the same repository eligibility gate but index different source amounts.',
   ),
@@ -575,8 +587,9 @@ const SearchParallelInput = {
 
 const ExtractInput = {
   evidence_mode: EvidenceModeField,
+  deep_read: DeepReadField,
   url: z.string().describe('Public http(s) URL. Loopback/private IPs blocked unless SURF_ALLOW_PRIVATE=true.'),
-  query: z.string().min(1).max(400).optional().describe('Question or missing aspect to locate inside the captured source. Reuses a bounded cached snapshot instead of repeating web search.'),
+  query: z.string().min(1).max(400).optional().describe('Question or missing aspect to locate inside the captured source. For a table identified in source_refs, use its exact label (for example Table 3-4) with evidence_mode=coherent and body_handle to read row context from the same snapshot instead of repeating web search. Response limits still apply.'),
   body_handle: z.string().min(1).max(200).optional().describe('Transient snapshot handle returned by a previous read. Bound to this URL and mode; expires after five minutes or bounded-cache eviction.'),
   exclude_spans: z.array(z.object({ start: z.number().int().min(0), end: z.number().int().positive() }).refine((span) => span.end > span.start, 'end must exceed start')).max(16).optional().describe('Previously read evidence content to omit. Shared table headers and code fences may repeat as context. Offsets are UTF-16 positions; end must exceed start.'),
   exclude_ranges: z.array(z.tuple([z.number().int().min(0), z.number().int().positive()]).refine(range => range[1] > range[0], 'end must exceed start')).max(16).optional().describe('Compact alternative to exclude_spans: [start,end] pairs copied from evidence_ranges. UTF-16 offsets, end exclusive and greater than start; shared headers/fences may repeat.'),
@@ -610,6 +623,20 @@ const DocumentMetadataOutput = {
   modified_at: z.string().optional(),
 };
 
+const DocumentCatalogOutput = z.object({
+  version: z.literal(1), source_sha256: z.string().regex(/^[a-f0-9]{64}$/), format: z.enum(['docx', 'pptx']),
+  producer_properties: z.array(z.object({ part: z.string(), name: z.string(), value: z.string() })),
+  source_parts: z.array(z.object({ part: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) })),
+  details_truncated: z.boolean(),
+  presentation: z.object({
+    slide_count: z.number().int().min(0), slide_parts_complete: z.boolean(), hidden_slide_count: z.number().int().min(0), hidden_slide_indexes: z.array(z.number().int().positive()),
+    notes_relationship_slide_count: z.number().int().min(0), notes_relationship_slide_indexes: z.array(z.number().int().positive()),
+    nonempty_note_slide_count: z.number().int().min(0), nonempty_note_slide_indexes: z.array(z.number().int().positive()),
+    note_body_scope_complete: z.boolean(), unresolved_slide_indexes: z.array(z.number().int().positive()),
+    sections: z.array(z.object({ name: z.string(), slide_indexes: z.array(z.number().int().positive()) })),
+  }).optional(),
+}).optional().describe('Source-wide DOCX/PPTX metadata, capped at 6000 UTF-16 characters within the response budget. Producer properties, notes relationships and nonempty note-body counts have different meanings; differences do not establish stale metadata. Slide indexes are one-based. Hidden count is a lower bound unless slide_parts_complete=true; nonempty note count is a lower bound unless note_body_scope_complete=true. Truncated lists are not absence evidence. DOCX producer page counts and XML facts are not rendered visual verification.');
+
 // All-optional + `error` field: one schema validates success and error payloads.
 const EvidenceOutput = {
   body_handle: z.string().optional(),
@@ -619,7 +646,29 @@ const EvidenceOutput = {
   captured_length: z.number().int().optional(),
   evidence_spans: z.array(z.object({ start: z.number().int(), end: z.number().int() })).optional(),
   evidence_ranges: z.array(z.tuple([z.number().int(), z.number().int()])).optional().describe('Compact UTF-16 [start,end] pairs in captured clean text; end is exclusive.'),
+  source_refs: z.object({
+    pages: z.array(z.number().int().positive()),
+    ocr_pages: z.array(z.number().int().positive()).optional(),
+    excerpt_pages: z.array(z.tuple([z.number().int().min(0), z.number().int().positive(), z.number().int().positive()])).optional().describe('UTF-16 [start,end,page] ranges in the returned content or description; unlike captured-text evidence_ranges. Gaps are unmapped excerpt separators.'),
+    captions: z.array(z.object({ page: z.number().int().positive(), label: z.string(),
+      range: z.tuple([z.number().int().min(0), z.number().int().positive()]) })).optional(),
+    truncated: z.literal(true).optional(),
+  }).optional().describe('Bounded source-page references. Caption labels are lexical candidates; caption ranges index captured text, while excerpt_pages indexes returned text. Not visual interpretation.'),
   quality_reason: z.string().optional(),
+  content_format: z.enum(['text', 'markdown']).optional(),
+  is_image: z.boolean().optional(),
+  image_width: z.number().int().positive().optional(),
+  image_height: z.number().int().positive().optional(),
+  extraction_method: z.literal('ocr').optional(),
+  document_format: z.enum(['docx', 'pptx', 'hwp', 'hwpx']).optional(),
+  extraction_provenance: z.object({
+    source_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    source_format: z.enum(['pdf', 'image', 'docx', 'pptx', 'hwp', 'hwpx']),
+    parser: z.enum(['pdf-lib', 'liteparse', 'sharp', 'officeparser', 'xberg', 'kreuzberg', 'hwp-convert', 'archive']),
+    ocr_policy: z.enum(['off', 'enabled', 'auto']),
+    ocr_language: z.string().max(100).optional(),
+    content_format: z.enum(['text', 'markdown']).optional(),
+  }).optional().describe('Hash of fetched source bytes and parser policy; distinct from captured_hash of derived text. OCR policy is not proof every page used OCR.'),
   no_additional_passages: z.boolean().optional(),
 };
 const ResultItem = z.object({
@@ -662,6 +711,11 @@ const ErrorInfoShape = z.object({
   cancel_reason: z.string().optional(),
 });
 const MetaShape = z.record(z.string(), z.unknown());
+const SiteScopeShape = z.object({
+  domain: z.string(),
+  removed: z.number(),
+  recovered_references: z.number().optional(),
+});
 const ResearchContextShape = z.object({
   ontology_terms: z.array(z.object({
     term_id: z.string(), name: z.string(), kind: z.enum(['entity_type', 'relation']),
@@ -685,6 +739,8 @@ const ResearchContextShape = z.object({
 
 const SearchOutput = {
   query: z.string().optional(),
+  site_scope: SiteScopeShape.optional(),
+  degraded_reasons: z.array(z.string()).optional(),
   results: z.array(ResultItem).optional(),
   elapsed_ms: z.number().optional(),
   memory: z.string().optional(),
@@ -725,6 +781,7 @@ const ScholarSearchOutput = {
 const SearchParallelOutput = {
   results: z.array(z.object({
     query: z.string(),
+    site_scope: SiteScopeShape.optional(),
     results: z.array(ResultItem),
     dropped: z.number().optional(),
     dropped_reasons: z.array(z.string()).optional(),
@@ -743,6 +800,7 @@ const SearchParallelOutput = {
 
 const ExtractOutput = {
   url: z.string().optional(),
+  document_catalog: DocumentCatalogOutput,
   title: z.string().optional(),
   description: z.string().optional(),
   content: z.string().optional(),
@@ -1012,6 +1070,8 @@ server.registerTool('extract', {
     SharedResearchBrokerDescription +
     'For GitHub repository URLs, metadata reads the README; abstract and full use the same bounded download gate and differ only in indexed source depth. ' +
     'HTML via Mozilla Readability; academic PDFs (arxiv/biorxiv/Nature/OpenReview/NeurIPS/JMLR/PMLR/Springer/PubMed-via-PMC) auto-detected via Content-Type, %PDF magic, citation_pdf_url meta, and per-domain URL rules. ' +
+    'PDF bodies default to plain text; optional Markdown reconstruction can lose complex table values, so verify exact values against plain text or page images. Known PNG/JPEG/WebP/TIFF URLs return image metadata without opening a browser; CPU LiteParse OCR requires SURF_EXTRACT_OCR=true or auto. With auto, PDF OCR targets only pages flagged as needing it; OCR is not visual interpretation of charts. Empty or unreadable text is reported explicitly. ' +
+    'DOCX/PPTX and HWP 5/HWPX bytes are read natively in a bounded temporary worker, not converted to PDF or opened in a browser. For source-wide DOCX/PPTX counts, hidden slides, producer properties or notes, use mode="metadata": document_catalog reads selected XML without parsing the body. Do not count occurrences in a selected text excerpt as the document total. Native text does not interpret charts or all text boxes; inspect quality_reason and extraction_provenance. ' +
     'Tiered depth: `mode="metadata"` returns document metadata without body text, `mode="abstract"` returns about 1500 chars for relevance checks, and `mode="full"` reads the full bounded source. response_content controls whether the response contains a 1500-character summary or up to 50000 characters. ' +
     'PDF and landing-page metadata are merged when available. With Auto Ontology enabled, abstract and full PDF reads are stored as searchable evidence with bibliographic metadata and provenance. ' +
     'Best-effort: failures return an errorInfo instead of throwing.',
@@ -1025,6 +1085,7 @@ server.registerTool('extract', {
   evidence_mode?: 'balanced' | 'compact' | 'coherent';
   mode: 'full' | 'abstract' | 'metadata';
   query?: string;
+  deep_read?: boolean;
   body_handle?: string;
   refresh?: boolean;
   exclude_spans?: Array<{ start: number; end: number }>;
@@ -1086,7 +1147,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search'
     'Always use this tool when the user asks to find, recall, inspect, or search information already stored in project memory, indexed local roots, papers, codebases, plans, experiments, or decisions. ' +
     'Use query_variants for multiple retrieval angles in one call instead of opening terminals or calling this tool repeatedly. Query embeddings are batched, candidates are fused with RRF, graph expansion starts from retrieved evidence, and the primary query is reranked once. Only bounded query-focused summaries from that final ranking are returned; stored bodies never bypass this response gate. ' +
     'If one retrieval lane times out, the other lanes still return and meta.degraded_lanes identifies the partial lane; do not repeat the same query automatically. ' +
-    'Uses exact, BM25, vector, and graph retrieval. It never opens Google, a browser, or SearchApi. ' +
+    'Uses exact, BM25, vector, and graph retrieval with automatic RRF fusion and configured E5 reranking; no separate vector or RRF tool call is needed. Keep default lanes unless deliberately restricting retrieval; filters.retrieval_lanes skips excluded lanes entirely. It never opens Google, a browser, or SearchApi. ' +
     'Use search or search_parallel only when new external information is required.',
   inputSchema: trackSchema('project_memory_search', ProjectMemorySearchSchema),
   outputSchema: ProjectMemoryOutput,
@@ -1105,7 +1166,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
     'Use aggregate for count/min/max/sum/mean over all matching assertions, not top-k search hits; population metadata, unit checks, and an optional expected_value comparison are returned. Schema terms and instance assertions are separate: record_type=ontology defines vocabulary, record_type=assertion stores a fact. Review attribution records the actor and method without implying human verification. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
-    'rebuild indexes approved local roots and code structure into a reproducible snapshot; export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
+    'rebuild indexes approved local roots and code structure into a reproducible snapshot, including native Office/HWP documents, PDF text and optionally image OCR. Binary documents are processed sequentially; unchanged source hashes and parser settings reuse stored text. export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
     'forget previews impact before reversible project or assertion deletion. ' +
     'Search, search_parallel, scholar_search, and extract automatically capture sources and provenance; project_memory manages their durable structure.',
   inputSchema: trackSchema('project_memory', {
@@ -1114,13 +1175,13 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
       'timeline', 'diff', 'sync', 'job_status', 'job_wait', 'job_cancel', 'query_status', 'query_cancel', 'verify', 'current', 'snapshot',
       'snapshot_import', 'snapshot_rollback', 'doctor', 'aggregate', 'rebuild', 'export', 'forget',
     ]).describe(
-      'Typed project-memory operation. create: project_id and name required. project_update: versioned profile update with expected_revision and idempotency_key. get/get_batch: exact IDs and bounded body spans; body_bytes=0 returns metadata only. record/record_batch: typed durable writes with idempotency_key. aggregate: read-only count/min/max/sum/mean over all matching scoped assertions, never top-k. context/current/timeline/diff: compact current or historical views. query_status/query_cancel: inspect or cooperatively cancel caller-identified local retrieval. sync/rebuild: incremental source and derived indexing. job_status/job_wait/job_cancel: durable background work. snapshot/snapshot_import/snapshot_rollback: offline transfer and append-only recovery. export: HTML, DOT, JSON, or Neo4j. forget: reversible deletion preview and confirmation. Unrelated local questions use project_memory_search.',
+      'Typed project-memory operation. create: project_id and name required. project_update: versioned profile update with expected_revision and idempotency_key. get/get_batch: exact IDs and bounded body spans; body_bytes=0 returns metadata only. get with query reads focused evidence across one known stored record, without live web; omit raw paging fields. record/record_batch: typed durable writes with idempotency_key. aggregate: read-only count/min/max/sum/mean over all matching scoped assertions, never top-k. context/current/timeline/diff: compact current or historical views. query_status/query_cancel: inspect or cooperatively cancel caller-identified local retrieval. sync/rebuild: incremental source and derived indexing. job_status/job_wait/job_cancel: durable background work. snapshot/snapshot_import/snapshot_rollback: offline transfer and append-only recovery. export: HTML, DOT, JSON, or Neo4j. forget: reversible deletion preview and confirmation. Unrelated local questions use project_memory_search.',
     ),
     project_id: z.string().min(1).max(64).optional().describe('Stable project id. For search, this is the write-isolated primary scope. Omit to list projects or use all_projects.'),
     detail_level: z.enum(['summary', 'full']).default('summary').describe('For show with project_id and no target_id, both values return a bounded summary. full is retained only for compatibility and never returns every durable record body.'),
     include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional().describe('Additional read-only projects for one local search or integrated visualization export.'),
     all_projects: z.boolean().optional().describe('Search or export every active named project. Excludes Inbox and cannot be combined with project ids.'),
-    query: z.string().min(1).max(400).optional().describe('Required for action=search. Searches stored local knowledge only and does not start live web discovery.'),
+    query: z.string().min(1).max(400).optional().describe('For get, selects focused evidence from one known stored record: at most 1200 returned characters including page refs, reading up to 1M stored characters (catalog: first 1MiB). capture_truncated reports limited coverage; omit raw paging fields. For discovery use project_memory_search. Never live web.'),
     query_variants: z.array(z.string().min(1).max(400)).max(19).optional().describe('Optional local retrieval variants for action=search. They run inside one broker request and are fused before one rerank.'),
     limit: z.number().int().min(1).max(20).default(10).describe('Maximum local RAG results for action=search.'),
     queries: ProjectMemorySearchSchema.queries,
@@ -1289,7 +1350,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
 server.registerTool('health', {
   title: 'MCP Health Check',
   description:
-    'MCP server status: cascade mode + transitions, rate-limiter usage, cache size, config. ' +
+    'MCP server status: cascade mode + transitions, rate-limiter usage, cache size, config. Research diagnostics are passive and do not open a cold database or load E5. ' +
     'Call this if searches start failing or returning empty -- check cascade.totalCaptchas and ' +
     'rateLimiter.queueSize, and reduce search volume if they are high.',
   inputSchema: trackSchema('health', {}),
@@ -1300,7 +1361,7 @@ server.registerTool('health', {
   if (result.isError || !result.structuredContent) return result;
   let research: Record<string, unknown> = { ...researchService.status() };
   try {
-    research = { ...await researchService.passiveStatus() };
+    research = { ...await researchService.peekStatus() };
   } catch (error) {
     research = {
       ...researchService.status(),
@@ -1318,18 +1379,3 @@ server.registerTool('health', {
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`[${NAME}@${VERSION}] running on stdio`);
-
-if (
-  !baseDeps.config.cloudMode
-  && !nativeBrowser
-  && (baseDeps.config.searchProvider !== 'searchapi' || baseDeps.config.scholarProvider !== 'searchapi')
-) {
-  (async () => {
-    try {
-      if (!profileExists()) await autoBootstrap();
-      if (profileExists()) await getSequentialCtx();
-    } catch (e) {
-      console.error('[google-surf-mcp] startup warm failed (will retry on first call):', (e as Error)?.message ?? e);
-    }
-  })();
-}

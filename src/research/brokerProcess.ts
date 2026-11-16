@@ -121,11 +121,12 @@ const endpoint = researchBrokerEndpoint(config.root);
 const clients = new Set<Socket>();
 const coalescedReads = new Set([
   'aggregateAssertions',
-  'getAssertion', 'getCatalogRecord', 'getCatalogRecords', 'getEntity', 'getProject',
+  'getAssertion', 'getCatalogRecord', 'getCatalogRecords', 'readProjectEvidence', 'getEntity', 'getProject',
   'getProjectSummary', 'jobStatus', 'linkEntity', 'listProjects', 'projectContext',
   'passiveStatus', 'probe', 'search', 'searchBatch', 'searchGrouped', 'searchFamilies',
 ]);
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
+let idleDeadline: number | undefined;
 let writeTail: Promise<unknown> = Promise.resolve();
 let activeReads = 0;
 const readWaiters: Array<() => void> = [];
@@ -353,13 +354,17 @@ async function handle(socket: Socket, line: string): Promise<void> {
       lastCompletedWorkAt = new Date().toISOString();
     }
     activeRequests--;
-    scheduleIdle();
+    scheduleIdle(accepted && request?.method !== 'passiveStatus');
   }
 }
 
-function scheduleIdle(): void {
+function scheduleIdle(workCompleted = false): void {
+  if (workCompleted) {
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+    idleDeadline = undefined;
+  }
   if (activeRequests || activeReads || activeWrites || queuedWrites || readWaiters.length || stopping) return;
-  clearTimeout(idleTimer);
   const underPressure = Boolean(
     config.workerSoftMemoryBytes && process.memoryUsage.rss() >= config.workerSoftMemoryBytes
   );
@@ -368,7 +373,13 @@ function scheduleIdle(): void {
     && (status.background_jobs || status.scheduled_graph_jobs)) {
     void service.requestDrain();
   }
+  const deadline = Date.now() + (underPressure ? 100 : config.idleMs);
+  if (idleTimer && idleDeadline! <= deadline) return;
+  clearTimeout(idleTimer);
+  idleDeadline = deadline;
   idleTimer = setTimeout(() => {
+    idleTimer = undefined;
+    idleDeadline = undefined;
     const status = service.status();
     if (activeRequests || activeReads || activeWrites || queuedWrites || readWaiters.length
       || status.background_jobs || status.repository_jobs || status.scheduled_graph_jobs) {
@@ -376,7 +387,7 @@ function scheduleIdle(): void {
       return;
     }
     void stop();
-  }, underPressure ? 100 : config.idleMs);
+  }, Math.max(0, deadline - Date.now()));
   idleTimer.unref();
 }
 

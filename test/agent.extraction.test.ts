@@ -13,6 +13,7 @@ import { RateLimiter } from '../src/limiter.js';
 import { formatToolResponse } from '../src/response.js';
 import { StrategyHealing } from '../src/strategyHealing.js';
 import { Telemetry } from '../src/telemetry.js';
+import { buildDocumentSourceMap } from '../src/documentSourceMap.js';
 
 function makeDeps(root: string, pool: PoolHandle): Deps {
   const config = loadConfig({ SURF_PROFILE_ROOT: root });
@@ -83,6 +84,58 @@ describe('integrated search extraction', () => {
     await extractTool({ url: 'https://example.com/body', refresh: true }, deps);
     expect(pool.extractOne).toHaveBeenCalledTimes(2);
     expect((await extractTool({ url: 'https://example.com/body', refresh: true, body_handle: handle }, deps)).isError).toBe(true);
+  });
+  it('opts into deeper transient full reads without raising the response budget or changing defaults', async () => {
+    const pool = makePool(), deps = makeDeps(root, pool), url = 'https://example.org/long.pdf';
+    deps.config.researchEnabled = false;
+    const text = 'unrelated '.repeat(6000) + 'late_table_value = 42';
+    pool.extractOne = vi.fn(async (source, limit) => ({ url: source, content: text.slice(0, limit),
+      extraction_quality: 'full_text', source_length: text.length, truncated: text.length > limit }));
+    const first = await extractTool({ url, mode: 'full' }, deps);
+    expect(first.structuredContent?.truncated).toBe(true);
+    expect(pool.extractOne).toHaveBeenLastCalledWith(url, 50_000, 'full');
+    const clipped = await extractTool({ url, body_handle: String(first.structuredContent?.body_handle), deep_read: true }, deps);
+    expect(clipped.isError).toBe(true);
+    expect(pool.extractOne).toHaveBeenCalledTimes(1);
+    const deep = await extractTool({ url, deep_read: true }, deps);
+    expect(pool.extractOne).toHaveBeenLastCalledWith(url, 1_000_000, 'full');
+    const shaped = shapeExtractionResponse(deep, { query: 'late_table_value', max_chars: 400,
+      response_content: 'full' }, 'full');
+    expect(shaped.structuredContent?.content).toContain('late_table_value = 42');
+    expect(String(shaped.structuredContent?.content).length).toBeLessThanOrEqual(400);
+    await extractTool({ url, body_handle: String(deep.structuredContent?.body_handle), deep_read: true }, deps);
+    expect(pool.extractOne).toHaveBeenCalledTimes(2);
+  });
+
+  it('captures Office metadata once and reapplies smaller response budgets without refetching', async () => {
+    const url = 'https://example.org/document.docx', pool = makePool(), deps = makeDeps(root, pool);
+    deps.config.researchEnabled = false;
+    const document_catalog = { version: 1 as const, format: 'docx' as const, source_sha256: 'a'.repeat(64),
+      producer_properties: [{ part: 'docProps/core.xml', name: 'dc:title', value: 'x'.repeat(2500) }],
+      source_parts: [], details_truncated: false };
+    pool.extractOne = vi.fn(async source => ({ url: source, document_catalog, extraction_quality: 'metadata_only' }));
+    const first = await extractTool({ url, mode: 'metadata', max_chars: 200 }, deps);
+    expect(pool.extractOne).toHaveBeenCalledWith(url, 6000, 'metadata');
+    expect(first.structuredContent?.body_handle).toMatch(/^transient:/);
+    const small = shapeExtractionResponse(first, { max_chars: 200 }, 'full');
+    expect(JSON.stringify(small.structuredContent?.document_catalog).length).toBeLessThanOrEqual(200);
+    const again = await extractTool({ url, mode: 'metadata', max_chars: 5000 }, deps);
+    expect(again.structuredContent?.meta).toMatchObject({ body_cache: 'hit' });
+    expect(again.structuredContent?.content).toBeUndefined();
+    const larger = shapeExtractionResponse(again, { max_chars: 5000 }, 'full');
+    expect(larger.structuredContent?.document_catalog).toEqual(document_catalog);
+    expect(pool.extractOne).toHaveBeenCalledTimes(1);
+    await extractTool({ url, mode: 'metadata', refresh: true }, deps);
+    expect(pool.extractOne).toHaveBeenCalledTimes(2);
+  });
+  it.each([false, true])('shares deep capture policy across single and parallel extraction (parallel=%s)', async parallel => {
+    const pool = makePool(), deps = makeDeps(root, pool);
+    deps.config.researchEnabled = false;
+    const result = formatToolResponse({ results: parallel ? [{ query: 'q', results: [{ url: 'https://example.org/deep' }] }]
+      : [{ url: 'https://example.org/deep' }] });
+    const run = parallel ? applyParallelSearchExtraction : applySearchExtraction;
+    await run(result, { extract_mode: 'full', deep_read: true }, deps);
+    expect(pool.extractOne).toHaveBeenCalledWith('https://example.org/deep', 1_000_000, 'full');
   });
 
   it('extracts only the requested top URLs and isolates failures', async () => {
@@ -335,5 +388,18 @@ describe('integrated search extraction', () => {
     expect(next.structuredContent!.content).toContain('Beta'); expect(next.structuredContent!.content).not.toContain('Alpha');
     expect(next.structuredContent!.evidence_spans).toBeDefined(); expect(next.structuredContent!.evidence_ranges).toBeUndefined();
     expect(next.structuredContent!.captured_hash).toBe(row.captured_hash);
+  });
+  it('returns bounded page references rather than the internal page map', () => {
+    const first = 'First page with a native condition.\n';
+    const second = 'Second page\nTable 2: SPI controls\nGPIO45 selects the native voltage.';
+    const content = first + '\n' + second;
+    const map = buildDocumentSourceMap(content, [{ page: 1, text: first }, { page: 2, text: second, ocr: true }], 'a'.repeat(64));
+    const result = shapeExtractionResponse(formatToolResponse({ url: 'https://example.org/source.pdf', content, source_map: map }),
+      { response_content: 'summary', query: 'GPIO45' }, 'summary');
+    expect(result.structuredContent).not.toHaveProperty('source_map');
+    expect(result.structuredContent!.source_refs).toMatchObject({ pages: [2], ocr_pages: [2] });
+    const stale = shapeExtractionResponse(formatToolResponse({ url: 'https://example.org', content: content + ' changed', source_map: map }), {}, 'summary');
+    expect(stale.structuredContent).not.toHaveProperty('source_refs');
+    expect(stale.structuredContent).not.toHaveProperty('source_map');
   });
 });

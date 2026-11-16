@@ -6,7 +6,8 @@ import { createConnection, type Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { ResearchService, type ResearchServiceOptions } from './service.js';
+import { ResearchService, type ResearchPassiveStatus, type ResearchServiceOptions,
+  type ResearchStatusObservation } from './service.js';
 import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
 import { queryResponseDeadlineMs, ResearchQueryInterrupted } from './queryControl.js';
 import { embeddedStorageEnvironment } from './resources.js';
@@ -34,6 +35,7 @@ export const RESEARCH_BROKER_METHODS = new Set([
   'getAssertion',
   'getCatalogRecord',
   'getCatalogRecords',
+  'readProjectEvidence',
   'getEntity',
   'getProject',
   'getProjectSummary',
@@ -84,6 +86,7 @@ export const RESEARCH_BROKER_READ_METHODS = new Set([
   'getAssertion',
   'getCatalogRecord',
   'getCatalogRecords',
+  'readProjectEvidence',
   'getEntity',
   'getProject',
   'getProjectSummary',
@@ -278,6 +281,7 @@ class ResearchBrokerClient {
   private buffer = '';
   private readonly pending = new Map<string, PendingCall>();
   private currentStatus: ReturnType<ResearchService['status']>;
+  private lastStatusObservedAt: string | null = null;
   private closed = false;
 
   constructor(
@@ -307,6 +311,27 @@ class ResearchBrokerClient {
     return this.currentStatus;
   }
 
+  async peekStatus(): Promise<ResearchStatusObservation> {
+    if (this.closed) throw new Error('research broker client closed');
+    let observationError: string | undefined;
+    if ((!this.socket || this.socket.destroyed) && !this.connecting) {
+      try {
+        const socket = await connectSocket(researchBrokerEndpoint(this.config.root), 250);
+        if (this.closed || this.connecting || (this.socket && !this.socket.destroyed)) socket.destroy();
+        else this.attach(socket);
+      } catch {}
+    }
+    if (this.socket && !this.socket.destroyed) {
+      try { return await this.call('passiveStatus', [], undefined, false) as ResearchPassiveStatus; }
+      catch (error) { observationError = (error instanceof Error ? error.message : String(error)).slice(0, 200); }
+    }
+    return { ...this.currentStatus, passive: true, observed_at: new Date().toISOString(),
+      cached_status: true, broker_observation: 'not_connected',
+      last_status_observed_at: this.lastStatusObservedAt,
+      capabilities: { passive_health_opens_database: false },
+      ...(observationError ? { observation_error: observationError } : {}) };
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     this.socket?.destroy();
@@ -315,11 +340,12 @@ class ResearchBrokerClient {
     this.currentStatus = { ...this.currentStatus, state: 'broker_disconnected' };
   }
 
-  async call(method: string, args: unknown[], signal?: AbortSignal): Promise<unknown> {
+  async call(method: string, args: unknown[], signal?: AbortSignal, startIfNeeded = true): Promise<unknown> {
     if (!RESEARCH_BROKER_METHODS.has(method)) throw new Error(`unsupported research broker method: ${method}`);
     if (signal?.aborted) throw new Error('research search cancelled');
-    const token = await brokerToken(this.config.root);
-    await this.ensureConnected();
+    const token = startIfNeeded ? await brokerToken(this.config.root)
+      : (await readFile(researchBrokerTokenPath(this.config.root), 'utf8')).trim();
+    if (startIfNeeded) await this.ensureConnected();
     const socket = this.socket;
     if (!socket || socket.destroyed) throw new Error('research broker disconnected');
     const id = randomUUID();
@@ -331,14 +357,14 @@ class ResearchBrokerClient {
       method,
       args: encodeResearchBrokerArgs(args),
     };
-    const timeoutMs = researchBrokerTimeoutMs(method, args);
+    const timeoutMs = startIfNeeded ? researchBrokerTimeoutMs(method, args) : 1_000;
     return await new Promise((resolveCall, reject) => {
       const timer = setTimeout(() => {
         const pending = this.pending.get(id);
         if (!pending) return;
         this.pending.delete(id);
         pending.cleanup?.();
-        this.cancel(id);
+        this.cancel(id, token);
         pending.reject(new Error(`research broker method timed out: ${method}`));
       }, timeoutMs);
       const aborted = () => {
@@ -347,7 +373,7 @@ class ResearchBrokerClient {
         clearTimeout(pending.timer);
         this.pending.delete(id);
         pending.cleanup?.();
-        this.cancel(id);
+        this.cancel(id, token);
         pending.reject(new Error('research search cancelled'));
       };
       this.pending.set(id, {
@@ -371,20 +397,18 @@ class ResearchBrokerClient {
     });
   }
 
-  private cancel(requestId: string): void {
+  private cancel(requestId: string, token: string): void {
     const socket = this.socket;
     if (!socket || socket.destroyed) return;
     const request: BrokerRequest = {
       protocol: RESEARCH_BROKER_PROTOCOL,
       configHash: researchBrokerConfigHash(this.config),
-      token: '',
+      token,
       id: randomUUID(),
       method: '$cancel',
       args: [requestId],
     };
-    brokerToken(this.config.root).then((token) => {
-      if (!socket.destroyed) socket.write(`${JSON.stringify({ ...request, token })}\n`);
-    }).catch(() => {});
+    socket.write(`${JSON.stringify(request)}\n`);
   }
 
   private async ensureConnected(): Promise<void> {
@@ -465,7 +489,10 @@ class ResearchBrokerClient {
         this.socket?.destroy(new Error('invalid research broker response'));
         return;
       }
-      if (response.status) this.currentStatus = response.status;
+      if (response.status) {
+        this.currentStatus = response.status;
+        this.lastStatusObservedAt = new Date().toISOString();
+      }
       const pending = this.pending.get(response.id);
       if (!pending) continue;
       clearTimeout(pending.timer);
@@ -526,6 +553,7 @@ export function createSharedResearchService(
   const client = new ResearchBrokerClient(config, clientOptions.processPath ?? defaultBrokerProcessPath());
   const target = {
     status: () => client.status(),
+    peekStatus: async () => await client.peekStatus(),
     close: async () => await client.close(),
   };
   return new Proxy(target as unknown as ResearchService, {

@@ -48,8 +48,10 @@ const RESERVED = new Set([
 export function parseGitHubRepositoryUrl(value: string): { owner: string; name: string } | undefined {
   try {
     const url = new URL(value);
-    if (url.hostname.toLowerCase() !== 'github.com') return undefined;
-    const [owner, rawName] = url.pathname.split('/').filter(Boolean);
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password
+      || url.hostname.toLowerCase() !== 'github.com') return undefined;
+    const [owner, rawName, route, ref] = url.pathname.split('/').filter(Boolean);
+    if (route && (route !== 'tree' || !ref)) return undefined;
     const name = rawName?.replace(/\.git$/i, '');
     if (!owner || !name || RESERVED.has(owner.toLowerCase())) return undefined;
     return { owner, name };

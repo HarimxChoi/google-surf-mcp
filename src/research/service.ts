@@ -6,13 +6,18 @@ import { mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/pr
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { fenceUntrustedContent } from '../response.js';
 import { usableEvidence } from '../extractionQuality.js';
+import { readExtractionProvenance } from '../extractionProvenance.js';
+import { documentSourceRefs, readDocumentSourceMap, remapDocumentSourceMap, sliceDocumentSourceMaps } from '../documentSourceMap.js';
+import { cleanCapturedSpan } from '../evidence.js';
+import { selectDocumentEvidence } from '../documentEvidence.js';
+import { RANKED_SUMMARY_MAX_CHARS } from '../responseLimits.js';
 import { MAX_RESEARCH_CAPTURE_CHARS } from '../searchLimits.js';
 import { VERSION } from '../version.js';
 import type {
   ArtifactReference, AssertionAggregateInput, CatalogAccessTier, CatalogAssetKind, CatalogRecordReadback, CatalogTimelineEvent,
   CatalogWriteOperation, DurableWriteReceipt, LegacyRecordReadback,
   AssertionCorrectionRecord, AssertionRecord, AssertionValue, CaptureResult, DecisionRecord, DocumentRecordReadback,
-  EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord,
+  EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord, FocusedRecordReadback,
   ExperimentRunRecord, ExperimentStatus, GraphAnalysis, GraphArtifact, GraphProjection,
   IntentRevisionRecord,
   KnowledgeJobRecord, KnowledgeJobStatus, KnowledgeJobSummary, LocalSearchFamilies, LocalSearchHit,
@@ -24,6 +29,8 @@ import type {
 import { runCodeStructureBatchStream, type CodeSourceInput } from './codeStructure.js';
 import { cosineSimilarity, embeddingContract, embeddingIndexKey, validateEmbeddingBatch, LocalEmbeddingModel, type EmbeddingProvider } from './dense.js';
 import { embeddedStorageEnvironment, embeddingBatchSize } from './resources.js';
+import { DOCUMENT_CHUNK_CHARS, documentChunks } from './documentChunks.js';
+import { compactSourceVectorItems, prunedVectorIds, retrievalGenerationDigest } from './retrievalBuild.js';
 import { aliasId, entityId, normalizeEntityName, rankEntityCandidates } from './entities.js';
 import { buildGraphProjection, type ProjectGraphSource } from './graphProjection.js';
 import {
@@ -99,6 +106,21 @@ export interface ResearchQueryState {
   error?: string;
 }
 
+export interface ResearchSearchBatchResult {
+  request_id: string;
+  queries: string[];
+  results: LocalSearchHit[];
+  pre_rerank_results?: LocalSearchHit[];
+  reranker: 'rrf_only' | 'local_vector' | 'not_completed';
+  partial: boolean;
+  completed_lanes: RetrievalLane[];
+  incomplete_reason?: string;
+  graph_project_count: number;
+  degraded_lanes: RetrievalLane[];
+  timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
+  candidate_counts: { exact: number; bm25: number; vector: number; graph: number; fused: number };
+}
+
 export interface ResearchPassiveStatus extends ResearchServiceStatus {
   passive: true;
   observed_at: string;
@@ -134,6 +156,16 @@ export interface ResearchPassiveStatus extends ResearchServiceStatus {
     passive_health_opens_database: false;
   };
 }
+
+export type ResearchStatusObservation = ResearchPassiveStatus | (ResearchServiceStatus & {
+  passive: true;
+  observed_at: string;
+  cached_status: true;
+  broker_observation: 'not_connected';
+  last_status_observed_at: string | null;
+  capabilities: Pick<ResearchPassiveStatus['capabilities'], 'passive_health_opens_database'>;
+  observation_error?: string;
+});
 
 let surrealRuntimeVersions: Pick<ResearchPassiveStatus['runtime'], 'surrealdb_node' | 'surrealdb_engine'> | undefined;
 
@@ -409,25 +441,6 @@ function exactTerms(...values: Array<string | undefined>): string[] {
   }))];
 }
 
-const DOCUMENT_CHUNK_CHARS = 4_000;
-
-function documentChunks(text: string): Array<{
-  chunk_index: number;
-  text: string;
-  content_hash: string;
-}> {
-  const chunks = [];
-  for (let start = 0, index = 0; start < text.length; start += DOCUMENT_CHUNK_CHARS, index++) {
-    const chunk = text.slice(start, start + DOCUMENT_CHUNK_CHARS);
-    chunks.push({
-      chunk_index: index,
-      text: chunk,
-      content_hash: createHash('sha256').update(chunk).digest('hex'),
-    });
-  }
-  return chunks;
-}
-
 function semanticSourceChunks(text: string): Array<{ text: string; start: number; end: number }> {
   const chunks: Array<{ text: string; start: number; end: number }> = [];
   let start = 0;
@@ -697,6 +710,8 @@ function captureRows(input: CaptureInput): CaptureResult[] {
         : typeof row.excerpt === 'string' ? row.excerpt : undefined,
       is_pdf: row.is_pdf === true,
       page_count: typeof row.page_count === 'number' ? row.page_count : undefined,
+      extraction_provenance: readExtractionProvenance(row.extraction_provenance),
+      source_map: readDocumentSourceMap(row.source_map),
       extraction_quality: typeof row.extraction_quality === 'string'
         ? row.extraction_quality
         : undefined,
@@ -754,6 +769,8 @@ function captureRows(input: CaptureInput): CaptureResult[] {
       content: typeof row.content === 'string' ? row.content : undefined,
       is_pdf: row.is_pdf === true,
       page_count: typeof row.page_count === 'number' ? row.page_count : undefined,
+      extraction_provenance: readExtractionProvenance(row.extraction_provenance),
+      source_map: readDocumentSourceMap(row.source_map),
       extraction_quality: typeof row.extraction_quality === 'string'
         ? row.extraction_quality
         : undefined,
@@ -897,6 +914,10 @@ export class ResearchService {
       graph_artifact_cache: this.graphArtifacts.size,
       graph_cache_bytes: this.graphCacheBytes,
     };
+  }
+
+  peekStatus(): ResearchStatusObservation {
+    return this.passiveStatus();
   }
 
   passiveStatus(processClass: 'in_process' | 'research_broker' = 'in_process'): ResearchPassiveStatus {
@@ -1145,7 +1166,7 @@ export class ResearchService {
 
   async withSearchReadLease<T>(operation: () => Promise<T>, release: () => void): Promise<T> {
     const lease = { closed: false, reads: new Set<Promise<unknown>>() };
-    return await this.searchReadLease.run(lease, async () => {
+    return await this.store.withRetrievalReadContext(() => this.searchReadLease.run(lease, async () => {
       try {
         return await operation();
       } finally {
@@ -1153,7 +1174,7 @@ export class ResearchService {
         // Return the response promptly but retain the broker slot for native work.
         void Promise.allSettled([...lease.reads]).then(release);
       }
-    });
+    }));
   }
 
   private async checkpointKnowledgeJobForDrain(
@@ -1771,14 +1792,8 @@ export class ResearchService {
             text: chunk.text,
             content_hash: chunk.content_hash,
             source_span: {
-              start: pageStart + Buffer.byteLength(
-                text.slice(0, chunk.chunk_index * DOCUMENT_CHUNK_CHARS),
-                'utf8',
-              ),
-              end: pageStart + Buffer.byteLength(
-                text.slice(0, chunk.chunk_index * DOCUMENT_CHUNK_CHARS + chunk.text.length),
-                'utf8',
-              ),
+              start: pageStart + chunk.byte_start,
+              end: pageStart + chunk.byte_end,
             },
             updated_at: now,
           };
@@ -1905,6 +1920,11 @@ export class ResearchService {
       Math.min(Math.max(bodyBytes, 0), 1024 * 1024),
     );
     if (document) return document;
+    return await this.getLegacyRecord(project, recordId, bodyOffset, bodyBytes);
+  }
+
+  private async getLegacyRecord(project: ProjectRecord, recordId: string, bodyOffset: number,
+    bodyBytes: number): Promise<LegacyRecordReadback> {
     const [plan, experiment, decision, assertion, entity, ontology] = await Promise.all([
       this.store.getPlan(recordId),
       this.store.getExperiment(recordId),
@@ -1937,6 +1957,54 @@ export class ResearchService {
       ...(bodyBytes > 0 && end < bytes.length ? { next_body_offset: end } : {}),
       omitted_fields: completeInline ? [] : bodyBytes === 0 ? ['record', 'body'] : ['record'],
     };
+  }
+
+  async readProjectEvidence(projectIdValue: string, recordIdValue: string, queryValue: string,
+    revision?: number): Promise<FocusedRecordReadback> {
+    const project = await this.ensureProject(projectIdValue);
+    const recordId = cleanText(recordIdValue, 'record_id', 500), query = cleanText(queryValue, 'query', 4_000);
+    const catalog = await this.store.getCatalogRecord(project.project_id, recordId, revision, 0, 1024 * 1024, 0, 1);
+    let text: string, title: string, url: string | undefined, map: unknown;
+    let sourceKind: FocusedRecordReadback['source_kind'], totalBytes: number, truncated = false;
+    if (catalog) {
+      sourceKind = 'catalog';
+      text = catalog.body ?? stableJson(catalog.revision.fields);
+      title = String(catalog.revision.fields.title ?? catalog.revision.fields.name ?? catalog.asset.asset_id);
+      totalBytes = catalog.body_span?.total_bytes ?? Buffer.byteLength(text, 'utf8');
+      truncated = catalog.next_body_offset !== undefined;
+    } else {
+      if (revision !== undefined) throw new Error('record revision not found in project');
+      const source = await this.store.getProjectEvidenceSource(project.project_id, recordId);
+      if (source) {
+        sourceKind = source.source_kind; text = source.text; title = source.title; url = source.url; map = source.source_map;
+        totalBytes = Buffer.byteLength(text, 'utf8');
+      } else {
+        const legacy = await this.getLegacyRecord(project, recordId, 0, 1024 * 1024);
+        sourceKind = 'legacy'; text = legacy.body ?? stableJson(legacy.record);
+        title = `${legacy.record_type}: ${recordId}`; totalBytes = legacy.body_span.total_bytes;
+        truncated = legacy.next_body_offset !== undefined;
+      }
+    }
+    const cleanSpan = cleanCapturedSpan(text), cleaned = text.slice(cleanSpan.start, cleanSpan.end);
+    if (cleaned !== text) {
+      map = remapDocumentSourceMap(map, text, cleaned, cleanSpan.start, 0);
+      text = cleaned;
+    }
+    if (text.length > MAX_RESEARCH_CAPTURE_CHARS) {
+      const original = text; text = text.slice(0, MAX_RESEARCH_CAPTURE_CHARS); truncated = true;
+      map = remapDocumentSourceMap(map, original, text, 0, 0);
+    }
+    const sourceMap = readDocumentSourceMap(map, text);
+    const refsBudget = sourceMap ? Math.min(300, Math.floor(RANKED_SUMMARY_MAX_CHARS / 4)) : 0;
+    const selected = selectDocumentEvidence(text, query, RANKED_SUMMARY_MAX_CHARS - refsBudget,
+      [], sourceMap ? 'coherent' : 'balanced', sourceMap);
+    const refs = sourceMap ? documentSourceRefs(sourceMap, text, selected.spans, refsBudget) : undefined;
+    return { focused: true, project_id: project.project_id, record_id: recordId, source_kind: sourceKind,
+      title: title.slice(0, 200), ...(url ? { url: url.slice(0, 2048) } : {}),
+      ...(catalog ? { revision: catalog.revision.revision } : {}), body_handle: recordId,
+      content: selected.text, captured_hash: selected.captured_hash, captured_length: selected.captured_length,
+      capture_truncated: truncated, total_bytes: totalBytes,
+      evidence_ranges: selected.spans.map(span => [span.start, span.end]), ...(refs ? { source_refs: refs } : {}) };
   }
 
   async getCatalogRecords(
@@ -2690,6 +2758,7 @@ export class ResearchService {
       })
       : await inventoryProject({
         roots,
+        current: await this.store.listProjectSourceEntries(project.project_id),
         ...(gitRoot ? { git_root: gitRoot } : {}),
       });
     const searchable = inventory.records.filter((record) => (
@@ -2755,6 +2824,10 @@ export class ResearchService {
     }
     let write;
     try {
+      for (const record of inventory.records) {
+        const map = record.text && readDocumentSourceMap(record.source_map, record.text);
+        if (map) record.source_map_id = await this.store.putDocumentSourceMap(map);
+      }
       write = await this.store.putSourceSnapshot({
         project,
         snapshot,
@@ -2773,6 +2846,11 @@ export class ResearchService {
           sensitive: record.sensitive,
           unreadable: record.unreadable,
           ...(record.content_hash ? { content_hash: record.content_hash } : {}),
+          ...(record.source_hash ? { source_hash: record.source_hash, parser_fingerprint: record.parser_fingerprint,
+            source_map_id: record.source_map_id,
+            text_bytes: record.text_bytes, extraction_provenance: record.extraction_provenance,
+            extraction_quality: record.extraction_quality, extraction_error: record.extraction_error,
+            quality_reason: record.quality_reason } : record.extraction_error ? { extraction_error: record.extraction_error } : {}),
           ...(record.experiment_key ? { experiment_key: record.experiment_key } : {}),
           ...(record.role ? { role: record.role } : {}),
           ...(record.aliases?.length ? { aliases: record.aliases } : {}),
@@ -3169,7 +3247,15 @@ export class ResearchService {
       if (existing && existing.kind === kind && existing.status !== 'merged') return existing;
     }
     const id = entityId(project.project_id, kind, normalizedName);
-    const prior = await this.store.getEntity(id);
+    let prior = await this.store.getEntity(id);
+    if (!prior) {
+      const legacyName = normalizeEntityName(name.normalize('NFKC').split(/[?#]/, 1)[0]);
+      if (legacyName && legacyName !== normalizedName) {
+        const legacy = await this.store.getEntity(entityId(project.project_id, kind, legacyName));
+        // Preserve old IDs without collapsing names that only shared a truncated prefix.
+        if (legacy && normalizeEntityName(legacy.canonical_name) === normalizedName) prior = legacy;
+      }
+    }
     if (prior?.status === 'merged') throw new Error('entity name was merged into another entity');
     const now = new Date().toISOString();
     const entity = await this.store.putEntity(prior ?? {
@@ -3791,12 +3877,7 @@ export class ResearchService {
     sourceFamily: 'document' | 'code',
   ): Promise<KnowledgeJobRecord | undefined> {
     const items = await this.buildRetrievalItems(projectId, sourceFamily);
-    const digest = createHash('sha256').update(JSON.stringify(items.map((item) => ({
-      item_id: item.item_id,
-      content_hash: item.content_hash,
-      exact_terms: item.exact_terms,
-      text_hash: createHash('sha256').update(item.text).digest('hex'),
-    })))).digest('hex');
+    const digest = retrievalGenerationDigest(items);
     const delta = await this.store.planRetrievalItemDelta(projectId, sourceFamily, items).catch((error) => {
       throw new Error(`retrieval item-state planning: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     });
@@ -3806,12 +3887,10 @@ export class ResearchService {
       return undefined;
     }
     const vectorItems = this.options.vectorBackend === 'compact'
-      ? [...items].sort((left, right) => left.item_id.localeCompare(right.item_id))
-        .filter((item, index, values) => values.findIndex((row) => row.source_id === item.source_id) === index)
+      ? compactSourceVectorItems(items)
       : items;
     const prunedVectorItemIds = this.options.vectorBackend === 'compact'
-      ? (await this.store.listVectorItemIds(projectId, sourceFamily))
-        .filter((itemId) => !vectorItems.some((item) => item.item_id === itemId))
+      ? prunedVectorIds(await this.store.listVectorItemIds(projectId, sourceFamily), vectorItems)
       : [];
     const vectorsPruned = prunedVectorItemIds.length;
     const identity = {
@@ -4771,20 +4850,26 @@ export class ResearchService {
     includePreRerank = false,
     requestIdValue?: string,
     responseDeadlineMs?: number,
-  ): Promise<{
-    request_id: string;
-    queries: string[];
-    results: LocalSearchHit[];
-    pre_rerank_results?: LocalSearchHit[];
-    reranker: 'rrf_only' | 'local_vector' | 'not_completed';
-    partial: boolean;
-    completed_lanes: RetrievalLane[];
-    incomplete_reason?: string;
-    graph_project_count: number;
-    degraded_lanes: RetrievalLane[];
-    timings: { embedding_ms: number; retrieval_ms: number; rerank_ms: number };
-    candidate_counts: { exact: number; bm25: number; vector: number; graph: number; fused: number };
-  }> {
+  ): Promise<ResearchSearchBatchResult> {
+    return await this.store.withRetrievalReadContext(() => this.searchBatchInContext(
+      projectIdValue, query, queryVariants, limit, includeProjectIds, signal, filters,
+      rerank, includePreRerank, requestIdValue, responseDeadlineMs,
+    ));
+  }
+
+  private async searchBatchInContext(
+    projectIdValue: string,
+    query: string,
+    queryVariants: string[],
+    limit: number,
+    includeProjectIds: string[] = [],
+    signal?: AbortSignal,
+    filters?: ResearchSearchFilters,
+    rerank = true,
+    includePreRerank = false,
+    requestIdValue?: string,
+    responseDeadlineMs?: number,
+  ): Promise<ResearchSearchBatchResult> {
     const started = performance.now();
     const requestId = requestIdValue ? cleanText(requestIdValue, 'request_id', 200) : randomUUID();
     const degradedLanes = new Set<RetrievalLane>();
@@ -5103,7 +5188,7 @@ export class ResearchService {
       if (ids.has(group.id)) throw new Error(`duplicate query id: ${group.id}`);
       ids.add(group.id);
     }
-    return await mapConcurrent(groups, 2, async (group) => {
+    return await this.store.withRetrievalReadContext(() => mapConcurrent(groups, 2, async (group) => {
       ensureNotAborted(signal);
       const searched = await this.searchBatch(
         projectIdValue,
@@ -5123,7 +5208,7 @@ export class ResearchService {
         timings: searched.timings,
         candidate_counts: searched.candidate_counts,
       };
-    });
+    }));
   }
 
   async researchSearchContext(
@@ -5196,6 +5281,43 @@ export class ResearchService {
       ? { prior_searches, ...(ontology_terms.length ? { ontology_terms } : {}), ...(assertions.length ? { assertions } : {}) } : undefined;
   }
 
+  private async embedRerankPassages(texts: string[]): Promise<number[][]> {
+    if (!texts.length) return [];
+    if (!this.options.enabled || !this.store.isOpen()) return await this.embeddings.embedPassages(texts);
+    const memory = this.embeddings.cachedPassages?.(texts) ?? new Map<number, number[]>();
+    if (memory.size === texts.length) return texts.map((_, index) => memory.get(index)!);
+    const model = embeddingIndexKey(this.embeddings);
+    const keys = texts.map(text => createHash('sha256').update(stableJson({
+      model, dimensions: this.embeddings.dimensions(), normalization: 'rerank-passage-v1',
+      text_hash: createHash('sha256').update(text).digest('hex'),
+    })).digest('hex'));
+    const cached = new Map([...memory].map(([index, vector]) => [keys[index], vector]));
+    let cacheAvailable = true;
+    try {
+      for (const [key, vector] of await this.store.cachedEmbeddings(keys.filter(key => !cached.has(key)))) {
+        cached.set(key, vector);
+      }
+    }
+    catch { cacheAvailable = false; }
+    for (const [key, vector] of cached) {
+      if (vector.length !== this.embeddings.dimensions() || vector.some(value => !Number.isFinite(value))) cached.delete(key);
+    }
+    const missing = new Map(keys.flatMap((key, index) => cached.has(key) ? [] : [[key, texts[index]] as const]));
+    if (missing.size) {
+      const vectors = await this.embeddings.embedPassages([...missing.values()]);
+      validateEmbeddingBatch(vectors, missing.size, this.embeddings.dimensions());
+      const rows = [...missing.keys()].map((key, index) => ({ cache_key: key, embedding: vectors[index] }));
+      for (const row of rows) cached.set(row.cache_key, row.embedding);
+      if (cacheAvailable) {
+        // A derived-cache write failure must not discard a valid semantic ranking.
+        await this.store.putCachedEmbeddings(rows).catch(() => {});
+      }
+    }
+    const vectors = keys.map(key => cached.get(key)!);
+    this.embeddings.rememberPassages?.(texts, vectors);
+    return vectors;
+  }
+
   async rerankCandidates<T extends {
     title: string;
     description?: string;
@@ -5231,7 +5353,7 @@ export class ResearchService {
         preparedQueryVector
           ? Promise.resolve(preparedQueryVector)
           : this.embeddings.embedQuery(query),
-        this.embeddings.embedPassages(working.map((row) => (
+        this.embedRerankPassages(working.map((row) => (
           `${row.title}\n${row.description ?? ''}\n${row.content?.slice(0, 1_200) ?? ''}`
         ))),
       ]);
@@ -5402,7 +5524,13 @@ export class ResearchService {
           ? `${row.title}\n${content}`.slice(0, MAX_RESEARCH_CAPTURE_CHARS)
           : undefined;
         const chunks = text ? documentChunks(text) : [];
-        const chunkSetId = text ? createHash('sha256').update(text).digest('hex') : undefined;
+        const contentHash = text ? createHash('sha256').update(text).digest('hex') : undefined;
+        const sourceMap = text && row.content && content
+          ? remapDocumentSourceMap(row.source_map, row.content, text, row.content.indexOf(content), row.title.length + 1)
+          : undefined;
+        const sourceMapId = sourceMap ? await this.store.putDocumentSourceMap(sourceMap) : undefined;
+        const chunkSetId = contentHash && sourceMapId
+          ? createHash('sha256').update(`${contentHash}\0${sourceMapId}`).digest('hex') : contentHash;
         kinds[kind].push(shortLabel(row.title));
         documentIds.push(id);
         observations.push({
@@ -5432,7 +5560,7 @@ export class ResearchService {
           ...(row.modified_at ? { modified_at: row.modified_at.slice(0, 100) } : {}),
           ...(row.page_count !== undefined ? { page_count: row.page_count } : {}),
           ...(row.scholar_id ? { scholar_id: row.scholar_id } : {}),
-          ...(chunkSetId ? { content_hash: chunkSetId } : {}),
+          ...(contentHash ? { content_hash: contentHash } : {}),
           updated_at: now,
         });
         await this.store.upsertMembership({
@@ -5452,6 +5580,10 @@ export class ResearchService {
         });
         await this.recordMetadataAssertions(project.project_id, id, entity, row);
         if (active && chunkSetId) {
+          const chunkMaps = text && sourceMap ? sliceDocumentSourceMaps(sourceMap, text, chunks.map(chunk => ({
+            start: chunk.start,
+            end: chunk.start + chunk.text.length,
+          }))) : [];
           const stagedChunks = chunks.map((chunk) => ({
             chunk_id: `${id}_${chunkSetId.slice(0, 16)}_${chunk.chunk_index}`,
             document_id: id,
@@ -5461,12 +5593,17 @@ export class ResearchService {
             url: row.url,
             text: chunk.text,
             content_hash: chunk.content_hash,
+            ...(chunkMaps[chunk.chunk_index] ? { source_map: chunkMaps[chunk.chunk_index] } : {}),
             updated_at: now,
           }));
           await this.store.stageDocumentChunks(stagedChunks);
           await this.store.publishDocumentChunkSet({
             document_id: id,
-            content_hash: chunkSetId,
+            canonical_url: row.url,
+            title: row.title.slice(0, 1_000),
+            content_hash: contentHash,
+            extraction_provenance: row.extraction_provenance ?? null,
+            source_map_id: sourceMapId ?? null,
             updated_at: now,
           }, {
             project_id: project.project_id,

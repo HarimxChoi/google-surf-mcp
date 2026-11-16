@@ -29,6 +29,11 @@ const offTransport = new StdioClientTransport({
 });
 try {
   await offClient.connect(offTransport);
+  const routing = offClient.getInstructions() ?? '';
+  for (const phrase of ['known public URL -> extract', 'indexed local knowledge -> project_memory_search',
+    'BM25/RRF without E5', 'CPU LiteParse OCR', 'aggregate, not top-k hits']) {
+    if (!routing.includes(phrase)) throw new Error(`server routing instructions missing: ${phrase}`);
+  }
   const listed = await offClient.listTools();
   const names = listed.tools.map((tool) => tool.name).sort();
   const expected = [
@@ -48,6 +53,9 @@ try {
     if (!descriptions.get(name)?.includes(phrase)) {
       throw new Error(`${name} routing description mismatch`);
     }
+  }
+  if (!descriptions.get('extract')?.includes('PDF OCR targets only pages flagged as needing it')) {
+    throw new Error('extract selective OCR routing description mismatch');
   }
   const expectedTitles = {
     search: 'Web Search and Extract',
@@ -131,6 +139,24 @@ try {
     || states?.[1]?.status !== 'degraded' || states?.[2]?.status !== 'empty'
     || evidence.structuredContent?.meta?.evidence?.answerability !== 'not_assessed') {
     throw new Error(`research-off evidence routing failed: ${JSON.stringify(evidence.structuredContent)}`);
+  }
+  const scoped = await offClient.callTool({ name: 'search_parallel', arguments: {
+    queries: ['site:example.org booking', 'site:outside.test booking'], limit: 2, extract_mode: 'none',
+  } });
+  const scopedGroups = scoped.structuredContent?.results;
+  if (scoped.isError || scopedGroups?.[0]?.results?.length !== 1
+    || scopedGroups?.[1]?.results?.length !== 0
+    || scopedGroups?.[1]?.site_scope?.domain !== 'outside.test'
+    || scopedGroups?.[1]?.site_scope?.removed !== 1) {
+    throw new Error('search_parallel site_scope output contract mismatch');
+  }
+  const scopedSingle = await offClient.callTool({ name: 'search', arguments: {
+    query: 'site:outside.test booking', limit: 2, extract_mode: 'none',
+  } });
+  if (scopedSingle.isError || scopedSingle.structuredContent?.results?.length !== 0
+    || scopedSingle.structuredContent?.site_scope?.domain !== 'outside.test'
+    || !scopedSingle.structuredContent?.degraded_reasons?.includes('site_scope_mismatch')) {
+    throw new Error('search site_scope output contract mismatch');
   }
 } finally {
   await offTransport.close();

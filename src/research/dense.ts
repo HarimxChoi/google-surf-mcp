@@ -28,6 +28,8 @@ export interface EmbeddingProvider {
   embedQuery(text: string): Promise<number[]>;
   embedQueries?(texts: string[]): Promise<number[][]>;
   embedPassages(texts: string[]): Promise<number[][]>;
+  cachedPassages?(texts: string[]): Map<number, number[]>;
+  rememberPassages?(texts: string[], vectors: number[][]): void;
   diagnostics?(): EmbeddingDiagnostics;
   dispose?(): Promise<void>;
 }
@@ -164,13 +166,18 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
   private async embed(texts: string[]): Promise<number[][]> {
     if (!texts.length) return [];
     const output = new Array<number[]>(texts.length);
-    const missing: Array<{ index: number; text: string; key: string }> = [];
+    const missingByKey = new Map<string, { indexes: number[]; text: string; key: string }>();
     texts.forEach((text, index) => {
       const key = this.key(text);
       const cached = this.cache.get(key);
       if (cached) output[index] = cached;
-      else missing.push({ index, text, key });
+      else {
+        const pending = missingByKey.get(key);
+        if (pending) pending.indexes.push(index);
+        else missingByKey.set(key, { indexes: [index], text, key });
+      }
     });
+    const missing = [...missingByKey.values()];
     if (missing.length) {
       const batchSize = embeddingBatchSize(this.runtimeOptions.batchSize);
       for (let index = 0; index < missing.length; index += batchSize) {
@@ -196,7 +203,10 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
             }
             uncached.forEach((row, batchIndex) => this.cache.set(row.key, vectors[batchIndex]));
           }
-          batch.forEach((row) => { output[row.index] = this.cache.get(row.key)!; });
+          batch.forEach((row) => {
+            const vector = this.cache.get(row.key)!;
+            row.indexes.forEach((index) => { output[index] = vector; });
+          });
           while (this.cache.size > 512) this.cache.delete(this.cache.keys().next().value!);
         });
         this.inferenceTail = work.catch(() => {});
@@ -216,6 +226,21 @@ export class LocalEmbeddingModel implements EmbeddingProvider {
 
   async embedPassages(texts: string[]): Promise<number[][]> {
     return await this.embed(texts.map((text) => this.prefix('passage', text)));
+  }
+
+  cachedPassages(texts: string[]): Map<number, number[]> {
+    const cached = new Map<number, number[]>();
+    texts.forEach((text, index) => {
+      const vector = this.cache.get(this.key(this.prefix('passage', text)));
+      if (vector) cached.set(index, vector);
+    });
+    return cached;
+  }
+
+  rememberPassages(texts: string[], vectors: number[][]): void {
+    validateEmbeddingBatch(vectors, texts.length, this.dimensions());
+    texts.forEach((text, index) => this.cache.set(this.key(this.prefix('passage', text)), vectors[index]));
+    while (this.cache.size > 512) this.cache.delete(this.cache.keys().next().value!);
   }
 
   async dispose(): Promise<void> {

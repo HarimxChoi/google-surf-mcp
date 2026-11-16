@@ -66,6 +66,82 @@ describe('vector retrieval', () => {
     expect(model.fingerprint().runtime).toBe('transformers-4.2.0-pinned-tokenizer-v1');
   });
 
+  it('embeds duplicate inputs once and restores their original positions', async () => {
+    const batches: string[][] = [];
+    const model = new LocalEmbeddingModel('fake-e5', async () => async (texts) => {
+      batches.push(texts);
+      return { tolist: () => texts.map((text) => vector(text.endsWith('alpha') ? 1 : 0, 1)) };
+    }, undefined, { batchSize: 2 });
+    expect(await model.embedQueries([])).toEqual([]);
+    const result = await model.embedQueries(['alpha', 'beta', 'alpha', 'beta', 'alpha']);
+    expect(batches).toEqual([['query: alpha', 'query: beta']]);
+    expect(result).toEqual([vector(1, 1), vector(0, 1), vector(1, 1), vector(0, 1), vector(1, 1)]);
+    await model.embedQueries(['beta', 'alpha']);
+    expect(batches).toHaveLength(1);
+    await model.embedPassages(['alpha', 'alpha']);
+    expect(batches[1]).toEqual(['passage: alpha']);
+    expect(model.diagnostics().cached_vectors).toBe(3);
+    await model.dispose();
+  });
+
+  it('retains duplicate results across cache eviction and coalesces concurrent inputs', async () => {
+    const batches: string[][] = [];
+    const model = new LocalEmbeddingModel('fake-e5', async () => async (texts) => {
+      batches.push(texts);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return { tolist: () => texts.map((text) => vector(Number(text.split(' ').at(-1)), 1)) };
+    }, undefined, { batchSize: 8 });
+    const texts = Array.from({ length: 520 }, (_, index) => `document ${index}`);
+    const result = await model.embedPassages([...texts, texts[0], texts[519]]);
+    expect(batches.flat()).toHaveLength(520);
+    expect(result).toHaveLength(522);
+    expect(result[520]).toEqual(result[0]);
+    expect(result[521]).toEqual(result[519]);
+    expect(model.diagnostics().cached_vectors).toBe(512);
+    const count = batches.length;
+    const [first, second] = await Promise.all([
+      model.embedQueries(['shared 7', 'shared 7']),
+      model.embedQueries(['shared 7', 'shared 7']),
+    ]);
+    expect(batches.slice(count)).toEqual([['query: shared 7']]);
+    expect(first).toEqual(second);
+    expect(first).toEqual([vector(7, 1), vector(7, 1)]);
+    await model.dispose();
+  });
+
+  it('retries a failed duplicate batch without publishing partial vectors', async () => {
+    let fail = true;
+    const batches: string[][] = [];
+    const model = new LocalEmbeddingModel('fake-e5', async () => async (texts) => {
+      batches.push(texts);
+      if (fail) { fail = false; throw new Error('duplicate inference failed'); }
+      return { tolist: () => texts.map(() => vector(1, 0)) };
+    });
+    await expect(model.embedQueries(['same', 'same'])).rejects.toThrow('duplicate inference failed');
+    expect(model.diagnostics().cached_vectors).toBe(0);
+    expect(await model.embedQueries(['same', 'same'])).toEqual([vector(1, 0), vector(1, 0)]);
+    expect(batches).toEqual([['query: same'], ['query: same']]);
+    await model.dispose();
+  });
+
+  it('peeks and restores bounded passage vectors without loading the model', async () => {
+    const factory = vi.fn(async () => async (texts: string[]) => ({ tolist: () => texts.map(() => vector(1, 0)) }));
+    const model = new LocalEmbeddingModel('fake-e5', factory);
+    expect(model.cachedPassages(['alpha'])).toEqual(new Map());
+    model.rememberPassages(['alpha'], [vector(1, 0)]);
+    expect([...model.cachedPassages(['alpha', 'missing', 'alpha'])]).toEqual([[0, vector(1, 0)], [2, vector(1, 0)]]);
+    expect(await model.embedPassages(['alpha'])).toEqual([vector(1, 0)]);
+    expect(factory).not.toHaveBeenCalled();
+    expect(() => model.rememberPassages(['bad'], [[NaN]])).toThrow('embedding output mismatch');
+    model.rememberPassages(Array.from({ length: 520 }, (_, index) => `body ${index}`),
+      Array.from({ length: 520 }, () => vector(0, 1)));
+    expect(model.diagnostics().cached_vectors).toBe(512);
+    expect(model.cachedPassages(['alpha', 'body 519']).has(0)).toBe(false);
+    expect(model.cachedPassages(['body 519']).get(0)).toEqual(vector(0, 1));
+    await model.dispose();
+    expect(model.cachedPassages(['body 519']).size).toBe(0);
+  });
+
   it('reports embedding residency without loading the model and clears it on disposal', async () => {
     const dispose = vi.fn(async () => {});
     const factory = vi.fn(async () => Object.assign(async (texts: string[]) => ({

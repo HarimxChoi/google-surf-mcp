@@ -18,6 +18,54 @@ describe('research project memory', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('captures and retrieves a source whose title starts with a Markdown heading', async () => {
+    await service.createProject('Document capture', 'document-capture');
+    const capture = await service.capture({ tool: 'extract', project_id: 'document-capture', payload: {
+      title: '# Fictional Cedar model', url: 'https://example.com/cedar-image',
+      content: 'Cedar native context is 8192 tokens. The extended context is 32768 tokens.',
+      extraction_quality: 'full_text',
+    } });
+    expect(capture.stored).toBe(1);
+    await service.waitForIdle();
+    const results = await service.search('document-capture', 'Cedar native context', 3);
+    expect(results.some(row => row.url === 'https://example.com/cedar-image' && row.content.includes('8192'))).toBe(true);
+  });
+
+  it('preserves legacy truncated-name IDs without merging different suffixes', async () => {
+    await service.createProject('Legacy names', 'legacy-names');
+    const old = await service.recordEntity({ project_id: 'legacy-names', kind: 'concept', name: 'Trial', source: 'deterministic' });
+    await service['store'].putEntity({ ...old, canonical_name: 'Trial #2' });
+    const restored = await service.recordEntity({ project_id: 'legacy-names', kind: 'concept', name: 'Trial #2', source: 'deterministic' });
+    const distinct = await service.recordEntity({ project_id: 'legacy-names', kind: 'concept', name: 'Trial #3', source: 'deterministic' });
+    expect(restored.entity_id).toBe(old.entity_id);
+    expect(distinct.entity_id).not.toBe(old.entity_id);
+    const candidates = await service.linkEntity('legacy-names', 'Trial #2');
+    expect(candidates[0].entity.entity_id).toBe(old.entity_id);
+    expect(candidates[0].match).toBe('alias');
+  });
+
+  it.each(['extract', 'search_parallel'] as const)('retains original-file provenance for %s without echoing a body', async tool => {
+    await service.createProject('Provenance', 'provenance');
+    const provenance = { source_sha256: 'a'.repeat(64), source_format: 'image',
+      parser: 'liteparse', ocr_policy: 'enabled', ocr_language: 'eng+kor' };
+    const row = { title: 'Source image', url: 'https://example.com/provenance.png',
+      content: 'Native context is 8192 tokens.', extraction_quality: 'full_text',
+      extraction_provenance: { ...provenance, content: 'must not persist in metadata' } };
+    const capture = await service.capture({ tool, project_id: 'provenance', payload:
+      tool === 'extract' ? row : { results: [{ results: [row] }] } });
+    expect(capture.stored).toBe(1);
+    const documents = await service['store'].listProjectDocuments('provenance', false);
+    const read = await service['store'].getProjectDocumentRecord('provenance', documents[0].document_id, 0, 0);
+    expect(read?.record.extraction_provenance).toEqual(provenance);
+    expect(read?.body).toBeUndefined();
+    expect(JSON.stringify(capture)).not.toContain(row.content);
+    await service.capture({ tool: 'extract', project_id: 'provenance', payload: {
+      title: row.title, url: row.url, content: 'Replacement plain content.', extraction_quality: 'full_text',
+    } });
+    const replaced = await service['store'].getProjectDocumentRecord('provenance', documents[0].document_id, 0, 0);
+    expect(replaced?.record.extraction_provenance).toBeUndefined();
+  });
+
   it('preserves plan, failed experiment, and revised plan lineage', async () => {
     await service.createProject('Retrieval study', 'retrieval-study');
     const v1 = await service.createPlan({

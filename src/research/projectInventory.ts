@@ -1,12 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, readFile, readdir } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import {
   classifyProjectPath, collectionIgnoreGlobs, experimentKey, isCollectionBoundary,
   containsSensitiveContent, isSensitivePath, isTextPath, projectRoleKind, type ProjectFileKind,
 } from './inventory.js';
 import type { ProjectDocumentRole, ProjectSourceEntryRecord } from './contracts.js';
+import { documentFormatFromPath, MAX_DOCUMENT_BYTES } from '../documentFormats.js';
+import { documentParserFingerprint, readBinaryDocument } from '../documentReader.js';
+import type { ExtractionProvenance } from '../extractionProvenance.js';
+import type { DocumentSourceMap } from '../documentSourceMap.js';
 
 export interface ProjectRootInput {
   label: string;
@@ -24,6 +28,15 @@ export interface ProjectInventoryRecord {
   kind: ProjectFileKind;
   tracked: boolean;
   content_hash?: string;
+  source_hash?: string;
+  parser_fingerprint?: string;
+  source_map?: DocumentSourceMap;
+  source_map_id?: string;
+  text_bytes?: number;
+  extraction_provenance?: ExtractionProvenance;
+  extraction_quality?: string;
+  extraction_error?: string;
+  quality_reason?: string;
   text?: string;
   experiment_key?: string;
   role?: ProjectDocumentRole;
@@ -146,6 +159,7 @@ async function inventoryRecord(
   path: string,
   tracked: Set<string>,
   collection: boolean,
+  current?: ProjectSourceEntryRecord,
 ): Promise<ProjectInventoryRecord> {
   const relativePath = relative(root.path, path).replace(/\\/g, '/');
   const declared = root.manifest?.find((item) => item.path.replace(/\\/g, '/') === relativePath);
@@ -177,9 +191,44 @@ async function inventoryRecord(
   }
   const textEligible = !pathSensitive && !collection && stat.isFile() && isTextPath(path)
     && stat.size <= 2 * 1024 * 1024;
-  const bytes = textEligible ? await readFile(path) : undefined;
-  const text = textEligible ? bytes!.toString('utf8') : undefined;
-  const sensitive = pathSensitive || (text !== undefined && containsSensitiveContent(text));
+  const format = !pathSensitive && !collection && stat.isFile() ? documentFormatFromPath(path) : undefined;
+  let bytes = textEligible ? await readFile(path) : undefined;
+  let text = textEligible ? bytes!.toString('utf8') : undefined;
+  let document: Partial<ProjectInventoryRecord> = {};
+  let documentSensitive = false;
+  if (format) {
+    const fingerprint = documentParserFingerprint();
+    if (stat.size > MAX_DOCUMENT_BYTES) document = { extraction_quality: 'metadata_only',
+      extraction_error: 'document exceeds 25 MiB; split the source' };
+    else try {
+      const [rootPath, actualPath] = await Promise.all([realpath(root.path), realpath(path)]);
+      if (actualPath !== rootPath && !actualPath.startsWith(`${rootPath}${sep}`)) throw new Error(`document path escapes approved root: ${relativePath}`);
+      bytes = await readFile(actualPath);
+      const sourceHash = createHash('sha256').update(bytes).digest('hex');
+      document = { source_hash: sourceHash, parser_fingerprint: fingerprint };
+      if (current?.source_hash === sourceHash && current.parser_fingerprint === fingerprint
+        && !current.extraction_error && !current.sensitive) {
+        document = { ...document, content_hash: current.content_hash, text_bytes: current.text_bytes,
+          source_map_id: current.source_map_id,
+          extraction_provenance: current.extraction_provenance, extraction_quality: current.extraction_quality,
+          quality_reason: current.quality_reason, searchable: current.searchable };
+      } else {
+        const parsed = await readBinaryDocument(bytes, format);
+        documentSensitive = parsed.contains_sensitive_content === true;
+        text = parsed.content?.trim() ? parsed.content : undefined;
+        document = { ...document, extraction_provenance: parsed.extraction_provenance,
+          source_map: parsed.source_map,
+          extraction_quality: parsed.extraction_quality, quality_reason: parsed.quality_reason?.slice(0, 200),
+          ...(parsed.error ? { extraction_error: parsed.error.slice(0, 200), unreadable: true } : {}),
+          ...(text !== undefined ? { content_hash: createHash('sha256').update(text).digest('hex'),
+            text_bytes: Buffer.byteLength(text, 'utf8') } : {}) };
+      }
+    } catch (error) {
+      document = { extraction_quality: 'metadata_only', unreadable: true,
+        extraction_error: (error as Error).message.slice(0, 200) };
+    }
+  }
+  const sensitive = pathSensitive || documentSensitive || (text !== undefined && containsSensitiveContent(text));
   const key = ['prereg', 'result'].includes(kind) ? experimentKey(relativePath) : undefined;
   return {
     id: createHash('sha256').update(`${root.label}\0${relativePath}`).digest('hex').slice(0, 32),
@@ -191,7 +240,8 @@ async function inventoryRecord(
     tracked: tracked.has(path.toLowerCase()),
     sensitive,
     entry_type: collection ? 'collection' : 'file',
-    ...(!sensitive && bytes ? { content_hash: createHash('sha256').update(bytes).digest('hex') } : {}),
+    ...(!sensitive && !format && bytes ? { content_hash: createHash('sha256').update(bytes).digest('hex') } : {}),
+    ...(!sensitive ? document : {}),
     ...(!sensitive && text !== undefined ? { text } : {}),
     ...(key ? { experiment_key: `${root.label}/${key}` } : {}),
     ...(role ? { role } : {}),
@@ -224,20 +274,27 @@ function normalizeRoots(inputs: ProjectRootInput[]): ProjectRootInput[] {
 export async function inventoryProject(input: {
   roots: ProjectRootInput[];
   git_root?: string;
+  current?: ProjectSourceEntryRecord[];
 }): Promise<ProjectInventory> {
   const roots = normalizeRoots(input.roots);
   if (!roots.length) throw new Error('at least one root required');
   const gitRoot = input.git_root ? resolve(input.git_root) : undefined;
   const tracked = trackedFiles(gitRoot);
   const records: ProjectInventoryRecord[] = [];
+  const current = new Map((input.current ?? []).map(record => [`${record.root}\0${record.path}`, record]));
   for (const root of roots) {
     const entries = [
       ...(await listFiles(root.path)).map((path) => ({ path, collection: false })),
       ...(await listCollectionBoundaries(root.path)).map((path) => ({ path, collection: true })),
     ];
     for (let index = 0; index < entries.length; index += 64) {
-      records.push(...await Promise.all(entries.slice(index, index + 64)
+      const batch = entries.slice(index, index + 64);
+      records.push(...await Promise.all(batch.filter(entry => !documentFormatFromPath(entry.path))
         .map((entry) => inventoryRecord(root, entry.path, tracked, entry.collection))));
+      for (const entry of batch.filter(entry => documentFormatFromPath(entry.path))) {
+        records.push(await inventoryRecord(root, entry.path, tracked, entry.collection,
+          current.get(`${root.label}\0${relative(root.path, entry.path).replace(/\\/g, '/')}`)));
+      }
     }
   }
   records.sort((a, b) => a.id.localeCompare(b.id));
@@ -249,6 +306,9 @@ export async function inventoryProject(input: {
     sensitive: record.sensitive || undefined,
     unreadable: record.unreadable || undefined,
     content_hash: record.content_hash,
+    source_hash: record.source_hash,
+    parser_fingerprint: record.parser_fingerprint,
+    extraction_error: record.extraction_error,
     entry_type: record.entry_type,
     role: record.role,
     aliases: record.aliases,
@@ -281,6 +341,14 @@ export async function inventoryProjectIncremental(input: {
     kind: record.kind as ProjectFileKind,
     tracked: record.tracked,
     content_hash: record.content_hash,
+    source_hash: record.source_hash,
+    parser_fingerprint: record.parser_fingerprint,
+    source_map_id: record.source_map_id,
+    text_bytes: record.text_bytes,
+    extraction_provenance: record.extraction_provenance,
+    extraction_quality: record.extraction_quality,
+    extraction_error: record.extraction_error,
+    quality_reason: record.quality_reason,
     experiment_key: record.experiment_key,
     role: record.role,
     aliases: record.aliases,
@@ -315,7 +383,8 @@ export async function inventoryProjectIncremental(input: {
       }
       throw error;
     }
-    const record = await inventoryRecord(located.root, located.path, tracked, metadata.isDirectory());
+    const record = await inventoryRecord(located.root, located.path, tracked, metadata.isDirectory(),
+      input.current.find(record => record.root === located.root.label && record.path === located.relativePath));
     records.set(record.id, record);
   }
   const sorted = [...records.values()].sort((a, b) => a.id.localeCompare(b.id));
@@ -327,6 +396,9 @@ export async function inventoryProjectIncremental(input: {
     sensitive: record.sensitive || undefined,
     unreadable: record.unreadable || undefined,
     content_hash: record.content_hash,
+    source_hash: record.source_hash,
+    parser_fingerprint: record.parser_fingerprint,
+    extraction_error: record.extraction_error,
     entry_type: record.entry_type,
     role: record.role,
     aliases: record.aliases,

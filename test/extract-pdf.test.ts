@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { extractPdfTiered, isPdfMagic, isPdfContentType } from '../src/extract-pdf.js';
 
@@ -66,6 +66,49 @@ describe('isPdfContentType', () => {
 });
 
 describe('extractPdfTiered metadata', () => {
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it.each([['abstract', 'text'], ['abstract', 'markdown'], ['full', 'text'], ['full', 'markdown']] as const)(
+    'does not label an empty %s/%s extraction as readable text', async (mode, format) => {
+    vi.stubEnv('SURF_EXTRACT_OCR', 'false');
+    vi.stubEnv('SURF_EXTRACT_PDF_FORMAT', format);
+    const pdf = await PDFDocument.create();
+    pdf.addPage();
+    const result = await extractPdfTiered(await pdf.save(), mode, 1500);
+    expect(result).toMatchObject({ extraction_quality: 'metadata_only', content: '', length: 0 });
+    expect(result.quality_reason).toContain('SURF_EXTRACT_OCR=true');
+  });
+
+  it('reads only the first page for abstract mode while reporting the source page count', async () => {
+    vi.stubEnv('SURF_EXTRACT_PDF_FORMAT', 'markdown');
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    pdf.addPage().drawText('First page content', { x: 50, y: 700, font });
+    pdf.addPage().drawText('Second page content', { x: 50, y: 700, font });
+    const result = await extractPdfTiered(await pdf.save(), 'abstract', 1500);
+    expect(result.page_count).toBe(2);
+    expect(result.content).toContain('First page content');
+    expect(result.content).not.toContain('Second page content');
+    expect(result.content_format).toBe('markdown');
+  });
+
+  it('keeps an explicit plain text fallback and exact clipping metadata', async () => {
+    vi.stubEnv('SURF_EXTRACT_PDF_FORMAT', 'text');
+    const result = await extractPdfTiered(await metadataPdf(), 'full', 8);
+    expect(result.content_format).toBe('text');
+    expect(result.content).toHaveLength(8);
+    expect(result.length).toBe(8);
+    expect(result.source_length).toBeGreaterThan(8);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('extracts readable PDF text with the automatic OCR policy', async () => {
+    vi.stubEnv('SURF_EXTRACT_OCR', 'auto');
+    const result = await extractPdfTiered(await metadataPdf(), 'full', 1500);
+    expect(result.content).toContain('Metadata test body');
+    expect(result.extraction_quality).toBe('full_text');
+  });
+
   it.each(['metadata', 'abstract', 'full'] as const)(
     'returns document metadata in %s mode',
     async (mode) => {

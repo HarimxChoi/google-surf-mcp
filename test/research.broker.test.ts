@@ -1,10 +1,13 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createServer, type Socket } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createSharedResearchService,
   researchBrokerDirectory,
+  researchBrokerEndpoint,
+  researchBrokerTokenPath,
 } from '../src/research/broker.js';
 import type { ResearchService } from '../src/research/service.js';
 
@@ -198,6 +201,105 @@ describe('research broker', () => {
     expect(status.broker.background_ownership.checkpoint_drain_requested).toBe(false);
   }, 20_000);
 
+  it('peeks at a cold broker without starting it or creating its root', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-cold-peek-'));
+    const unopened = resolve(root, 'unopened');
+    const service = createSharedResearchService(
+      { enabled: true, root: unopened, vectorModel: '' },
+      { processPath: resolve('build/research/brokerProcess.js') },
+    );
+    services.push(service);
+    for (let index = 0; index < 3; index++) {
+      expect(await service.peekStatus()).toMatchObject({
+        state: 'broker_disconnected', cached_status: true, passive: true,
+        broker_observation: 'not_connected', last_status_observed_at: null,
+        capabilities: { passive_health_opens_database: false },
+      });
+    }
+    await expect(access(unopened)).rejects.toThrow();
+  });
+
+  it('peeks at another client broker without reviving it after idle exit', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-existing-peek-'));
+    const options = { enabled: true, root, vectorModel: '' };
+    const clientOptions = { idleMs: 1000, processPath: resolve('build/research/brokerProcess.js') };
+    const first = createSharedResearchService(options, clientOptions);
+    const observer = createSharedResearchService(options, { ...clientOptions, idleMs: 2000 });
+    services.push(first, observer);
+    const started = await first.passiveStatus();
+    const observed = await observer.peekStatus();
+    expect('process' in observed && observed.process.pid).toBe(started.process.pid);
+    await waitUntil(() => {
+      try { process.kill(started.process.pid, 0); return false; } catch { return true; }
+    });
+    const ownerPath = resolve(researchBrokerDirectory(root), 'owner', 'owner.json');
+    for (let index = 0; index < 3; index++) {
+      const stopped = await observer.peekStatus();
+      expect(stopped).toMatchObject({ cached_status: true, broker_observation: 'not_connected' });
+      expect('process' in stopped).toBe(false);
+      expect(() => process.kill(started.process.pid, 0)).toThrow();
+    }
+    const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { pid: number };
+    expect(owner.pid).toBe(started.process.pid);
+  }, 20_000);
+
+  it('preserves a configuration mismatch in an existing-only diagnostic', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-peek-mismatch-'));
+    const path = resolve('build/research/brokerProcess.js');
+    const first = createSharedResearchService({ enabled: true, root, vectorModel: '' }, { idleMs: 1000, processPath: path });
+    const observer = createSharedResearchService(
+      { enabled: true, root, vectorModel: '', databaseName: 'peek-other' },
+      { idleMs: 2000, processPath: path },
+    );
+    services.push(first, observer);
+    const started = await first.passiveStatus();
+    expect(await observer.peekStatus()).toMatchObject({
+      cached_status: true, observation_error: 'research broker configuration mismatch',
+    });
+    expect((await first.passiveStatus()).process.pid).toBe(started.process.pid);
+  }, 20_000);
+
+  it('cancels an existing-only diagnostic without recreating a removed token', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-peek-timeout-'));
+    const tokenPath = researchBrokerTokenPath(root);
+    const token = 'a'.repeat(64);
+    await mkdir(researchBrokerDirectory(root));
+    await writeFile(tokenPath, token);
+    const sockets = new Set<Socket>();
+    const cancelled: string[] = [];
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      let buffer = '';
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString();
+        for (;;) {
+          const end = buffer.indexOf('\n');
+          if (end < 0) return;
+          const request = JSON.parse(buffer.slice(0, end)) as { method: string; token: string };
+          buffer = buffer.slice(end + 1);
+          if (request.method === 'passiveStatus') void rm(tokenPath);
+          if (request.method === '$cancel') cancelled.push(request.token);
+        }
+      });
+      socket.on('close', () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolveListen) => server.listen(researchBrokerEndpoint(root!), resolveListen));
+    const service = createSharedResearchService({ enabled: true, root, vectorModel: '' });
+    services.push(service);
+    try {
+      expect(await service.peekStatus()).toMatchObject({
+        cached_status: true, observation_error: 'research broker method timed out: passiveStatus',
+      });
+      await waitUntil(() => cancelled.length === 1);
+      expect(cancelled).toEqual([token]);
+      await expect(access(tokenPath)).rejects.toThrow();
+    } finally {
+      await service.close();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    }
+  }, 20_000);
+
   it('drains while clients remain connected and reconnects on the next request', async () => {
     root = await mkdtemp(resolve(tmpdir(), 'surf-broker-drain-'));
     const service = createSharedResearchService(
@@ -222,6 +324,45 @@ describe('research broker', () => {
     const second = JSON.parse(await readFile(ownerPath, 'utf8')) as { pid: number };
     expect(second.pid).not.toBe(first.pid);
   }, 30_000);
+
+  it('does not keep an idle broker alive through passive status polling', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-passive-idle-'));
+    const service = createSharedResearchService(
+      { enabled: true, root, vectorModel: '' },
+      { idleMs: 300, processPath: resolve('build/research/brokerProcess.js') },
+    );
+    services.push(service);
+    const first = await service.passiveStatus();
+    const pid = first.process.pid;
+    let polls = 0;
+    const alive = (): boolean => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    };
+    const deadline = Date.now() + 3000;
+    while (alive() && Date.now() < deadline) {
+      await service.passiveStatus();
+      polls++;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+    }
+    expect(polls).toBeGreaterThan(1);
+    expect(alive()).toBe(false);
+  }, 20_000);
+
+  it('refreshes the idle deadline for real work while passive polls remain neutral', async () => {
+    root = await mkdtemp(resolve(tmpdir(), 'surf-broker-work-idle-'));
+    const service = createSharedResearchService(
+      { enabled: true, root, vectorModel: '', endpoint: 'mem://' },
+      { idleMs: 500, processPath: resolve('build/research/brokerProcess.js') },
+    );
+    services.push(service);
+    await service.createProject('Active work', 'active-work');
+    const first = await service.passiveStatus();
+    for (let index = 0; index < 4; index++) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+      expect((await service.listProjects()).map((project) => project.project_id)).toContain('active-work');
+      expect((await service.passiveStatus()).process.pid).toBe(first.process.pid);
+    }
+  }, 20_000);
 
   it('does not drain the database owner while background indexing is active', async () => {
     root = await mkdtemp(resolve(tmpdir(), 'surf-broker-background-'));

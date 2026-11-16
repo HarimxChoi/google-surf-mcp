@@ -17,13 +17,20 @@ export class SourceReader {
     const denyProxy = await createNetworkDenyProxy();
     let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
     try {
-    browser = await chromium.launch({
-      executablePath: config.chromePath ?? detectSystemChrome(), headless: true,
+    const launchOptions = {
+      executablePath: config.chromePath, headless: true,
       chromiumSandbox: !config.noSandbox,
       proxy:{ server:denyProxy.url, bypass:'<-loopback>' },
       args: ['--disable-quic', '--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost',
         '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', ...(config.cloudMode ? ['--disable-dev-shm-usage'] : [])],
-    });
+    };
+    try {
+      browser = await chromium.launch(launchOptions);
+    } catch (error) {
+      // Prefer Playwright's matching headless build; preserve explicit executable failures.
+      if (config.chromePath || !(error instanceof Error) || !/Executable (?:doesn't|does not) exist/.test(error.message)) throw error;
+      browser = await chromium.launch({ ...launchOptions, executablePath: detectSystemChrome() });
+    }
       const context = await browser.newContext({ ignoreHTTPSErrors: config.insecureTls, locale: config.locale,
         timezoneId: config.timezone, serviceWorkers: 'block', acceptDownloads: false });
       await context.route('**/*', async (route) => {

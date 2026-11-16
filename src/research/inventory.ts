@@ -1,5 +1,6 @@
 import { extname, basename, dirname } from 'node:path';
 import type { ProjectDocumentRole } from './contracts.js';
+import { documentFormatFromPath } from '../documentFormats.js';
 
 export type ProjectFileKind =
   | 'prereg'
@@ -102,6 +103,7 @@ export function classifyProjectPath(path: string): ProjectFileKind {
     return 'report';
   }
   if (extension === '.log') return 'log';
+  if (documentFormatFromPath(path)) return 'report';
   if (CHECKPOINT_EXTENSIONS.has(extension)) return 'checkpoint';
   if (SOURCE_EXTENSIONS.has(extension)) return 'source';
   if (CONFIG_EXTENSIONS.has(extension)) return 'config';

@@ -70,6 +70,17 @@ describe('GitHub repository capture', () => {
     expect(selectedRepositoryPaths(value, 'abstract')).toEqual(['src/kernel.ts']);
   });
 
+  it.each(['issues/1311', 'pull/42', 'discussions/7', 'blob/main/src/code.ts', 'commit/abcd', 'releases/tag/v1', 'tree'])
+  ('does not replace a GitHub %s page with a repository README', path => {
+    expect(parseGitHubRepositoryUrl(`https://github.com/owner/repo/${path}`)).toBeUndefined();
+  });
+
+  it('accepts repository identities but not credentialed or non-HTTP URLs', () => {
+    expect(parseGitHubRepositoryUrl('https://github.com/owner/repo.git')).toEqual({ owner: 'owner', name: 'repo' });
+    expect(parseGitHubRepositoryUrl('ftp://github.com/owner/repo')).toBeUndefined();
+    expect(parseGitHubRepositoryUrl('https://user:secret@github.com/owner/repo')).toBeUndefined();
+  });
+
   it('keeps large repositories as web results with a reason', () => {
     const decision = decideRepository(
       repository({ source_bytes: 2_000 }),

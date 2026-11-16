@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import type { EntityLinkCandidate, EntityRecord } from './contracts.js';
 
 export function normalizeEntityName(value: string): string {
-  return value.normalize('NFKC').trim().toLowerCase()
-    .replace(/^https?:\/\/(?:www\.)?/, '')
-    .replace(/[?#].*$/, '')
+  const text = value.normalize('NFKC').trim().toLowerCase();
+  const name = /^https?:\/\//.test(text)
+    ? text.replace(/^https?:\/\/(?:www\.)?/, '').replace(/[?#].*$/, '')
+    : text;
+  return name
     .replace(/[^\p{L}\p{N}./:+_-]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();

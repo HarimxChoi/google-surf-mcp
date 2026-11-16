@@ -19,6 +19,10 @@ import { enforceSearchSiteScope } from './searchScope.js';
 import { runtimeIdentity } from './runtimeIdentity.js';
 import type { ResearchRequirement } from './researchRequirements.js';
 import { cleanCapturedText, evidenceBodiesFor, selectEvidence, type EvidenceMode, type EvidenceRange, type EvidenceSpan } from './evidence.js';
+import { documentSourceRefs, readDocumentSourceMap } from './documentSourceMap.js';
+import { selectDocumentEvidence } from './documentEvidence.js';
+import { boundDocumentCatalog } from './documentCatalogBudget.js';
+import type { DocumentCatalog } from './documentCatalog.js';
 import {
   MAX_PARALLEL_RESPONSE_RESULTS, MAX_REMAINING_URLS, SEARCH_RESPONSE_TEXT_BUDGET,
 } from './responseLimits.js';
@@ -83,6 +87,7 @@ export interface SearchExtractionInput {
   research_goal?: string;
   extract_mode?: SearchExtractionMode;
   extract_limit?: number;
+  deep_read?: boolean;
   max_chars?: number;
   response_content?: 'summary' | 'full';
   evidence_mode?: EvidenceMode;
@@ -93,6 +98,7 @@ export interface ExtractInputOptions {
   max_chars?: number;
   mode?: ExtractMode;
   query?: string;
+  deep_read?: boolean;
   body_handle?: string;
   refresh?: boolean;
   exclude_spans?: EvidenceSpan[];
@@ -106,7 +112,16 @@ export function readCachedExtraction(input: ExtractInputOptions, deps: Deps): Ca
   });
   if (input.refresh) return undefined;
   const result = evidenceBodiesFor(deps.config).get(extractionUrlKey(input.url.trim()), input.mode ?? 'full', input.body_handle);
-  if (result) return formatToolResponse({ ...result, meta: { ...asObject(result.meta), body_cache: 'hit' }, elapsed_ms: 0 });
+  if (result) {
+    const needsDeeper = input.deep_read && (input.mode ?? 'full') === 'full' && result.truncated === true
+      && String(result.content ?? '').length < MAX_RESEARCH_CAPTURE_CHARS;
+    if (needsDeeper && input.body_handle) return formatToolResponse(null, {
+      code: 'INVALID_ARGUMENT', message: 'body_handle points to a clipped snapshot; deep_read needs a new capture',
+      retryable: false, user_action: 'Use the known URL with deep_read=true and refresh=true, without body_handle; do not repeat web search.',
+    });
+    if (!needsDeeper) return formatToolResponse({ ...result, meta: { ...asObject(result.meta), body_cache: 'hit' }, elapsed_ms: 0 });
+    return undefined;
+  }
   if (input.body_handle) return formatToolResponse(null, {
     code: 'INVALID_ARGUMENT', message: 'body_handle expired, was evicted, or does not match this URL and mode',
     retryable: false, user_action: 'Use the known URL without body_handle to capture a new snapshot; do not repeat the stale handle.',
@@ -800,8 +815,8 @@ export async function extractTool(
   const mode: ExtractMode = input.mode ?? 'full';
   const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
   const responseMaxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
-  const maxChars = mode === 'full'
-    ? deps.config.researchEnabled ? MAX_RESEARCH_CAPTURE_CHARS : 50_000
+  const maxChars = mode === 'metadata' ? 6_000 : mode === 'full'
+    ? deps.config.researchEnabled || input.deep_read ? MAX_RESEARCH_CAPTURE_CHARS : 50_000
     : responseMaxChars;
 
   if (!url) {
@@ -878,7 +893,8 @@ function extractionPatch(result: CallToolResult): Record<string, unknown> {
     'authors', 'publication', 'published_at', 'year', 'doi', 'description',
     'keywords', 'canonical_url', 'language', 'subject', 'creator', 'producer',
     'created_at', 'modified_at',
-    'quality_reason', 'body_handle', 'body_expires_at', 'captured_at',
+    'quality_reason', 'content_format', 'is_image', 'image_width', 'image_height', 'extraction_method', 'extraction_provenance', 'document_format', 'source_map',
+    'body_handle', 'body_expires_at', 'captured_at',
   ].flatMap((key) => data[key] === undefined ? [] : [[key, data[key]]]));
 }
 
@@ -922,7 +938,8 @@ async function extractUrls(
       const pool = deps.readSource ? undefined : await deps.acquirePool(deps.cascade.mode);
       await Promise.all(urls.map(async (url) => {
         try {
-          const cached = evidenceBodiesFor(deps.config).get(extractionUrlKey(url), mode);
+          const snapshot = evidenceBodiesFor(deps.config).get(extractionUrlKey(url), mode);
+          const cached = snapshot?.truncated === true && String(snapshot.content ?? '').length < maxChars ? undefined : snapshot;
           const result = cached ?? (deps.readSource
             ? await deps.readSource(url, maxChars, mode) : await pool!.extractOne(url, maxChars, mode));
           patches.set(extractionUrlKey(url), result.error && !result.content
@@ -982,7 +999,7 @@ function extractionSettings(input: SearchExtractionInput, deps: Deps, scope: Sea
   const defaultMax = mode === 'abstract' ? 1_500 : deps.config.extractMaxChars;
   const responseMaxChars = Math.min(Math.max(input.max_chars ?? defaultMax, 200), 50_000);
   const extractMaxChars = mode === 'full'
-    ? deps.config.researchEnabled ? MAX_RESEARCH_CAPTURE_CHARS : 50_000
+    ? deps.config.researchEnabled || input.deep_read ? MAX_RESEARCH_CAPTURE_CHARS : 50_000
     : responseMaxChars;
   return { mode, limit, extractMaxChars };
 }
@@ -1063,22 +1080,36 @@ function shapeRowContent(row: Record<string, unknown>, maxChars: number, query =
   row: Record<string, unknown>;
   truncated: boolean;
 } {
-  if (typeof row.content !== 'string') return { row, truncated: false };
+  const { document_catalog: catalog, ...source } = row;
+  const bounded = catalog ? boundDocumentCatalog(catalog as DocumentCatalog, maxChars) : undefined;
+  const catalogTruncated = Boolean(catalog && (!bounded || bounded.details_truncated));
+  const catalogFields = bounded ? { document_catalog: bounded } : {};
+  if (typeof row.content !== 'string') {
+    const { source_map: _map, ...metadata } = source;
+    const truncated = Boolean(row.truncated || catalogTruncated);
+    return { row: { ...metadata, ...catalogFields,
+      ...(truncated ? { truncated: true } : {}) }, truncated };
+  }
   const raw = cleanCapturedText(row.content);
+  const bodyBudget = Math.max(0, maxChars - (bounded ? JSON.stringify(bounded).length : 0));
+  const referenceBudget = readDocumentSourceMap(row.source_map, raw) ? Math.min(300, Math.floor(bodyBudget / 5)) : 0;
+  const textBudget = bodyBudget - referenceBudget;
   const selected = query || excluded.length || mode === 'compact'
-    ? selectEvidence(raw, query, maxChars, excluded, mode)
-    : { ...selectEvidence(raw, '', 0), text: raw.slice(0, maxChars),
-      spans: raw ? [{ start: 0, end: Math.min(raw.length, maxChars) }] : [],
-      truncated: raw.length > maxChars };
-  const { excerpt: _excerpt, evidence_ranges: _ranges, ...metadata } = row;
+    ? selectDocumentEvidence(raw, query, textBudget, excluded, mode, row.source_map)
+    : { ...selectEvidence(raw, '', 0), text: raw.slice(0, textBudget),
+      spans: raw ? [{ start: 0, end: Math.min(raw.length, textBudget) }] : [],
+      truncated: raw.length > textBudget };
+  const { excerpt: _excerpt, evidence_ranges: _ranges, source_map: map, source_refs: _refs, ...metadata } = source;
+  const refs = referenceBudget ? documentSourceRefs(map, raw, selected.spans, referenceBudget) : undefined;
   return {
-    row: { ...metadata, content: selected.text, length: selected.text.length,
+    row: { ...metadata, ...catalogFields, content: selected.text, length: selected.text.length,
       captured_hash: selected.captured_hash, captured_length: selected.captured_length,
       evidence_spans: selected.spans,
-      ...(selected.truncated || row.truncated ? { truncated: true } : {}),
+      ...(refs ? { source_refs: refs } : {}),
+      ...(selected.truncated || row.truncated || catalogTruncated ? { truncated: true } : {}),
       ...(excluded.length && !selected.text ? { no_additional_passages: true } : {}),
     },
-    truncated: selected.truncated,
+    truncated: Boolean(selected.truncated || row.truncated || catalogTruncated),
   };
 }
 
@@ -1090,18 +1121,23 @@ function shapeSearchResultRow(
   responseContent: 'summary' | 'full',
   evidenceMode: EvidenceMode,
 ): { row: Record<string, unknown>; truncated: boolean } {
-  const row = asObject(value);
+  const { document_catalog: _catalog, ...row } = asObject(value);
   const description = typeof row.description === 'string' ? row.description : '';
   const content = typeof row.content === 'string' ? row.content : '';
   if (responseContent === 'summary') {
-    const selected = selectEvidence(content || description, query, Math.min(contentMaxChars, rowTextBudget), [], evidenceMode);
+    const raw = cleanCapturedText(content || description);
+    const referenceBudget = readDocumentSourceMap(row.source_map, raw)
+      ? Math.min(300, Math.floor(rowTextBudget / 4)) : 0;
+    const selected = selectDocumentEvidence(raw, query, Math.min(contentMaxChars, rowTextBudget) - referenceBudget, [], evidenceMode, row.source_map);
     const { content: _content, excerpt: _excerpt, captured_at: _at, body_expires_at: _expires,
-      evidence_spans: _spans, evidence_ranges: _ranges, ...metadata } = row;
+      evidence_spans: _spans, evidence_ranges: _ranges, source_map: map, source_refs: _refs, ...metadata } = row;
+    const refs = referenceBudget ? documentSourceRefs(map, raw, selected.spans, referenceBudget) : undefined;
     if (metadata.length === selected.captured_length) delete metadata.length;
     if (metadata.source_length === selected.captured_length) delete metadata.source_length;
     return { row: { ...metadata, title: String(row.title ?? '').slice(0, 300), url: String(row.url ?? '').slice(0, 2048),
       description: selected.text, captured_hash: selected.captured_hash,
       captured_length: selected.captured_length, evidence_ranges: selected.spans.map(s => [s.start, s.end]),
+      ...(refs ? { source_refs: refs } : {}),
       ...(selected.truncated || row.truncated ? { truncated: true } : {}),
     }, truncated: selected.truncated };
   }

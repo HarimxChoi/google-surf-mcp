@@ -113,6 +113,7 @@ describe('loadConfig', () => {
   it('extractOcr: default off, env opt-in', () => {
     expect(loadConfig({}).extractOcr).toBe(false);
     expect(loadConfig({ SURF_EXTRACT_OCR: 'true' }).extractOcr).toBe(true);
+    expect(loadConfig({ SURF_EXTRACT_OCR: 'auto' }).extractOcr).toBe(true);
   });
 
   it('bounds research broker lifetime and read concurrency', () => {

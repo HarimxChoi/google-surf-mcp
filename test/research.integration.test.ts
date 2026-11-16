@@ -11,8 +11,41 @@ import {
   runParallelWithResearch, runSearchWithResearch,
 } from '../src/research/orchestrator.js';
 import { ResearchService } from '../src/research/service.js';
+import { buildDocumentSourceMap } from '../src/documentSourceMap.js';
 
 describe('research search integration', () => {
+  it('retains a referenced measurement note and its page under the local result budget', () => {
+    const main = 'Temperature was 1.09 [0.95 to 1.20] C5 in 2011-2020.';
+    const note = '5  Ranges represent very likely intervals unless otherwise stated.';
+    const content = main + '\n\n' + 'Temperature in 2011-2020 was compared with the earlier baseline.\n\n'.repeat(25) + note;
+    const source_map = buildDocumentSourceMap(content, [{ page: 7, text: content }], 'c'.repeat(64));
+    const [row] = compactRankedResults('Temperature 1.09 0.95 1.20 2011-2020', [{
+      title: 'Assessment', url: 'https://example.org/assessment.pdf', content, source_map }]);
+    expect(row.description).toContain(main);
+    expect(row.description).toContain(note);
+    expect(row.source_refs).toMatchObject({ pages: [7] });
+    expect(row.source_map).toBeUndefined();
+    expect(String(row.description).length + JSON.stringify(row.source_refs).length).toBeLessThanOrEqual(1200);
+  });
+  it('bounds selected-page references and strips internal maps and stale references', () => {
+    const first = 'A generic first page.\n' + 'irrelevant '.repeat(160);
+    const second = 'Table 2: GPIO45 voltage\nGPIO45 high selects 1.8V.\n';
+    const content = first + '\n\n' + second;
+    const source_map = buildDocumentSourceMap(content, [{ page: 1, text: first }, { page: 2, text: second, ocr: true }], 'a'.repeat(64));
+    const [row] = compactRankedResults('GPIO45 voltage', [{ title: 'Chip datasheet', url: 'https://example.org/chip.pdf',
+      content, source_map, source_refs: { pages: [99] } }]);
+    expect(row.description).toContain('1.8V');
+    expect(row.source_map).toBeUndefined();
+    expect(row.source_refs).toMatchObject({ pages: [2], ocr_pages: [2] });
+    expect(String(row.description).length + JSON.stringify(row.source_refs).length).toBeLessThanOrEqual(1200);
+    const [stale] = compactRankedResults('voltage', [{ title: 'Stale map', url: 'x', content: 'new content', source_map,
+      source_refs: { pages: [99] } }]);
+    expect(stale.source_refs).toBeUndefined();
+    const fenced = '--- BEGIN UNTRUSTED CONTENT ---\n' + content + '\n--- END UNTRUSTED CONTENT ---';
+    const [unwrapped] = compactRankedResults('GPIO45', [{ title: 'Wrapped', url: 'x', content: fenced,
+      source_map: buildDocumentSourceMap(fenced, [{ page: 9, text: fenced }], 'b'.repeat(64)) }]);
+    expect(unwrapped.source_refs).toBeUndefined();
+  });
   it('keeps the solution and code instead of keyword-rich documentation footer URLs', () => {
     const query = 'How can I read Parquet files with different columns in DuckDB without loading all files into pandas?';
     const [row] = compactRankedResults(query, [{

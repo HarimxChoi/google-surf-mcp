@@ -21,9 +21,14 @@ import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
 import { cosineSimilarity, validateEmbeddingBatch } from './dense.js';
 import { summarizeAssertionAggregate, type NumericGroup } from './aggregate.js';
 import { applyEmbeddedStorageDefaults } from './resources.js';
+import { RetrievalReadCache, retrievalBodyBytes } from './retrievalReadCache.js';
+import { readExtractionProvenance } from '../extractionProvenance.js';
+import { documentSourceRefs, readDocumentSourceMap, sliceDocumentSourceMaps,
+  type DocumentSourceMap, type DocumentSourceRefs } from '../documentSourceMap.js';
 
 const SCHEMA = `
 DEFINE TABLE IF NOT EXISTS project SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS document_source_map SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS catalog_asset SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS catalog_revision SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS catalog_event SCHEMALESS;
@@ -312,6 +317,7 @@ export function rocksDbEndpoint(path: string): string {
 export class ResearchStore {
   private db?: Surreal;
   private opening?: Promise<Surreal>;
+  private readonly retrievalReads = new RetrievalReadCache();
 
   constructor(
     private readonly root: string,
@@ -324,6 +330,21 @@ export class ResearchStore {
 
   isOpen(): boolean {
     return Boolean(this.db || this.opening);
+  }
+
+  withRetrievalReadContext<T>(operation: () => Promise<T>): Promise<T> {
+    return this.retrievalReads.run(operation);
+  }
+
+  private async readSourceBodies(hashes: string[]): Promise<Map<string, { content_hash: string; text: string }>> {
+    return await this.retrievalReads.read('source-body', hashes, async missing => {
+      const db = await this.open();
+      const [rows] = await db.query<[Array<{ content_hash: string; text: string }>]>(
+        'SELECT content_hash, text FROM $body_records WHERE content_hash IN $hashes',
+        { hashes: missing, body_records: missing.map(hash => new RecordId('source_body', hash)) },
+      ).collect();
+      return new Map(rows.map(row => [row.content_hash, row]));
+    }, row => retrievalBodyBytes(row.text));
   }
 
   async open(): Promise<Surreal> {
@@ -2085,14 +2106,15 @@ export class ResearchStore {
       await tx.upsert(membershipId).merge({
         ...membership,
         active_chunk_set_id: chunkSetId,
+        content_hash: document.content_hash ?? chunkSetId,
+        source_map_id: document.source_map_id ?? null,
+        extraction_provenance: document.extraction_provenance ?? null,
+        title: document.title ?? existing?.title ?? null,
+        url: document.canonical_url ?? existing?.url ?? null,
         state: existing?.state === 'lexical_active' ? 'lexical_active' : membership.state,
         added_at: existing?.added_at ?? membership.added_at,
       });
-      await tx.query(
-        `DELETE chunk WHERE document_id = $document_id
-         AND (chunk_set_id = NONE OR chunk_set_id != $chunk_set_id)`,
-        { document_id: documentId, chunk_set_id: chunkSetId },
-      );
+      // Other projects and in-flight captures can still own older or staged sets.
     });
   }
 
@@ -2401,8 +2423,9 @@ export class ResearchStore {
     const rows: Array<{ cache_key: string; embedding: number[] }> = [];
     for (let index = 0; index < cacheKeys.length; index += 500) {
       const [batch] = await db.query<[Array<{ cache_key: string; embedding: number[] }>]>(
-        'SELECT cache_key, embedding FROM embedding_cache WHERE cache_key IN $cache_keys',
-        { cache_keys: cacheKeys.slice(index, index + 500) },
+        'SELECT cache_key, embedding FROM $cache_records WHERE cache_key IN $cache_keys',
+        { cache_keys: cacheKeys.slice(index, index + 500),
+          cache_records: cacheKeys.slice(index, index + 500).map(key => new RecordId('embedding_cache', key)) },
       ).collect();
       rows.push(...batch);
     }
@@ -2491,7 +2514,8 @@ export class ResearchStore {
     ): Map<string, Record<string, unknown> & { entry_id: string }> => {
       const grouped = new Map<string, Array<Record<string, unknown> & { entry_id: string }>>();
       for (const entry of entries) {
-        const hash = typeof entry.content_hash === 'string' ? entry.content_hash : undefined;
+        const hash = typeof entry.source_hash === 'string' ? entry.source_hash
+          : typeof entry.content_hash === 'string' ? entry.content_hash : undefined;
         if (!hash) continue;
         grouped.set(hash, [...(grouped.get(hash) ?? []), entry]);
       }
@@ -2539,6 +2563,9 @@ export class ResearchStore {
       sensitive: Boolean(entry.sensitive),
       unreadable: Boolean(entry.unreadable),
       content_hash: entry.content_hash,
+      source_hash: entry.source_hash,
+      parser_fingerprint: entry.parser_fingerprint,
+      extraction_error: entry.extraction_error,
       experiment_key: entry.experiment_key,
       role: entry.role,
       aliases: entry.aliases,
@@ -2635,12 +2662,48 @@ export class ResearchStore {
     return { reused: false, added: added.length, modified: modified.length, removed: removed.length };
   }
 
+  async putDocumentSourceMap(map: DocumentSourceMap): Promise<string> {
+    if (!readDocumentSourceMap(map)) throw new Error('Invalid document source map');
+    const id = createHash('sha256').update(JSON.stringify(map)).digest('hex');
+    const db = await this.open();
+    await db.upsert(new RecordId('document_source_map', id)).content({ ...map });
+    return id;
+  }
+
+  async getDocumentSourceMap(id: string): Promise<DocumentSourceMap | undefined> {
+    const db = await this.open();
+    return readDocumentSourceMap(await db.select(new RecordId('document_source_map', id)));
+  }
+
+  private async documentSourceMaps(ids: Array<string | undefined>): Promise<Map<string, DocumentSourceMap>> {
+    const unique = [...new Set(ids.filter((id): id is string => !!id))];
+    if (!unique.length) return new Map();
+    const db = await this.open();
+    const [rows] = await db.query<[Array<DocumentSourceMap & { map_id: string }>]>(
+      'SELECT *, record::id(id) AS map_id FROM $map_records',
+      { map_records: unique.map(id => new RecordId('document_source_map', id)) },
+    ).collect();
+    return new Map(rows.flatMap(row => {
+      const map = readDocumentSourceMap(row);
+      return map ? [[row.map_id, map] as const] : [];
+    }));
+  }
+
+  private async documentPageRefs(id: string | undefined, text: string,
+    page: { body: string; span: { start: number } }): Promise<DocumentSourceRefs | undefined> {
+    if (!id || !page.body) return undefined;
+    const map = await this.getDocumentSourceMap(id);
+    const start = Buffer.from(text, 'utf8').subarray(0, page.span.start).toString('utf8').length;
+    return documentSourceRefs(map, text, [{ start, end: start + page.body.length }]);
+  }
+
   async listProjectSourceEntries(projectId: string): Promise<ProjectSourceEntryRecord[]> {
     const db = await this.open();
     const [rows] = await db.query<[ProjectSourceEntryRecord[]]>(
       `SELECT entry_id, project_id, root, path, kind, entry_type, searchable,
         size, modified_ms, tracked, sensitive, unreadable,
-        content_hash, experiment_key, role, aliases, historical_locations,
+        content_hash, source_hash, parser_fingerprint, source_map_id, text_bytes, extraction_provenance,
+        extraction_quality, extraction_error, quality_reason, experiment_key, role, aliases, historical_locations,
         moved_from_entry_ids, updated_snapshot_id
        FROM project_source_entry
        WHERE project_id = $project_id AND active = true ORDER BY root ASC, path ASC`,
@@ -2663,11 +2726,12 @@ export class ResearchStore {
     const { active: _active, ...entry } = selected;
     if (!entry.content_hash || !entry.searchable || entry.sensitive) return { source: true, entry };
     if (bodyBytes === 0) {
-      const start = Math.max(0, Math.min(bodyStart, entry.size));
+      const bodySize = entry.text_bytes ?? entry.size;
+      const start = Math.max(0, Math.min(bodyStart, bodySize));
       return {
         source: true,
         entry,
-        body_span: { start, end: start, total_bytes: entry.size },
+        body_span: { start, end: start, total_bytes: bodySize },
         omitted_fields: ['body'],
       };
     }
@@ -2677,13 +2741,55 @@ export class ResearchStore {
     ).collect();
     if (!bodies[0]) return { source: true, entry };
     const page = utf8Page(bodies[0].text, bodyStart, bodyBytes);
+    const refs = await this.documentPageRefs(entry.source_map_id, bodies[0].text, page);
     return {
       source: true,
       entry,
       body: page.body,
       body_span: page.span,
+      ...(refs ? { source_refs: refs } : {}),
       ...(page.next !== undefined ? { next_body_offset: page.next } : {}),
     };
+  }
+
+  async getProjectEvidenceSource(projectId: string, recordId: string): Promise<{
+    source_kind: 'source' | 'document'; title: string; url: string; text: string; source_map?: DocumentSourceMap;
+  } | undefined> {
+    const db = await this.open();
+    const entry = await db.select<ProjectSourceEntryRecord & { active?: boolean }>(
+      new RecordId('project_source_entry', `${projectId}_${recordId}`));
+    if (entry?.project_id === projectId && entry.active === true) {
+      if (!entry.searchable || entry.sensitive || !entry.content_hash) throw new Error('source is not eligible for focused search');
+      const body = await db.select<{ text: string }>(new RecordId('source_body', entry.content_hash));
+      if (!body || createHash('sha256').update(body.text).digest('hex') !== entry.content_hash) {
+        throw new Error('source body is unavailable or changed; refresh the approved source before reading it');
+      }
+      return { source_kind: 'source', title: `${entry.root}/${entry.path}`,
+        url: `surf://projects/${projectId}/files/${entry.entry_id}`, text: body.text,
+        source_map: entry.source_map_id ? readDocumentSourceMap(await this.getDocumentSourceMap(entry.source_map_id), body.text) : undefined };
+    }
+    const membership = await db.select<{ project_id: string; document_id: string; state: string; active_chunk_set_id?: string;
+      content_hash?: string; source_map_id?: string | null; title?: string; url?: string }>(
+      new RecordId('project_document', `${projectId}_${recordId}`));
+    if (!membership || membership.project_id !== projectId || membership.document_id !== recordId) return undefined;
+    const document = await db.select<{ title?: string; canonical_url?: string; source_map_id?: string }>(new RecordId('document', recordId));
+    if (!document) return undefined;
+    const base = { source_kind: 'document' as const, title: membership.title ?? document.title ?? recordId,
+      url: membership.url ?? document.canonical_url ?? '' };
+    if (membership.state !== 'lexical_active') return { ...base, text: '' };
+    const [chunks] = await db.query<[Array<{ chunk_index: number; text: string }>]>(
+      `SELECT chunk_index, text FROM chunk WHERE document_id = $document_id
+       AND chunk_set_id = ${membership.active_chunk_set_id ? '$chunk_set_id' : 'NONE'} ORDER BY chunk_index ASC`,
+      { document_id: recordId, chunk_set_id: membership.active_chunk_set_id ?? null },
+    ).collect();
+    const text = chunks.map(chunk => chunk.text).join('');
+    const contentHash = membership.content_hash ?? membership.active_chunk_set_id;
+    if (contentHash && createHash('sha256').update(text).digest('hex') !== contentHash) {
+      throw new Error('document snapshot changed or is incomplete; retry after capture finishes');
+    }
+    const mapId = membership.source_map_id === undefined ? document.source_map_id : membership.source_map_id;
+    return { ...base, text,
+      source_map: mapId ? readDocumentSourceMap(await this.getDocumentSourceMap(mapId), text) : undefined };
   }
 
   async listCodeSourceEntries(projectId: string): Promise<CodeSourceManifestEntry[]> {
@@ -2823,6 +2929,10 @@ export class ResearchStore {
       document_id: string;
       state: 'lexical_active' | 'metadata_archive';
       active_chunk_set_id?: string;
+      source_map_id?: string | null;
+      extraction_provenance?: unknown;
+      title?: string;
+      url?: string;
     }>(new RecordId('project_document', `${projectId}_${documentId}`));
     if (!membership || membership.project_id !== projectId || membership.document_id !== documentId) {
       return undefined;
@@ -2831,15 +2941,20 @@ export class ResearchStore {
       title?: string;
       canonical_url?: string;
       scholar_id?: string;
+      extraction_provenance?: unknown;
+      source_map_id?: string;
     }>(new RecordId('document', documentId));
     if (!document) return undefined;
+    const provenance = readExtractionProvenance(membership.extraction_provenance === undefined
+      ? document.extraction_provenance : membership.extraction_provenance);
     const record: ProjectDocumentRecord = {
       project_id: projectId,
       document_id: documentId,
       state: membership.state,
-      title: document.title ?? documentId,
-      url: document.canonical_url ?? '',
+      title: membership.title ?? document.title ?? documentId,
+      url: membership.url ?? document.canonical_url ?? '',
       ...(document.scholar_id ? { scholar_id: document.scholar_id } : {}),
+      ...(provenance ? { extraction_provenance: provenance } : {}),
     };
     if (membership.state !== 'lexical_active') return { document: true, record };
     const [chunks] = membership.active_chunk_set_id
@@ -2866,12 +2981,16 @@ export class ResearchStore {
         omitted_fields: ['body'],
       };
     }
-    const page = utf8Page(chunks.map((chunk) => chunk.text).join(''), bodyStart, bodyBytes);
+    const text = chunks.map((chunk) => chunk.text).join('');
+    const page = utf8Page(text, bodyStart, bodyBytes);
+    const mapId = membership.source_map_id === undefined ? document.source_map_id : membership.source_map_id;
+    const refs = await this.documentPageRefs(mapId ?? undefined, text, page);
     return {
       document: true,
       record,
       body: page.body,
       body_span: page.span,
+      ...(refs ? { source_refs: refs } : {}),
       ...(page.next !== undefined ? { next_body_offset: page.next } : {}),
     };
   }
@@ -3007,32 +3126,72 @@ export class ResearchStore {
 
   private async hydrateRetrieval(
     references: RetrievalReference[],
-    retrievalFamily: 'exact' | 'vector',
+    retrievalFamily: 'exact' | 'vector' | 'bm25',
+    preparedMemberships?: Array<{ project_id: string; document_id: string; state: string; active_chunk_set_id?: string }>,
   ): Promise<LocalSearchHit[]> {
     if (!references.length) return [];
     const db = await this.open();
     const documentReferences = references.filter((row) => row.source_family === 'document');
     const documentIds = [...new Set(documentReferences.map((row) => row.source_id))];
-    const documentBindings: Record<string, string> = {};
-    const documentPredicates = [...new Map(documentReferences.map((row) => [
-      `${row.source_id}\0${row.content_hash}`, row,
-    ])).values()].map((row, index) => {
-      documentBindings[`document_${index}`] = row.source_id;
-      documentBindings[`hash_${index}`] = row.content_hash;
-      return `(document_id = $document_${index} AND content_hash = $hash_${index})`;
-    });
+    const projectIds = [...new Set(references.map((row) => row.project_id))];
+    const membershipRecords = [...new Map(documentReferences.map(row => [
+      `${row.project_id}\0${row.source_id}`, new RecordId('project_document', `${row.project_id}_${row.source_id}`),
+    ])).values()];
+    const [memberships] = preparedMemberships ? [preparedMemberships] : membershipRecords.length ? await db.query<[Array<{
+      project_id: string; document_id: string; state: string; active_chunk_set_id?: string;
+    }>]>(`SELECT project_id, document_id, state, active_chunk_set_id FROM $membership_records
+       WHERE project_id IN $project_ids AND state = 'lexical_active'`,
+      { membership_records: membershipRecords, project_ids: projectIds }).collect() : [[]];
+    const active = new Map(memberships.filter(row => row.state === 'lexical_active')
+      .map(row => [`${row.project_id}\0${row.document_id}`, row]));
+    const chunkIndex = (row: RetrievalReference): number | undefined => {
+      const prefix = `document:${row.source_id}:`, value = row.item_id.slice(prefix.length);
+      return row.item_id.startsWith(prefix) && /^\d+$/.test(value) && Number.isSafeInteger(Number(value))
+        ? Number(value) : undefined;
+    };
+    const documentKey = (documentId: string, setId: string | undefined, index: number, hash: string): string =>
+      `${documentId}\0${setId ?? ''}\0${index}\0${hash}`;
+    const documentRequests = new Map<string, {
+      document_id: string; hash: string; index: number; set?: string; legacy: boolean;
+    }>();
+    for (const row of documentReferences) {
+      const membership = active.get(`${row.project_id}\0${row.source_id}`), selectedIndex = chunkIndex(row);
+      if (!membership || selectedIndex === undefined) continue;
+      documentRequests.set(documentKey(row.source_id, membership.active_chunk_set_id, selectedIndex, row.content_hash), {
+        document_id: row.source_id, hash: row.content_hash, index: selectedIndex,
+        set: membership.active_chunk_set_id, legacy: retrievalFamily === 'bm25' && !row.content_hash,
+      });
+    }
     const sourceIds = [...new Set(references
       .filter((row) => row.source_family === 'code').map((row) => row.source_id))];
     const sourceRecords = references.filter((row) => row.source_family === 'code')
       .map((row) => new RecordId('project_source_entry', `${row.project_id}_${row.source_id}`));
-    const projectIds = [...new Set(references.map((row) => row.project_id))];
-    const [documentRows] = documentIds.length
-      ? await db.query<[Array<{ document_id: string; text: string; content_hash: string }>]>(
-        `SELECT document_id, text, content_hash FROM chunk
-          WHERE ${documentPredicates.join(' OR ')}`,
-        documentBindings,
-      ).collect()
-      : [[]];
+    type DocumentBody = { document_id: string; chunk_set_id?: string; chunk_index: number;
+      text: string; content_hash: string; source_map?: DocumentSourceMap };
+    const loadDocuments = async (keys: string[]): Promise<Map<string, DocumentBody>> => {
+      if (!keys.length) return new Map();
+      const bindings: Record<string, string | number> = {};
+      const predicates = keys.map((key, index) => {
+        const row = documentRequests.get(key)!;
+        bindings[`document_${index}`] = row.document_id;
+        bindings[`hash_${index}`] = row.hash;
+        bindings[`index_${index}`] = row.index;
+        if (row.set) bindings[`set_${index}`] = row.set;
+        return `(document_id = $document_${index}${row.legacy ? '' : ` AND content_hash = $hash_${index}`}
+          AND chunk_index = $index_${index} AND chunk_set_id = ${row.set ? `$set_${index}` : 'NONE'})`;
+      });
+      const [rows] = await db.query<[DocumentBody[]]>(
+        `SELECT document_id, chunk_set_id, chunk_index, text, content_hash, source_map FROM chunk
+         WHERE ${predicates.join(' OR ')}`, bindings,
+      ).collect();
+      return new Map(rows.map(row => [documentKey(row.document_id, row.chunk_set_id, row.chunk_index, row.content_hash ?? ''), row]));
+    };
+    const [cachedDocuments, legacyDocuments] = await Promise.all([
+      this.retrievalReads.read('document-chunk', [...documentRequests].filter(([, row]) => !row.legacy).map(([key]) => key),
+        loadDocuments, row => retrievalBodyBytes(row.text, row.source_map)),
+      loadDocuments([...documentRequests].filter(([, row]) => row.legacy).map(([key]) => key)),
+    ]);
+    const documents = new Map([...cachedDocuments, ...legacyDocuments]);
     const [documentMetadata] = documentIds.length
       ? await db.query<[Array<{
         document_id: string;
@@ -3054,30 +3213,25 @@ export class ResearchStore {
         path: string;
         content_hash: string;
         role?: ProjectDocumentRole;
+        source_map_id?: string;
       }>]>(
-        `SELECT entry_id, project_id, root, path, content_hash, role FROM $source_records
+        `SELECT entry_id, project_id, root, path, content_hash, role, source_map_id FROM $source_records
          WHERE project_id IN $project_ids AND entry_id IN $source_ids
            AND active = true AND searchable = true`,
         { project_ids: projectIds, source_ids: sourceIds, source_records: sourceRecords },
       ).collect()
       : [[]];
     const hashes = [...new Set(sourceEntries.map((row) => row.content_hash))];
-    const [sourceBodies] = hashes.length
-      ? await db.query<[Array<{ content_hash: string; text: string }>]>(
-        'SELECT content_hash, text FROM $body_records WHERE content_hash IN $hashes',
-        { hashes, body_records: hashes.map((hash) => new RecordId('source_body', hash)) },
-      ).collect()
-      : [[]];
-    const documents = new Map(documentRows.map((row) => [
-      `${row.document_id}\0${row.content_hash}`,
-      row,
-    ]));
+    const sourceBodies = await this.readSourceBodies(hashes);
     const metadata = new Map(documentMetadata.map((row) => [row.document_id, row]));
     const entries = new Map(sourceEntries.map((row) => [`${row.project_id}\0${row.entry_id}`, row]));
-    const bodies = new Map(sourceBodies.map((row) => [row.content_hash, row.text]));
+    const bodies = new Map([...sourceBodies].map(([hash, row]) => [hash, row.text]));
+    const maps = await this.documentSourceMaps(sourceEntries.map(row => row.source_map_id));
     return references.flatMap<LocalSearchHit>((reference) => {
       if (reference.source_family === 'document') {
-        const row = documents.get(`${reference.source_id}\0${reference.content_hash}`);
+        const membership = active.get(`${reference.project_id}\0${reference.source_id}`), index = chunkIndex(reference);
+        if (!membership || index === undefined) return [];
+        const row = documents.get(documentKey(reference.source_id, membership.active_chunk_set_id, index, reference.content_hash));
         if (!row) return [];
         const document = metadata.get(reference.source_id);
         const recordId = document?.catalog_asset_id ?? reference.source_id;
@@ -3091,6 +3245,7 @@ export class ResearchStore {
           url: reference.url,
           description: row.text.slice(0, 500),
           content: row.text,
+          source_map: readDocumentSourceMap(row.source_map, row.text),
           score: reference.score,
           project_ids: [reference.project_id],
           source_family: 'document' as const,
@@ -3116,6 +3271,7 @@ export class ResearchStore {
         url: reference.url,
         description: matched.slice(0, 500),
         content: matched,
+        source_map: sliceDocumentSourceMaps(maps.get(entry.source_map_id ?? ''), text, [{ start, end }])[0],
         score: reference.score,
         project_ids: [reference.project_id],
         source_family: 'code' as const,
@@ -3286,26 +3442,26 @@ export class ResearchStore {
       path: string;
       content_hash: string;
       role?: ProjectDocumentRole;
+      source_map_id?: string;
     }>]>(
-      `SELECT entry_id, root, path, content_hash, role FROM project_source_entry
+      `SELECT entry_id, root, path, content_hash, role, source_map_id FROM project_source_entry
        WHERE project_id = $project_id
          AND active = true AND searchable = true AND content_hash IN $hashes
        ORDER BY path ASC`,
       { project_id: projectId, hashes },
     ).collect();
     const firstPath = new Map<string, {
-      entry_id: string; root: string; path: string; role?: ProjectDocumentRole;
+      entry_id: string; root: string; path: string; role?: ProjectDocumentRole; source_map_id?: string;
     }>();
     for (const entry of entries) {
       if (!firstPath.has(entry.content_hash)) firstPath.set(entry.content_hash, entry);
     }
     const selected = rows.filter((row) => firstPath.has(row.content_hash)).slice(0, limit);
-    const bodies = await Promise.all(selected.map(async (row) => (
-      await db.select<{ text: string }>(new RecordId('source_body', row.content_hash))
-    )));
-    return selected.flatMap((row, index) => {
+    const bodies = await this.readSourceBodies(selected.map(row => row.content_hash));
+    const maps = await this.documentSourceMaps(selected.map(row => firstPath.get(row.content_hash)?.source_map_id));
+    return selected.flatMap((row) => {
       const entry = firstPath.get(row.content_hash);
-      const text = bodies[index]?.text;
+      const text = bodies.get(row.content_hash)?.text;
       if (!entry || text === undefined) return [];
       return [{
         document_id: `source-${row.content_hash.slice(0, 24)}`,
@@ -3317,6 +3473,7 @@ export class ResearchStore {
         url: `surf://projects/${projectId}/files/${entry.entry_id}`,
         description: text.slice(0, 500),
         content: text,
+        source_map: readDocumentSourceMap(maps.get(entry.source_map_id ?? ''), text),
         score: Number(row.score),
         project_ids: [projectId],
         source_family: 'code' as const,
@@ -3343,10 +3500,10 @@ export class ResearchStore {
       chunk_index: number;
       title: string;
       url: string;
-      text: string;
+      content_hash?: string;
       score: number;
     }>]>(
-      `SELECT document_id, chunk_index, title, url, text, search::score(0) AS score
+      `SELECT document_id, chunk_index, title, url, content_hash, search::score(0) AS score
        FROM chunk
        WHERE text @0@ $query
          AND document_id IN $document_ids
@@ -3358,42 +3515,17 @@ export class ResearchStore {
         active_memberships: Object.fromEntries(memberships.map((row) => [row.document_id, row])),
       },
     ).collect() : [[]];
-    const documentIds = [...new Set(rows.map((row) => row.document_id))];
-    const [documentMetadata] = documentIds.length
-      ? await db.query<[Array<{
-        document_id: string;
-        kind?: string;
-        updated_at?: string;
-        catalog_asset_id?: string;
-        catalog_revision_id?: string;
-      }>]>(
-        `SELECT document_id, kind, updated_at, catalog_asset_id, catalog_revision_id
-         FROM document WHERE document_id IN $document_ids`,
-        { document_ids: documentIds },
-      ).collect()
-      : [[]];
-    const metadata = new Map(documentMetadata.map((row) => [row.document_id, row]));
-    const documents = rows.filter((row, index) => (
+    const documentReferences = rows.filter((row, index) => (
       rows.findIndex((candidate) => candidate.document_id === row.document_id) === index
     )).map((row) => ({
-      document_id: row.document_id,
-      record_id: metadata.get(row.document_id)?.catalog_asset_id ?? row.document_id,
-      body_handle: metadata.get(row.document_id)?.catalog_asset_id ?? row.document_id,
-      ...(metadata.get(row.document_id)?.catalog_revision_id
-        ? { revision_id: metadata.get(row.document_id)!.catalog_revision_id }
-        : {}),
-      index_freshness: 'current' as const,
-      title: row.title,
-      url: row.url,
-      description: row.text.slice(0, 500),
-      content: row.text,
-      score: Number(row.score),
-      project_ids: [projectId],
+      item_id: `document:${row.document_id}:${row.chunk_index}`, project_id: projectId,
+      source_id: row.document_id, content_hash: row.content_hash ?? '',
+      title: row.title, url: row.url, score: Number(row.score),
       source_family: 'document' as const,
-      retrieval_family: 'bm25' as const,
-      kind: metadata.get(row.document_id)?.kind,
-      recorded_at: metadata.get(row.document_id)?.updated_at,
     }));
+    const documents = await this.hydrateRetrieval(documentReferences, 'bm25', memberships.map(row => ({
+      ...row, project_id: projectId, state: 'lexical_active',
+    })));
     const sources = await this.searchProjectSources(
       projectId,
       project?.active_source_snapshot_id,

@@ -27,11 +27,9 @@ Start without an API key or a separate database server, and build a personal kno
 - **Cross-project search:** Find stored sources across selected projects using exact-match, keyword, semantic, and graph retrieval, with RRF fusion and a shared reranker.
 - **Explore and export:** Browse PKM, lineage, and ontology views; export HTML, PNG, JSON, Graphviz DOT, and Neo4j import bundles.
 
-**Stack:** TypeScript, Chrome/Playwright, LiteParse, Tree-sitter, SurrealDB, Multilingual E5, and Graphology. [Architecture](./guides/auto-ontology.md)
-
 ## Quick start
 
-Requires Node.js 22.12+ and Chrome or Chromium for browser search. CI covers Node 22 and 24 on Linux and Windows.
+Requires Node.js 22.13+ and Chrome or Chromium for browser search. CI covers Node 22 and 24 on Linux and Windows.
 
 Register the server in your MCP client:
 
@@ -85,17 +83,29 @@ Providing `project_id` to web search does not make it local-only. Use `project_m
 
 [Tool parameters, limits, follow-up reads, and repeatable source collection](./guides/tools.md)
 
+## Architecture
+
+<a href="./assets/architecture-en.png"><img src="./assets/architecture-en.png" width="100%" alt="Google Surf architecture: live discovery, source reading, and local project retrieval converge on bounded source-backed evidence." /></a>
+
+### Technology stack
+
+| Layer | Technologies |
+| --- | --- |
+| Runtime and protocol | TypeScript, Node.js 22.13+, MCP SDK, Zod |
+| Browser search | System Chrome, Playwright, shared browser broker and reusable tabs |
+| Source reading | HTTP, isolated headless BrowserContext, Mozilla Readability, Turndown |
+| Documents and OCR | LiteParse CPU OCR; optional Xberg for Office; OfficeParser fallback; hwp-convert; pdf-lib; Sharp |
+| Local storage | SurrealDB with embedded RocksDB, durable catalog and payloads, rebuildable indexes |
+| Retrieval and ranking | Exact match, BM25, Multilingual E5-small q8/ONNX, HNSW, graph retrieval, RRF, cached E5 reranking |
+| Code indexing | Tree-sitter for Python, TypeScript, and C++ structure |
+| Graph analysis | Graphology, PageRank, Louvain communities, provenance and lineage projections |
+| Network controls | Undici, DNS/IP-pinned reads, SSRF checks, deny-by-default source-reader proxy |
+
+OCR is configurable; Xberg does not add another OCR or embedding model. Live-only search uses BM25/RRF without loading E5. [Architecture details](./guides/auto-ontology.md) · [Lightweight configuration](./examples/lightweight-documents.env)
+
 ## Google Surf Auto Ontology
 
 Search and extraction results are saved automatically. Plans, experiments, failures, and decisions are linked when your agent records them through `project_memory`.
-
-```text
-Web + papers + code + project records
-                  |
-        Local knowledge graph
-                  |
-    Hybrid retrieval + source-backed evidence
-```
 
 Projects stay separate by default. Selected projects can link knowledge using matching DOIs, repository URLs, or explicitly registered aliases; original records are not merged or moved.
 
@@ -111,6 +121,25 @@ The feature was renamed from Research to Auto Ontology; existing `SURF_RESEARCH*
 [Ontology, lineage, code indexing, and export details](./guides/auto-ontology.md)
 
 ## Benchmark
+
+### Auto Ontology comparison
+
+<a href="./assets/auto-ontology-benchmark.png"><img src="./assets/auto-ontology-benchmark.png" width="720" alt="Auto Ontology benchmark: NVIDIA 113/120, Google Surf 116/120, using the same 120 questions and DeepSeek SQL answerer." /></a>
+
+Recorded on 48 revision-pinned source files from 16 open-weight model releases. Each system's retrieved context was passed to the same `deepseek-flash` SQL-generation prompt and database: **Google Surf 116/120, NVIDIA Auto Ontology 113/120**. This compares ontology-backed retrieval in a shared evaluation setup, not the products' default agents.
+
+### Web answers vs Google AI Mode
+
+Eight reused regression questions, with three required checkpoints per question:
+
+| Recorded run | Google Surf + host | Google AI Mode |
+| --- | ---: | ---: |
+| Paired comparison, 2026-11-07 | 22/24 | 24/24 |
+| Later Host V2 replay; saved AI answers | 20/24 | 24/24 |
+
+These are fully met checkpoints, not whole-answer accuracy. The runs are historical, task-specific measurements, not a re-evaluation of the current release.
+
+### Live web result ranking
 
 Live web result ranking on 32 held-out queries:
 

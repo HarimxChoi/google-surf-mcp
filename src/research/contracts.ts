@@ -1,4 +1,6 @@
 import type { SearchResult } from '../types.js';
+import type { ExtractionProvenance } from '../extractionProvenance.js';
+import type { DocumentSourceMap, DocumentSourceRefs } from '../documentSourceMap.js';
 
 export type RetrievalMode = 'hybrid' | 'live';
 export type ExperimentStatus = 'running' | 'success' | 'failed' | 'inconclusive';
@@ -516,6 +518,14 @@ export interface ProjectSourceEntryRecord {
   sensitive: boolean;
   unreadable?: boolean;
   content_hash?: string;
+  source_hash?: string;
+  parser_fingerprint?: string;
+  source_map_id?: string;
+  text_bytes?: number;
+  extraction_provenance?: ExtractionProvenance;
+  extraction_quality?: string;
+  extraction_error?: string;
+  quality_reason?: string;
   experiment_key?: string;
   role?: ProjectDocumentRole;
   aliases?: string[];
@@ -530,6 +540,7 @@ export interface SourceRecordReadback {
   body?: string;
   body_span?: { start: number; end: number; total_bytes: number };
   next_body_offset?: number;
+  source_refs?: DocumentSourceRefs;
   omitted_fields?: string[];
 }
 
@@ -539,7 +550,26 @@ export interface DocumentRecordReadback {
   body?: string;
   body_span?: { start: number; end: number; total_bytes: number };
   next_body_offset?: number;
+  source_refs?: DocumentSourceRefs;
   omitted_fields?: string[];
+}
+
+export interface FocusedRecordReadback {
+  focused: true;
+  project_id: string;
+  record_id: string;
+  source_kind: 'catalog' | 'document' | 'source' | 'legacy';
+  title: string;
+  url?: string;
+  revision?: number;
+  body_handle: string;
+  content: string;
+  captured_hash: string;
+  captured_length: number;
+  capture_truncated: boolean;
+  total_bytes: number;
+  evidence_ranges: Array<[number, number]>;
+  source_refs?: DocumentSourceRefs;
 }
 
 export interface ProjectDocumentRecord {
@@ -550,6 +580,7 @@ export interface ProjectDocumentRecord {
   url: string;
   text?: string;
   scholar_id?: string;
+  extraction_provenance?: ExtractionProvenance;
 }
 
 export interface ProjectDocumentChunkRecord {
@@ -615,6 +646,7 @@ export interface LocalSearchHit extends SearchResult {
   revision_id?: string;
   body_handle?: string;
   source_span?: { start: number; end: number };
+  source_map?: DocumentSourceMap;
   index_freshness?: 'current' | 'stale';
   content: string;
   score: number;
@@ -710,6 +742,8 @@ export interface CaptureResult {
   is_pdf?: boolean;
   page_count?: number;
   extraction_quality?: string;
+  extraction_provenance?: ExtractionProvenance;
+  source_map?: DocumentSourceMap;
   authors?: string;
   publication?: string;
   published_at?: string;

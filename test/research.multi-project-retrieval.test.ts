@@ -27,13 +27,16 @@ describe('bounded multi-project retrieval', () => {
       }
       const rankSpy = vi.spyOn(service.store, 'searchSourceRanks');
       const db = await service.store.open();
-      const reads = vi.spyOn(db, 'select');
+      const reads = vi.spyOn(db, 'query');
       const result = await service.searchFamilies('alpha', 'commonrankmarker', 5, ['beta'], undefined,
         false, undefined, { retrieval_lanes: ['bm25'] });
       expect(rankSpy).toHaveBeenCalledOnce();
       expect((await rankSpy.mock.results[0].value).every((row: object) => !('text' in row))).toBe(true);
       expect(result.bm25.map((row) => row.project_ids[0]).sort()).toEqual(['alpha', 'beta']);
-      expect(reads.mock.calls.filter(([id]) => String(id).startsWith('source_body:'))).toHaveLength(2);
+      const bodyReads = reads.mock.calls.filter(([sql]) => String(sql).includes('FROM $body_records'));
+      expect(bodyReads).toHaveLength(2);
+      expect(bodyReads.flatMap(([, vars]) => (vars as { body_records: unknown[] }).body_records))
+        .toHaveLength(2);
       expect(result.bm25.every((row) => row.content?.includes(`commonrankmarker ${row.project_ids[0]}`))).toBe(true);
       const alpha = await service.store.searchProjectBm25('alpha', 'commonrankmarker', 5);
       expect(alpha).toHaveLength(1);

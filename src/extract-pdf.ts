@@ -1,6 +1,8 @@
-import { LiteParse } from '@llamaindex/liteparse';
 import { PDFDocument } from 'pdf-lib';
 import type { DocumentMetadata } from './extract-meta.js';
+import { extractionProvenance, type ExtractionProvenance } from './extractionProvenance.js';
+import { buildDocumentSourceMap, type DocumentSourceMap } from './documentSourceMap.js';
+import { documentOcrSettings } from './documentSettings.js';
 
 export type PdfMode = 'full' | 'abstract' | 'metadata';
 
@@ -12,6 +14,10 @@ export interface PdfExtractResult extends DocumentMetadata {
   length?: number;
   source_length?: number;
   truncated?: boolean;
+  quality_reason?: string;
+  content_format?: 'text' | 'markdown';
+  extraction_provenance?: ExtractionProvenance;
+  source_map?: DocumentSourceMap;
 }
 
 function metadataDate(value: Date | undefined): string | undefined {
@@ -70,30 +76,74 @@ export async function extractPdfTiered(
   mode: PdfMode,
   maxChars: number,
 ): Promise<PdfExtractResult> {
-  const ocrEnabled = process.env.SURF_EXTRACT_OCR?.toLowerCase() === 'true';
-  const parser = new LiteParse({ ocrEnabled, quiet: true });
+  const { policy: ocrPolicy, language } = documentOcrSettings();
+  let ocrEnabled = ocrPolicy === 'enabled';
   const metadataPromise = readPdfMetadata(buf);
 
   if (mode === 'metadata') {
     const metadata = await metadataPromise;
-    const page_count = metadata.page_count
-      ?? (await parser.parse(buf)).pages.length;
-    return { ...metadata, is_pdf: true, page_count, extraction_quality: 'metadata_only' };
+    if (metadata.page_count !== undefined) {
+      return { ...metadata, is_pdf: true, page_count: metadata.page_count, extraction_quality: 'metadata_only',
+        extraction_provenance: extractionProvenance(buf, 'pdf', 'pdf-lib') };
+    }
   }
 
-  const [{ pages, text }, metadata] = await Promise.all([parser.parse(buf), metadataPromise]);
-  const page_count = pages.length;
+  const contentFormat = process.env.SURF_EXTRACT_PDF_FORMAT === 'markdown' ? 'markdown' : 'text';
+  const { LiteParse } = await import('@llamaindex/liteparse');
+  const config = { quiet: true, outputFormat: contentFormat,
+    targetPages: mode === 'abstract' ? '1' : undefined, imageMode: 'off',
+    ocrLanguage: language } as const;
+  const parser = new LiteParse({ ...config, ocrEnabled, includeComplexity: ocrPolicy === 'auto' });
+  const provenance = extractionProvenance(buf, 'pdf', 'liteparse',
+    ocrPolicy, config.ocrLanguage, contentFormat);
+  try {
+    let parsed = await parser.parse(buf);
+    const ocrPages = new Set<number>();
+    if (ocrEnabled) for (const page of parsed.pages) {
+      if (page.textItems.some(item => item.confidence !== undefined)) ocrPages.add(page.pageNum);
+    }
+    if (ocrPolicy === 'auto' && mode !== 'metadata') {
+      const needed = parsed.pages.filter(page => page.complexity?.needsOcr).map(page => page.pageNum);
+      if (needed.length) {
+        ocrEnabled = true;
+        const ocr = new LiteParse({ ...config, ocrEnabled: true, targetPages: needed.join(',') });
+        try {
+          const recovered = await ocr.parse(buf);
+          for (const page of recovered.pages) if (page.textItems.some(item => item.confidence !== undefined)) ocrPages.add(page.pageNum);
+          const byPage = new Map(recovered.pages.map(page => [page.pageNum, page]));
+          const pages = parsed.pages.map(page => byPage.get(page.pageNum) ?? page);
+          parsed = { ...parsed, pages, text: pages.map(page => contentFormat === 'markdown' ? page.markdown : page.text)
+            .join(contentFormat === 'markdown' ? '\n\n-----\n\n' : '\n\n') };
+        } finally { ocr.close(); }
+      }
+    }
+    const { totalPages, pages, text } = parsed;
+    const metadata = await metadataPromise;
+    const page_count = totalPages;
+    if (mode === 'metadata') return { ...metadata, is_pdf: true, page_count, extraction_quality: 'metadata_only',
+      extraction_provenance: provenance };
 
-  const raw = mode === 'abstract' ? (pages[0]?.text ?? '') : text;
-  const clipped = raw.slice(0, maxChars);
-  return {
-    ...metadata,
-    is_pdf: true,
-    page_count,
-    extraction_quality: mode === 'abstract' ? 'abstract' : 'full_text',
-    content: clipped,
-    length: clipped.length,
-    source_length: raw.length,
-    truncated: raw.length > maxChars,
-  };
+    const raw = pages.some(page => page.text.trim()) ? text : '';
+    const clipped = raw.slice(0, maxChars);
+    const empty = !raw.trim();
+    return {
+      ...metadata,
+      is_pdf: true,
+      page_count,
+      content_format: contentFormat,
+      extraction_provenance: provenance,
+      ...(!empty ? { source_map: buildDocumentSourceMap(clipped, pages.map(page => ({ page: page.pageNum,
+        text: contentFormat === 'markdown' ? page.markdown : page.text, ocr: ocrPages.has(page.pageNum) })),
+        provenance.source_sha256, raw.length <= maxChars) } : {}),
+      extraction_quality: empty ? 'metadata_only' : mode === 'abstract' ? 'abstract' : 'full_text',
+      ...(empty ? { quality_reason: ocrEnabled ? 'pdf_ocr_returned_no_text'
+        : 'pdf_no_extractable_text; enable SURF_EXTRACT_OCR=true for image-only pages' } : {}),
+      content: clipped,
+      length: clipped.length,
+      source_length: raw.length,
+      truncated: raw.length > maxChars,
+    };
+  } finally {
+    parser.close();
+  }
 }

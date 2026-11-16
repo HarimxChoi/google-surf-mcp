@@ -13,7 +13,7 @@ Environment variables, embedded resource budgets, and optional OrcaRouter repair
 | `SURF_SEARCH_PROVIDER` | `browser` | Provider for `search` and `search_parallel`: `browser`, `searchapi`, or `fallback`. |
 | `SURF_SCHOLAR_PROVIDER` | `browser` | Provider for `scholar_search`: `browser`, `searchapi`, or `fallback`. |
 | `SURF_BROWSER_ENGINE` | `auto` | Browser engine: `auto`, `native`, or `playwright`. Native Chrome performs the request before read-only CDP attachment. |
-| `CHROME_PATH` | auto-detected | absolute path to Chrome binary |
+| `CHROME_PATH` | auto-detected | explicit Chrome executable path. The headless source reader otherwise prefers Playwright's compatible bundled build and falls back to system Chrome only when that executable is not installed. Native Google search continues to use system Chrome. |
 | `SURF_PROFILE_ROOT` | `~/.google-surf-mcp` | where the warm profile lives |
 | `SURF_RESEARCH` | `true` | enables Auto Ontology: local project memory, capture, indexing, `project_memory_search`, and `project_memory`; set `false` for search and extraction only |
 | `SURF_RETRIEVAL_MODE` | `hybrid` | Auto Ontology search route: `live` or `hybrid`; used only when `SURF_RESEARCH=true` |
@@ -30,7 +30,7 @@ Environment variables, embedded resource budgets, and optional OrcaRouter repair
 | `SURF_RESEARCH_REPO_AUTO` | `true` | automatically sparse-index at most one small, relevant GitHub repository per search call |
 | `SURF_RESEARCH_REPO_AUTO_MAX_MB` | `20` | maximum searchable source-text size for automatic GitHub indexing; assets are excluded |
 | `SURF_RESEARCH_REPO_AUTO_MAX_FILES` | `2000` | maximum searchable source file count for automatic GitHub indexing |
-| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | drain delay after the last meaningful work, even when clients remain connected; active requests and background jobs postpone drain |
+| `SURF_RESEARCH_BROKER_IDLE_MS` | `60000` | drain delay after the last meaningful work, even when clients remain connected; passive status checks do not refresh this deadline, while active requests and background jobs postpone drain |
 | `SURF_RESEARCH_READ_CONCURRENCY` | `4` | maximum concurrent broker reads; identical in-flight reads share one operation |
 | `SURF_RESEARCH_QUERY_TIMEOUT_MS` | `120000` | timeout per embedded SurrealDB query, clamped to 1-600 seconds; a timed-out retrieval lane is reported as partial while other lanes still return |
 | `SURF_RESEARCH_GRAPH_CACHE_MAX_MB` | `64` | byte budget for in-process graph projections and analysis artifacts |
@@ -47,7 +47,10 @@ Environment variables, embedded resource budgets, and optional OrcaRouter repair
 | `SURF_IDLE_CLOSE_MS` | `30000` | idle ms before closing the sequential ctx and pool. `0` disables idle auto-close. Lower = faster cleanup, higher = warmer cache for spaced-out calls. |
 | `SURF_ALLOW_PRIVATE` | `false` | set `true` to allow `extract` to fetch private/loopback addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, etc). Default blocks them as an SSRF guard. |
 | `SURF_EXTRACT_MAX_CHARS` | `50000` | full extraction limit (200-50000); abstract defaults to 1500 and per-call `max_chars` overrides both |
-| `SURF_EXTRACT_OCR` | `false` | OCR scanned/image PDFs via Tesseract (slower; off by default) |
+| `SURF_EXTRACT_OCR` | `false` | `false` disables OCR; `true` forces the OCR-enabled parser; `auto` preserves native PDF pages and OCRs only requested pages flagged as needing it. The detector can include sparse native pages. Image text OCR runs for `true` or `auto`. No extra model API is called. |
+| `SURF_EXTRACT_OCR_LANGUAGE` | `eng` | Tesseract language codes, for example `eng+kor` for mixed English/Korean sources; used only when OCR is enabled. |
+| `SURF_EXTRACT_PDF_FORMAT` | `text` | Optional `markdown` reconstructs headings and tables. Complex merged cells can lose values or relationships; keep the default plain text for exact-value capture and audit. |
+| `SURF_EXTRACT_OFFICE_PARSER` | `auto` | Native DOCX/PPTX parser: `auto` uses optional Xberg (`@xberg-io/xberg`) when available, otherwise OfficeParser; `officeparser` or `xberg` selects one explicitly. The legacy `kreuzberg` setting selects Xberg. Xberg OCR, image extraction, layout models and embeddings are not enabled here; PDF/image OCR stays with LiteParse and local embeddings stay with E5. HWP 5/HWPX use hwp-convert. No LibreOffice/PDF conversion is required. |
 | `SURF_CLOUD_MODE` | `false` | headless/serverless mode: TLS bypass + `--no-sandbox` + `--disable-dev-shm-usage` + worker pool disabled + fail-fast on CAPTCHA |
 | `SURF_CASCADE_DISABLED` | `false` | pin a single stealth mode (chosen by `SURF_USE_STEALTH`) instead of the 3-tier auto-cascade |
 | `SURF_USE_STEALTH` | `true` | initial stealth tier; only consulted when `SURF_CASCADE_DISABLED=true` |
@@ -72,9 +75,13 @@ Environment variables, embedded resource budgets, and optional OrcaRouter repair
 
 ### Embedded resource budget
 
+The optional [lightweight document profile](../examples/lightweight-documents.env) keeps native Office parsing, page-targeted CPU LiteParse OCR (`auto`, `eng+kor`), and the existing E5/RRF local retrieval path with two inference threads and microbatches of two. Copy the values into the MCP server's environment configuration; the `.env` example is not loaded automatically. It does not change the vector index backend, delete existing indexes, or introduce an external vision-model API. The 2/2 setting is a resource-conservative example, not a universal speed optimum; measured ranking order can differ from 4/8.
+
 Embedded storage defaults to a 512 MiB RocksDB block cache, a 128 MiB HNSW vector cache, two 32 MiB write buffers, and two background jobs instead of machine-scaled server defaults. Explicit `SURREAL_HNSW_CACHE_SIZE`, `SURREAL_ROCKSDB_BLOCK_CACHE_SIZE`, `SURREAL_ROCKSDB_WRITE_BUFFER_SIZE`, `SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER`, `SURREAL_ROCKSDB_THREAD_COUNT`, and `SURREAL_ROCKSDB_JOBS_COUNT` settings take precedence.
 
 Background indexing runs one job at a time. Queued captures in the same project share a current indexing pass, and pending capture requests survive broker restarts. Inference calls share one queue, and each small embedding batch is saved before checking for drain. Document indexing does not load unrelated code bodies. Existing cached embeddings remain reusable; the smaller batch setting does not force a full reindex. These are component budgets, not a hard whole-process RSS cap. Native storage defaults apply when a broker opens its database, not to an already running broker.
+
+Identical prefixed texts within one embedding call are encoded once and restored to their original result positions. Query and passage prefixes remain separate. Health and doctor diagnostics only observe an existing broker; they do not start a cold broker or open its database or embedding model. An unavailable worker is reported as cached/unobserved, not as a zero-memory worker. Real queries, writes, and explicit daemon start retain on-demand startup and existing ownership protection.
 
 ### OrcaRouter
 

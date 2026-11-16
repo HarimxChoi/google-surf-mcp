@@ -1,6 +1,8 @@
 import type { CallToolResult } from '../response.js';
 import { formatToolResponse } from '../response.js';
-import { selectEvidence } from '../evidence.js';
+import { cleanCapturedText } from '../evidence.js';
+import { documentSourceRefs, readDocumentSourceMap } from '../documentSourceMap.js';
+import { selectDocumentEvidence } from '../documentEvidence.js';
 import {
   RANKED_SUMMARY_MAX_CHARS, RANKED_SUMMARY_MIN_CHARS, SEARCH_RESPONSE_TEXT_BUDGET,
 } from '../responseLimits.js';
@@ -38,13 +40,19 @@ export function compactRankedResults(
     Math.max(RANKED_SUMMARY_MIN_CHARS, Math.floor(SEARCH_RESPONSE_TEXT_BUDGET / Math.max(rows.length, 1))),
   );
   return rows.map((row) => {
-    const { content: _content, excerpt: _excerpt, _rrf_score: _rrfScore, ...metadata } = row;
-    const selected = selectEvidence(row.content || row.description || row.excerpt || '', query, summaryLimit);
+    const { content: _content, excerpt: _excerpt, _rrf_score: _rrfScore,
+      source_map: sourceMap, source_refs: _sourceRefs, ...metadata } = row;
+    const content = cleanCapturedText(row.content || row.description || row.excerpt || '');
+    const map = readDocumentSourceMap(sourceMap, content);
+    const refsBudget = map ? Math.min(300, Math.floor(summaryLimit / 4)) : 0;
+    const selected = selectDocumentEvidence(content, query, summaryLimit - refsBudget, [], map ? 'coherent' : 'balanced', map);
+    const refs = map ? documentSourceRefs(map, content, selected.spans, refsBudget) : undefined;
     return {
       ...metadata,
       description: selected.text || row.title,
       captured_hash: selected.captured_hash, captured_length: selected.captured_length,
       evidence_ranges: selected.spans.map(s => [s.start, s.end]),
+      ...(refs ? { source_refs: refs } : {}),
     };
   });
 }
@@ -96,7 +104,7 @@ export function localSearchResponse(
     description: hit.description,
     document_id: hit.document_id,
     source_family: hit.source_family,
-    ...(includeContent ? { content: hit.content } : {}),
+    ...(includeContent ? { content: hit.content, source_map: hit.source_map } : {}),
   }));
   const results = compact ? compactRankedResults(query, rawResults) : rawResults;
   return formatToolResponse({ query, results, elapsed_ms: 0, meta: { provider: 'local', fusion: 'family_rrf' } });
@@ -170,7 +178,7 @@ export function fuseSearchResponse(
       url: hit.url,
       description: hit.description,
       document_id: hit.document_id,
-      ...(includeContent ? { content: hit.content } : {}),
+      ...(includeContent ? { content: hit.content, source_map: hit.source_map } : {}),
     }, index + 1, hit.source_family));
   }
 

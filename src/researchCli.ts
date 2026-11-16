@@ -42,7 +42,7 @@ export async function runResearchCli(args: string[]): Promise<void> {
     const [group, command] = args;
     let result: unknown;
     if (group === 'doctor') {
-      result = await service.passiveStatus();
+      result = await service.peekStatus();
     } else if (group === 'daemon' && command === 'start') {
       result = await service.passiveStatus();
     } else if (group === 'daemon' && command === 'drain') {

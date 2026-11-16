@@ -19,6 +19,7 @@ const SearchArgumentsSchema = z.object({
   include_project_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
   limit: z.number().int().min(1).max(20).default(10),
   extract_mode: z.enum(['none', 'abstract', 'full']).default('none'),
+  deep_read: z.boolean().optional(),
   extract_limit: searchExtractLimitSchema(),
   max_chars: z.number().int().min(200).max(50_000).optional(),
   response_content: z.enum(['summary', 'full']).default('full'),
@@ -31,6 +32,7 @@ const ParallelArgumentsSchema = SearchArgumentsSchema.omit({ extract_limit: true
 const ExtractArgumentsSchema = z.object({
   project_id: z.string().min(1).max(64).optional(),
   mode: z.enum(['metadata', 'abstract', 'full']).default('full'),
+  deep_read: z.boolean().optional(),
   max_chars: z.number().int().min(200).max(50_000).optional(),
   response_content: z.enum(['summary', 'full']).default('summary'),
   evidence_mode: z.enum(['balanced', 'compact', 'coherent']).optional(),
