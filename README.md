@@ -22,19 +22,19 @@ Start without an API key or a separate database server, and build a personal kno
 
 ## Benchmarks
 
-### GAIA Level 3
+### Web Search and File Analysis: GAIA Level 3
 
-**Google Surf + DeepSeek Flash (`deepseek-flash`) answered 22 of 26 questions (84.62%)** on the public GAIA Level 3 validation set. The evaluation runner used Google Surf for retrieval and handled evidence checks and final submission.
+[GAIA](https://arxiv.org/abs/2311.12983) tests whether AI agents can answer real-world questions using web search, file analysis, and multi-step reasoning. Level 3 is its hardest tier.
+
+**Google Surf + DeepSeek V4.1 Flash (`deepseek-flash`) answered 22 of 26 questions (84.62%)** on the public GAIA Level 3 validation set. The evaluation runner used Google Surf for retrieval and handled evidence checks and final submission.
 
 | Agent | Split | Level 3 |
 | --- | --- | ---: |
-| **Google Surf + DeepSeek Flash** | [Public validation](https://huggingface.co/datasets/gaia-benchmark/GAIA) | **22/26 (84.62%)** |
+| **Google Surf + DeepSeek V4.1 Flash** | [Public validation](https://huggingface.co/datasets/gaia-benchmark/GAIA) | **22/26 (84.62%)** |
 | [Alita · Claude Sonnet 4 + GPT-4o](https://arxiv.org/html/2505.20286) | Public validation, pass@3 | 20/26 (76.92%) |
 | [xpander.ai · Claude Opus 4.7 → GPT-5.5 Pro](https://github.com/xpander-ai/xpander-gaia-benchmark-results) | Public validation, pass@2 | 19/26 (73.08%) |
-| [Shadow Harness V8.01](https://gaia-benchmark-leaderboard.hf.space/) | Official test | 45/49 (91.84%) |
-| [Keen AgenticOS V1.1](https://gaia-benchmark-leaderboard.hf.space/) | Official test | 44/49 (89.80%) |
 
-The [official test](https://huggingface.co/spaces/gaia-benchmark/leaderboard/blob/main/app.py) uses different questions. Search results surfaced published solutions for two of Surf's correctly scored questions; both remain in the reported score.
+Search results surfaced published solutions for two of Surf's correctly scored questions; both remain in the reported score.
 
 ### Auto Ontology comparison
 

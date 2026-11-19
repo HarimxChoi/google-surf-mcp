@@ -22,19 +22,19 @@ API 키나 별도 DB 서버 없이 시작하고, 자료와 프로젝트 기록�
 
 ## 검증 결과
 
-### GAIA Level 3
+### 웹 검색·파일 분석: GAIA Level 3
 
-**Google Surf와 DeepSeek Flash(`deepseek-flash`)를 연결해 GAIA 레벨 3 공개 검증셋 26문항 중 22문항(84.62%)을 맞혔습니다.** 검색에는 Google Surf를 사용했고, 근거 확인과 최종 제출은 별도 평가 러너에서 처리했습니다.
+[GAIA](https://arxiv.org/abs/2311.12983)는 AI 에이전트가 웹 검색과 파일 분석을 활용해 여러 단계에 걸쳐 실제 질문에 답할 수 있는지 평가합니다. 레벨 3은 세 단계 중 가장 어렵습니다.
+
+**Google Surf와 DeepSeek V4.1 Flash(`deepseek-flash`)를 연결해 GAIA 레벨 3 공개 검증셋 26문항 중 22문항(84.62%)을 맞혔습니다.** 검색에는 Google Surf를 사용했고, 근거 확인과 최종 제출은 별도 평가 러너에서 처리했습니다.
 
 | 에이전트 | 평가 세트 | 레벨 3 |
 | --- | --- | ---: |
-| **Google Surf + DeepSeek Flash** | [공개 검증셋](https://huggingface.co/datasets/gaia-benchmark/GAIA) | **22/26 (84.62%)** |
+| **Google Surf + DeepSeek V4.1 Flash** | [공개 검증셋](https://huggingface.co/datasets/gaia-benchmark/GAIA) | **22/26 (84.62%)** |
 | [Alita · Claude Sonnet 4 + GPT-4o](https://arxiv.org/html/2505.20286) | 공개 검증셋, pass@3 | 20/26 (76.92%) |
 | [xpander.ai · Claude Opus 4.7 → GPT-5.5 Pro](https://github.com/xpander-ai/xpander-gaia-benchmark-results) | 공개 검증셋, pass@2 | 19/26 (73.08%) |
-| [Shadow Harness V8.01](https://gaia-benchmark-leaderboard.hf.space/) | 공식 테스트셋 | 45/49 (91.84%) |
-| [Keen AgenticOS V1.1](https://gaia-benchmark-leaderboard.hf.space/) | 공식 테스트셋 | 44/49 (89.80%) |
 
-[공식 테스트셋](https://huggingface.co/spaces/gaia-benchmark/leaderboard/blob/main/app.py)은 공개 검증셋과 문항이 다릅니다. Surf가 맞힌 문항 중 두 개는 검색 결과에 공개 풀이가 나왔으며, 두 문항 모두 점수에 포함했습니다.
+Surf가 맞힌 문항 중 두 개는 검색 결과에 공개 풀이가 나왔으며, 두 문항 모두 점수에 포함했습니다.
 
 ### Auto Ontology 비교
 

@@ -114,11 +114,13 @@ async function syncSource(client, changed = false) {
       action: 'sync',
       project_id: 'memory-soak',
       roots: [{ label: 'repo', path: sourceRoot }],
+      wait_for_completion: true,
       ...(changed ? { changed_paths: [{ root: 'repo', path: 'soak.ts' }] } : {}),
     },
   });
-  if (result.isError) throw new Error('memory soak source sync failed');
-  return result.structuredContent.index;
+  const index = result.structuredContent?.index;
+  if (result.isError || !index) throw new Error(`memory soak source sync failed: ${JSON.stringify(result.structuredContent ?? result.content)}`);
+  return index;
 }
 
 async function waitForIndex(client, index) {
