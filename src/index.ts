@@ -590,7 +590,7 @@ const ExtractInput = {
   evidence_mode: EvidenceModeField,
   deep_read: DeepReadField,
   url: z.string().describe('Public http(s) URL. Loopback/private IPs blocked unless SURF_ALLOW_PRIVATE=true.'),
-  query: z.string().min(1).max(400).optional().describe('Question or missing aspect to locate inside the captured source. For a table identified in source_refs, use its exact label (for example Table 3-4) with evidence_mode=coherent and body_handle to read row context from the same snapshot instead of repeating web search. Response limits still apply.'),
+  query: z.string().min(1).max(400).optional().describe('Question or missing aspect to locate inside the captured source. Preserve the user\'s identifiers, numeric values, signs, units, and version constraints rather than replacing them with a generic topic. For a table identified in source_refs, use its exact label (for example Table 3-4) with evidence_mode=coherent and body_handle to read row context from the same snapshot instead of repeating web search. Response limits still apply.'),
   body_handle: z.string().min(1).max(200).optional().describe('Transient snapshot handle returned by a previous read. Bound to this URL and mode; expires after five minutes or bounded-cache eviction.'),
   exclude_spans: z.array(z.object({ start: z.number().int().min(0), end: z.number().int().positive() }).refine((span) => span.end > span.start, 'end must exceed start')).max(16).optional().describe('Previously read evidence content to omit. Shared table headers and code fences may repeat as context. Offsets are UTF-16 positions; end must exceed start.'),
   exclude_ranges: z.array(ExcludedEvidenceRangeSchema).max(16).optional().describe('Compact alternative to exclude_spans: [start,end] pairs copied from evidence_ranges. UTF-16 offsets, end exclusive and greater than start; shared headers/fences may repeat.'),
@@ -714,6 +714,7 @@ const ErrorInfoShape = z.object({
 const MetaShape = z.record(z.string(), z.unknown());
 const SiteScopeShape = z.object({
   domain: z.string(),
+  path: z.string().optional(),
   removed: z.number(),
   recovered_references: z.number().optional(),
 });
@@ -840,9 +841,20 @@ const HealthOutput = {
 };
 
 const ProjectMemoryOutput = {
+  knowledge: MetaShape.optional(),
+  answer: z.string().optional(),
+  source: MetaShape.optional(),
+  transforms: z.array(z.enum(['trim', 'collapse_whitespace', 'strip_punctuation'])).optional(),
   aggregate: MetaShape.optional(),
   query: z.string().optional(),
-  results: z.array(ResultItem).optional(),
+  results: z.union([z.array(ResultItem), z.array(z.object({
+    index: z.number().int().min(0), status: z.enum(['committed', 'replayed', 'failed']),
+    idempotency_key: z.string(), receipt: MetaShape.optional(), error: z.string().optional(),
+  }))]).optional(),
+  committed: z.number().int().min(0).optional(),
+  replayed: z.number().int().min(0).optional(),
+  failed: z.number().int().min(0).optional(),
+  partial: z.boolean().optional(),
   groups: z.array(MetaShape).optional(),
   elapsed_ms: z.number().optional(),
   meta: MetaShape.optional(),
@@ -865,6 +877,7 @@ const ProjectMemoryOutput = {
   snapshot: MetaShape.optional(),
   imported: MetaShape.optional(),
   doctor: MetaShape.optional(),
+  readiness: MetaShape.optional(),
   query_status: MetaShape.optional(),
   assertion: MetaShape.optional(),
   entity: MetaShape.optional(),
@@ -891,6 +904,24 @@ const ProjectMemoryOutput = {
   error: ErrorInfoShape.optional(),
 };
 
+const AssertionContextSchema = z.object({
+  conditions: z.array(z.string().min(1).max(500)).max(20).optional(),
+  assumptions: z.array(z.string().min(1).max(500)).max(20).optional(),
+  condition_expression: z.string().min(1).max(1000).optional().describe('Exact filter, for example (A OR B). Stored as text, not executed.'),
+  method: z.string().min(1).max(500).optional(),
+  source_observed_at: z.iso.datetime({ offset: true }).optional().describe('When the capture was made.'),
+  source_as_of: z.iso.datetime({ offset: true }).optional().describe('Point in time represented by the source, not the capture or publication date.'),
+  source_snapshot_id: z.string().min(1).max(500).optional(),
+  publication_before: z.iso.datetime({ offset: true }).optional(),
+  count_unit: z.string().min(1).max(500).optional(),
+  candidate_scope: z.object({ universe: z.string().min(1).max(500), coverage: z.enum(['complete', 'window', 'unknown']),
+    limit_per_source: z.number().int().positive().optional() }).optional().describe('Host-declared candidate population. Set complete only for an enumerated universe, not top-k rows. limit_per_source applies only to window coverage.'),
+  event_kind: z.string().min(1).max(500).optional().describe('What happened or was predicted, independent of the person or timestamp.'),
+  media: z.object({ start_seconds: z.number().min(0), end_seconds: z.number().min(0),
+    speaker_label: z.string().min(1).max(200).optional(),
+    speaker_attribution: z.enum(['unverified', 'identified_in_source', 'independently_correlated']).optional() }).optional(),
+});
+
 const ProjectMemorySearchSchema = {
   query: z.string().min(1).max(400).optional().describe('One natural-language query over indexed local project knowledge. Use queries instead for independent grouped answers.'),
   query_variants: z.array(z.string().min(1).max(400)).max(19).optional().describe('Optional retrieval variants executed inside this one broker request. Exact identifiers and quoted phrases are added deterministically, candidates are fused with RRF, and the primary query is reranked once. Do not make repeated terminal or tool calls for query variants.'),
@@ -908,13 +939,21 @@ const ProjectMemorySearchSchema = {
   request_id: z.string().min(1).max(200).optional().describe('Caller-chosen ID for one local query. Supply it before a long request so project_memory query_status/query_cancel can inspect or cancel the same operation.'),
   response_deadline_ms: z.number().int().min(1_000).max(300_000).optional().describe('Caller-selected 1-300 second response deadline. Returns available lane results or QUERY_TIMEOUT with request_id. Native reads remain tracked until they settle; stored evidence and writes are unaffected.'),
   filters: z.object({
+    assertion_context: AssertionContextSchema.optional().describe('Graph assertions only. Exact match of supplied fields before ranking. Omit retrieval_lanes or include graph. Does not infer a filter from question wording.'),
+    lane_budget_ms: z.object({ exact: z.number().int().min(50).max(300_000).optional(),
+      bm25: z.number().int().min(50).max(300_000).optional(), vector: z.number().int().min(50).max(300_000).optional(),
+      graph: z.number().int().min(50).max(300_000).optional() }).optional().describe('Optional per-lane response budgets. A slow lane is marked degraded while completed lanes are returned. Does not cancel an already executing native DB query; its broker slot stays tracked until it settles. No default per-lane cutoff.'),
+    namespaces: z.array(z.string().min(1).max(200)).max(20).optional(),
+    sports: z.array(z.string().min(1).max(100)).max(20).optional(),
+    folders: z.array(z.string().min(1).max(2000)).max(20).optional(),
+    model_ids: z.array(z.string().min(1).max(500)).max(20).optional(),
     source_families: z.array(z.enum(['document', 'code', 'graph'])).max(3).optional(),
     retrieval_lanes: z.array(z.enum(['exact', 'bm25', 'vector', 'graph'])).max(4).optional(),
     kinds: z.array(z.string().min(1).max(100)).max(20).optional(),
-    roles: z.array(z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'other'])).max(10).optional(),
+    roles: z.array(z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'inventory', 'other'])).max(11).optional(),
     recorded_after: z.iso.datetime({ offset: true }).optional(),
     recorded_before: z.iso.datetime({ offset: true }).optional(),
-  }).optional().describe('Optional project, source, type, role, lane, and recorded-time filters. Excluded lanes are not executed.'),
+  }).optional().describe('Optional project, source, type, role, lane, and recorded-time filters. namespaces/sports/folders/model_ids restrict candidates before ranking. Store explicit fields.namespace/sport/folder/model_id on catalog records; legacy paths and namespaced IDs are also recognized. OR within each filter; AND across filters. Excluded lanes are not executed.'),
 };
 
 server.registerTool('search', {
@@ -1149,6 +1188,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory_search'
     'Use query_variants for multiple retrieval angles in one call instead of opening terminals or calling this tool repeatedly. Query embeddings are batched, candidates are fused with RRF, graph expansion starts from retrieved evidence, and the primary query is reranked once. Only bounded query-focused summaries from that final ranking are returned; stored bodies never bypass this response gate. ' +
     'If one retrieval lane times out, the other lanes still return and meta.degraded_lanes identifies the partial lane; do not repeat the same query automatically. ' +
     'Uses exact, BM25, vector, and graph retrieval with automatic RRF fusion and configured E5 reranking; no separate vector or RRF tool call is needed. Keep default lanes unless deliberately restricting retrieval; filters.retrieval_lanes skips excluded lanes entirely. It never opens Google, a browser, or SearchApi. ' +
+    'When the applicable condition is known, filters.assertion_context selects only stored assertions matching it. Omit the filter when discovering possible conditions or finding source documents. ' +
     'Use search or search_parallel only when new external information is required.',
   inputSchema: trackSchema('project_memory_search', ProjectMemorySearchSchema),
   outputSchema: ProjectMemoryOutput,
@@ -1164,17 +1204,18 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     SharedResearchBrokerDescription +
     'It links session intent, immutable plan revisions, experiments, decisions, versioned ontology, and bitemporal data lineage; corrections can use entity merge or split without discarding history. ' +
     'Use project_update for revision-checked changes to an existing project profile; context reads that same versioned profile. Use query_status/query_cancel with a caller-supplied search request_id to inspect or cooperatively stop a long retrieval. Use context for the bounded current project view; current to generate a compact CURRENT.md; get/get_batch for exact records and body spans; record/record_batch for durable idempotent writes; timeline/diff for history; sync for declared source deltas; job_status/job_wait/job_cancel for background progress and safe stage-boundary cancellation; verify for preservation levels; snapshot/snapshot_import/snapshot_rollback for versioned offline transfer and append-only recovery; doctor for passive diagnostics; rebuild for derived indexes; export for graph views; and forget for reversible deletion. Typed record writes return compact receipts and never echo submitted bodies. ' +
-    'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. ' +
-    'Use aggregate for count/min/max/sum/mean over all matching assertions, not top-k search hits; population metadata, unit checks, and an optional expected_value comparison are returned. Schema terms and instance assertions are separate: record_type=ontology defines vocabulary, record_type=assertion stores a fact. Review attribution records the actor and method without implying human verification. ' +
+    'action=search remains a compatibility alias, but project_memory_search should be used for local knowledge retrieval. Use record_knowledge to store ontology terms and exact-source-backed assertions, then retrieve those facts for query in one call. Supply knowledge and an idempotency_key; inspect committed IDs, per-record failures and ranked results. Partial bundles retain successful writes; retry unchanged keys and content. No extra model or shell is invoked. ' +
+    'Use aggregate for count/min/max/sum/mean over all matching assertions, not top-k search hits. assertion evidence_refs links exact stored source quotes in the same write; context preserves conditions, assumptions, observation time, publication cutoff and media timestamps. A speaker label is not verified identity. Use action=answer for literal names/titles: the host should submit its returned answer unchanged; only explicitly requested punctuation or whitespace transforms are applied. Schema terms and instance assertions are separate. Review attribution records the actor and method without implying human verification. ' +
+    'For aggregate, specify context for the applicable condition, snapshot or method, subjects for an exact cohort, and require_complete_candidates when a ranked window cannot answer a global question. A mixed or incomplete population returns a status without a numeric answer. ' +
     'Ontology revisions use supersedes_term_id. Corrections preserve bitemporal data lineage and support assertion replacement plus entity merge or split. ' +
     'rebuild indexes approved local roots and code structure into a reproducible snapshot, including native Office/HWP documents, PDF text and optionally image OCR. Binary documents are processed sequentially; unchanged source hashes and parser settings reuse stored text. export writes an interactive HTML viewer, Graphviz DOT, D3 JSON, or a Neo4j import bundle. HTML always includes PKM, Lineage, and Ontology tabs, an embedded-project selector, empty-canvas focus reset, and visible PNG or JSON download. ' +
     'forget previews impact before reversible project or assertion deletion. ' +
     'Search, search_parallel, scholar_search, and extract automatically capture sources and provenance; project_memory manages their durable structure.',
   inputSchema: trackSchema('project_memory', {
     action: z.enum([
-      'create', 'project_update', 'show', 'search', 'record', 'record_batch', 'get', 'get_batch', 'context',
-      'timeline', 'diff', 'sync', 'job_status', 'job_wait', 'job_cancel', 'query_status', 'query_cancel', 'verify', 'current', 'snapshot',
-      'snapshot_import', 'snapshot_rollback', 'doctor', 'aggregate', 'rebuild', 'export', 'forget',
+      'create', 'project_update', 'show', 'search', 'record', 'record_batch', 'import_records', 'readiness', 'get', 'get_batch', 'context',
+      'timeline', 'diff', 'sync', 'job_status', 'job_wait', 'job_cancel', 'job_sources', 'job_resume', 'query_status', 'query_cancel', 'verify', 'current', 'snapshot',
+      'snapshot_import', 'snapshot_rollback', 'doctor', 'aggregate', 'answer', 'record_knowledge', 'rebuild', 'export', 'forget',
     ]).describe(
       'Typed project-memory operation. create: project_id and name required. project_update: versioned profile update with expected_revision and idempotency_key. get/get_batch: exact IDs and bounded body spans; body_bytes=0 returns metadata only. get with query reads focused evidence across one known stored record, without live web; omit raw paging fields. record/record_batch: typed durable writes with idempotency_key. aggregate: read-only count/min/max/sum/mean over all matching scoped assertions, never top-k. context/current/timeline/diff: compact current or historical views. query_status/query_cancel: inspect or cooperatively cancel caller-identified local retrieval. sync/rebuild: incremental source and derived indexing. job_status/job_wait/job_cancel: durable background work. snapshot/snapshot_import/snapshot_rollback: offline transfer and append-only recovery. export: HTML, DOT, JSON, or Neo4j. forget: reversible deletion preview and confirmation. Unrelated local questions use project_memory_search.',
     ),
@@ -1198,6 +1239,10 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     ),
     aggregate: z.object({ operation: z.enum(['count', 'min', 'max', 'sum', 'mean']), predicate: z.string().min(1).max(200).optional(),
       subject: z.string().min(1).max(2000).optional(), unit: z.string().min(1).max(80).optional(), status: z.enum(['confirmed', 'suggested']).optional(),
+      subjects: z.array(z.string().min(1).max(2000)).min(1).max(500).optional().describe('Exact cohort: one matching assertion per subject required. A recorded zero is not a missing subject. Cannot be combined with subject.'),
+      context: AssertionContextSchema.optional().describe('Exact match of each supplied assertion context field.'),
+      allow_mixed_contexts: z.boolean().optional().describe('Allow combining distinct declared contexts; false by default.'),
+      require_complete_candidates: z.boolean().optional().describe('Return incomplete_candidates for unknown or windowed candidate coverage. Checks declarations, not external source completeness.'),
       valid_at: z.iso.datetime({ offset: true }).optional(), recorded_as_of: z.iso.datetime({ offset: true }).optional() }).optional()
       .describe('Read-only aggregate over all matching scoped assertions, never top-k hits. Mixed units require a supported explicit target unit; empty numeric populations return null, count returns zero.'),
     expected_value: z.number().finite().optional().describe('Optional claimed scalar to compare with the deterministic aggregate. Free-text reasoning is not automatically validated.'),
@@ -1221,10 +1266,11 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     roots: z.array(z.object({
       label: z.string().min(1).max(32),
       path: z.string().min(1).max(2_000),
-      role: z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'other']).optional(),
+      role: z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'inventory', 'other']).optional(),
+      include_paths: z.array(z.string().min(1).max(2000)).max(100_000).optional().describe('Strict whitelist of exact root-relative files, not globs. Only these paths are read; [] reads none. manifest assigns roles but is NOT a whitelist. sync dry_run=true previews count/bytes without parsing or saving.'),
       manifest: z.array(z.object({
         path: z.string().min(1).max(2_000),
-        role: z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'other']),
+        role: z.enum(['experiment_record', 'result', 'method', 'log', 'paper', 'plan', 'config', 'source', 'report', 'inventory', 'other']),
         aliases: z.array(z.string().min(1).max(2_000)).max(100).optional(),
       })).max(100_000).optional(),
     })).min(1).max(64).optional().describe('Approved local roots and optional path-independent role/alias manifest. sync merges roots by default; removal is explicit.'),
@@ -1253,17 +1299,45 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
     version: z.number().int().min(1).optional().describe('Ontology revision number. Defaults to 1 or the superseded term version plus one.'),
     supersedes_term_id: z.string().min(1).max(200).optional().describe('Prior ontology term replaced by this revision.'),
     reason: z.string().min(1).max(2_000).optional().describe('Required reason for any correction.'),
-    evidence_ids: z.array(z.string().min(1).max(200)).max(50).optional().describe('Project-owned evidence for an ontology definition or corrected assertion.'),
-    valid_from: z.iso.datetime({ offset: true }).optional().describe('Corrected assertion valid-time start.'),
-    valid_to: z.iso.datetime({ offset: true }).optional().describe('Corrected assertion valid-time end.'),
+    evidence_ids: z.array(z.string().min(1).max(200)).max(50).optional().describe('Existing project-owned EvidenceRecord.evidence_id values for an assertion, ontology review, or correction. document_id and record_id are not evidence IDs; never substitute or invent them.'),
+    evidence_refs: z.array(z.object({
+      record_id: z.string().min(1).max(500), quote: z.string().min(1).max(5_000),
+      body_offset: z.number().int().min(0).optional(), revision: z.number().int().min(1).optional(),
+    })).max(20).optional().describe('For assertions, automatically create and link evidence from exact quotes in project-owned stored records. body_offset is a byte offset; at most 64KiB is read per reference. No invented evidence IDs or separate write needed.'),
+    context: AssertionContextSchema.optional().describe('Assertion applicability, not unconditional truth. Keep publication cutoff separate from source snapshot, capture time and assertion validity. A speaker label is not proof of identity.'),
+    answer: z.object({
+      record_id: z.string().min(1).max(500), quote: z.string().min(1).max(5_000),
+      selection: z.string().min(1).max(5_000).optional(),
+      body_offset: z.number().int().min(0).optional(), revision: z.number().int().min(1).optional(),
+      transforms: z.array(z.enum(['trim', 'collapse_whitespace', 'strip_punctuation'])).max(3).optional(),
+    }).optional().describe('For action=answer: verify a stored quote and return its selected substring verbatim, except for requested transforms. strip_punctuation preserves word boundaries at dashes between letters. Exclude field labels from selection. Checks source fidelity, not factual correctness.'),
+    knowledge: z.object({
+      ontology_terms: z.array(z.object({ key: z.string().min(1).max(100), kind: z.enum(['entity_type', 'relation']),
+        name: z.string().min(1).max(200), definition: z.string().min(1).max(2_000) })).max(20).optional(),
+      assertions: z.array(z.object({ key: z.string().min(1).max(100), subject: z.string().min(1).max(2_000),
+        predicate: z.string().min(1).max(200), object: z.string().min(1).max(2_000).optional(),
+        value: z.union([z.string().max(2_000), z.number(), z.boolean(), z.null()]).optional(),
+        unit: z.string().min(1).max(80).optional(),
+        context: AssertionContextSchema.optional(),
+        evidence_refs: z.array(z.object({ record_id: z.string().min(1).max(500), quote: z.string().min(1).max(5_000),
+          body_offset: z.number().int().min(0).optional(), revision: z.number().int().min(1).optional() })).min(1).max(20),
+      })).min(1).max(20),
+    }).optional().describe('For record_knowledge: up to 20 ontology terms and 1-20 source-backed facts, each with a stable key. Each fact has exactly one value or object and at least one exact source quote. One call stores and retrieves facts for query plus their subjects. Atomic/idempotent per record, not per bundle; failures and committed IDs are explicit. No server-side model or shell execution.'),
+    valid_from: z.iso.datetime({ offset: true }).optional().describe('Assertion validity start as a full ISO 8601 datetime with timezone, e.g. 2026-01-01T00:00:00Z. Date-only values are invalid; valid_at is an aggregate filter, not a top-level write field.'),
+    valid_to: z.iso.datetime({ offset: true }).optional().describe('Assertion validity end as a full ISO 8601 datetime with timezone, not a date-only value.'),
     operation: z.enum(['create', 'patch', 'append_evidence', 'relocate', 'correct']).optional().describe('Typed durable write operation. Use with asset_kind and idempotency_key.'),
-    asset_kind: z.enum(['project', 'plan', 'task', 'method', 'experiment', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact', 'document', 'decision', 'session']).optional(),
+    asset_kind: z.enum(['project', 'track', 'plan', 'task', 'method', 'experiment', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact', 'document', 'decision', 'session']).optional().describe('Use track for a project subarea. Catalog project records never edit the parent profile; use project_update.'),
     asset_id: z.string().min(1).max(500).optional().describe('Stable logical identity. Revisions remain under this ID.'),
+    wait_for_completion: z.boolean().optional().describe('sync/rebuild default to a durable background job and return immediately. Set true only for a small synchronous operation. Use job_wait for progress, job_resume to resume.'),
+    offset: z.number().int().min(0).optional().describe('job_sources page offset.'),
+    page_limit: z.number().int().min(1).max(500).optional().describe('job_sources page size; default 100. job_status never includes the full source ID list.'),
+    import_path: z.string().min(1).max(4000).optional().describe('Local UTF-8 JSONL file for import_records. Each line: {type:catalog|ontology|assertion|entity,record:{...}}. Catalog/ontology/assertion records require stable idempotency_key. Dry-run by default; apply with dry_run=false, then job_wait/job_resume. Original file hash is checked on resume.'),
+    allow_partial: z.boolean().optional().describe('Explicitly accept valid rows when import preflight finds invalid rows; failures remain in per-line receipts and job status.'),
     record_id: z.string().min(1).max(500).optional().describe('Known exact record or alias ID for get, diff, or verify.'),
     record_ids: z.array(z.string().min(1).max(500)).min(1).max(100).optional(),
     expected_revision: z.number().int().min(0).optional().describe('Optimistic concurrency revision. Stale values return a conflict.'),
-    idempotency_key: z.string().min(1).max(500).optional().describe('Stable operation key. Reuse it after an uncertain response.'),
-    fields: MetaShape.optional().describe('Typed structured fields stored with the record revision. measurement requires metric, value, unit, evaluator_contract, dataset, split, tokenizer, context_length, targets, carrier_precision, and source_locator; byte_ledger requires byte_components, denominator, and scope. Put unknown required values in missing_fields.'),
+    idempotency_key: z.string().min(1).max(500).optional().describe('Stable write key. Assertion and ontology retries return the same persisted record; changed content conflicts. This key never selects a catalog write. Do not mix record_type with asset_kind/operation.'),
+    fields: MetaShape.optional().describe('measurement: metric, value, unit, evaluator_contract, dataset, split, source_locator. Generic/sports measurements need no LLM fields. measurement_profile=llm additionally requires tokenizer, context_length, targets, carrier_precision. Unknowns go in missing_fields; inapplicable fields in fields.not_applicable_fields. Logical comparison identity excludes physical source_locator. byte_ledger: byte_components, denominator, scope.'),
     artifact_references: z.array(z.object({
       artifact_id: z.string().min(1).max(500),
       path: z.string().max(2_000).optional(),
@@ -1278,7 +1352,7 @@ if (baseDeps.config.researchEnabled) server.registerTool('project_memory', {
       verification: z.enum(['declared', 'present', 'hash_verified', 'restore_tested', 'replayed']).optional(),
     })).max(50_000).optional(),
     records: z.array(z.object({
-      kind: z.enum(['project', 'plan', 'task', 'method', 'experiment', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact', 'document', 'decision', 'session']),
+      kind: z.enum(['project', 'track', 'plan', 'task', 'method', 'experiment', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact', 'document', 'decision', 'session']),
       operation: z.enum(['create', 'patch', 'append_evidence', 'relocate', 'correct']),
       asset_id: z.string().min(1).max(500).optional(),
       expected_revision: z.number().int().min(0).optional(),

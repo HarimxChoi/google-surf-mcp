@@ -113,7 +113,7 @@ export function classifyProjectPath(path: string): ProjectFileKind {
 
 export function projectRoleKind(role: ProjectDocumentRole): ProjectFileKind {
   if (role === 'experiment_record' || role === 'result') return 'result';
-  if (role === 'plan' || role === 'method' || role === 'paper' || role === 'report') return 'report';
+  if (role === 'plan' || role === 'method' || role === 'paper' || role === 'report' || role === 'inventory') return 'report';
   if (role === 'source') return 'source';
   if (role === 'config') return 'config';
   if (role === 'log') return 'log';

@@ -13,14 +13,18 @@ export interface AssertionAggregateInput {
   status?: 'confirmed' | 'suggested';
   valid_at?: string;
   recorded_as_of?: string;
+  context?: AssertionContext;
+  subjects?: string[];
+  allow_mixed_contexts?: boolean;
+  require_complete_candidates?: boolean;
 }
-export type CatalogAssetKind = 'project' | 'plan' | 'task' | 'method' | 'experiment'
+export type CatalogAssetKind = 'project' | 'track' | 'plan' | 'task' | 'method' | 'experiment'
   | 'attempt' | 'arm' | 'measurement' | 'byte_ledger' | 'artifact' | 'document'
   | 'decision' | 'session';
 export type CatalogWriteOperation = 'create' | 'patch' | 'append_evidence' | 'relocate' | 'correct';
 export type CatalogAccessTier = 'hot' | 'warm' | 'cold';
 export type ProjectDocumentRole = 'experiment_record' | 'result' | 'method' | 'log'
-  | 'paper' | 'plan' | 'config' | 'source' | 'report' | 'other';
+  | 'paper' | 'plan' | 'config' | 'source' | 'report' | 'inventory' | 'other';
 
 export interface ProjectRecord {
   project_id: string;
@@ -212,6 +216,7 @@ export interface LegacyRecordReadback {
 }
 
 export interface DurableWriteReceipt {
+  post_commit_warning?: { stage: 'index_scheduling'; message: string; retry_action: 'job_resume' };
   project_id: string;
   record_id: string;
   revision: number;
@@ -277,15 +282,54 @@ export interface OntologyTermRecord {
 export interface EvidenceRecord {
   evidence_id: string;
   project_id: string;
-  source_type: 'document' | 'source' | 'experiment' | 'decision' | 'manual';
+  source_type: 'document' | 'source' | 'experiment' | 'decision' | 'catalog' | 'manual';
   source_id: string;
   locator?: string;
   quote?: string;
+  quote_hash?: string;
+  source_read_hash?: string;
+  source_revision?: number;
+  body_span?: { start: number; end: number };
   created_at: string;
+}
+
+export interface EvidenceReference {
+  record_id: string;
+  quote: string;
+  body_offset?: number;
+  revision?: number;
+}
+
+export interface AssertionContext {
+  conditions?: string[];
+  assumptions?: string[];
+  condition_expression?: string;
+  method?: string;
+  source_observed_at?: string;
+  source_as_of?: string;
+  source_snapshot_id?: string;
+  publication_before?: string;
+  count_unit?: string;
+  candidate_scope?: { universe: string; coverage: 'complete' | 'window' | 'unknown'; limit_per_source?: number };
+  event_kind?: string;
+  media?: { start_seconds: number; end_seconds: number; speaker_label?: string;
+    speaker_attribution?: 'unverified' | 'identified_in_source' | 'independently_correlated' };
+}
+
+export interface LiteralAnswerInput extends EvidenceReference {
+  selection?: string;
+  transforms?: Array<'trim' | 'collapse_whitespace' | 'strip_punctuation'>;
+}
+
+export interface KnowledgeBundle {
+  ontology_terms?: Array<{ key: string; kind: 'entity_type' | 'relation'; name: string; definition: string }>;
+  assertions: Array<{ key: string; subject: string; predicate: string; object?: string; value?: AssertionValue;
+    unit?: string; context?: AssertionContext; evidence_refs: EvidenceReference[] }>;
 }
 
 export interface AssertionRecord {
   unit?: string;
+  context?: AssertionContext;
   superseded_from_status?: 'suggested' | 'confirmed';
   assertion_id: string;
   project_id: string;
@@ -362,9 +406,11 @@ export interface EntityLinkCandidate {
 }
 
 export interface GraphNodeRecord {
+  assertion_context?: AssertionContext;
+  search_scope?: Record<string, unknown>;
   node_id: string;
   project_id: string;
-  kind: 'project' | 'root' | 'directory' | 'source' | 'document' | 'plan'
+  kind: 'project' | 'track' | 'root' | 'directory' | 'source' | 'document' | 'plan'
     | 'task' | 'method' | 'experiment' | 'attempt' | 'arm' | 'measurement' | 'byte_ledger'
     | 'artifact' | 'decision' | 'session' | 'intent' | 'entity' | 'assertion' | 'symbol'
     | 'ontology' | 'schema' | 'identity' | 'evidence' | 'snapshot' | 'catalog_asset';
@@ -430,12 +476,13 @@ export interface KnowledgeJobRecord {
   job_id: string;
   job_key: string;
   project_id: string;
-  kind: 'rebuild' | 'schema_link' | 'graph_projection' | 'retrieval_index';
+  kind: 'rebuild' | 'schema_link' | 'graph_projection' | 'retrieval_index' | 'source_sync' | 'bulk_import';
   status: KnowledgeJobStatus;
   source_hash: string;
   schema_version: string;
   algorithm_version: string;
   affected_source_ids: string[];
+  child_job_ids?: string[];
   attempts: number;
   revision?: number;
   stage?: string;
@@ -444,11 +491,21 @@ export interface KnowledgeJobRecord {
   result_digest?: string;
   result_counts?: Record<string, number>;
   error?: string;
+  failures?: Array<{ stage: string; source_id?: string; message: string; trace_id: string }>;
+  request?: Record<string, unknown>;
   cancel_requested_at?: string;
   cancel_reason?: string;
   created_at: string;
   updated_at: string;
 }
+
+export type KnowledgeJobView = Omit<KnowledgeJobRecord, 'affected_source_ids' | 'request'> & {
+  affected_source_count: number;
+  waiting_reason?: string;
+  elapsed_ms: number;
+  items_per_second?: number;
+  sources: { action: 'job_sources'; job_id: string; offset: 0; limit: 100 };
+};
 
 export interface ProjectDetail {
   project: ProjectRecord;
@@ -487,6 +544,7 @@ export interface ProjectSourceSnapshot {
     label: string;
     path: string;
     role?: ProjectDocumentRole;
+    include_paths?: string[];
     manifest?: Array<{ path: string; role: ProjectDocumentRole; aliases?: string[] }>;
   }>;
   git_root?: string;
@@ -573,6 +631,8 @@ export interface FocusedRecordReadback {
 }
 
 export interface ProjectDocumentRecord {
+  exact_terms?: string[];
+  role?: ProjectDocumentRole;
   project_id: string;
   document_id: string;
   state: 'lexical_active' | 'metadata_archive';
@@ -660,6 +720,12 @@ export interface LocalSearchHit extends SearchResult {
 }
 
 export interface ResearchSearchFilters {
+  assertion_context?: AssertionContext;
+  lane_budget_ms?: Partial<Record<'exact' | 'bm25' | 'vector' | 'graph', number>>;
+  namespaces?: string[];
+  sports?: string[];
+  folders?: string[];
+  model_ids?: string[];
   source_families?: Array<'document' | 'code' | 'graph'>;
   retrieval_lanes?: Array<'exact' | 'bm25' | 'vector' | 'graph'>;
   kinds?: string[];

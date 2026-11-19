@@ -22,17 +22,19 @@ Start without an API key or a separate database server, and build a personal kno
 
 ## Benchmarks
 
-### Web search vs Google AI Mode
+### GAIA Level 3
 
-Eight developer questions covered Python TaskGroup, SQLite WAL, Kubernetes probes, Fetch, Redis TTL, Docker Compose, PyTorch, and Rust. Examples included SQLite's concurrent-writer limitations and whether PyTorch's `inference_mode()` replaces `model.eval()`.
+**Google Surf + DeepSeek Flash (`deepseek-flash`) answered 22 of 26 questions (84.62%)** on the public GAIA Level 3 validation set. The evaluation runner used Google Surf for retrieval and handled evidence checks and final submission.
 
-The answer model paired with Google Surf was **[DeepSeek V4.1 Flash (1017)](https://api-docs.deepseek.com/updates/)** (`deepseek-flash`, temperature 0, thinking disabled).
+| Agent | Split | Level 3 |
+| --- | --- | ---: |
+| **Google Surf + DeepSeek Flash** | [Public validation](https://huggingface.co/datasets/gaia-benchmark/GAIA) | **22/26 (84.62%)** |
+| [Alita · Claude Sonnet 4 + GPT-4o](https://arxiv.org/html/2505.20286) | Public validation, pass@3 | 20/26 (76.92%) |
+| [xpander.ai · Claude Opus 4.7 → GPT-5.5 Pro](https://github.com/xpander-ai/xpander-gaia-benchmark-results) | Public validation, pass@2 | 19/26 (73.08%) |
+| [Shadow Harness V8.01](https://gaia-benchmark-leaderboard.hf.space/) | Official test | 45/49 (91.84%) |
+| [Keen AgenticOS V1.1](https://gaia-benchmark-leaderboard.hf.space/) | Official test | 44/49 (89.80%) |
 
-| Evaluation | Google Surf + DeepSeek | Google AI Mode |
-| --- | ---: | ---: |
-| Result | **22/24** | **24/24** |
-
-Three required checkpoints per question; the numbers count fully met checkpoints, not whole-answer accuracy. Recorded on 2026-11-07, not a new evaluation of the current release.
+The [official test](https://huggingface.co/spaces/gaia-benchmark/leaderboard/blob/main/app.py) uses different questions. Search results surfaced published solutions for two of Surf's correctly scored questions; both remain in the reported score.
 
 ### Auto Ontology comparison
 

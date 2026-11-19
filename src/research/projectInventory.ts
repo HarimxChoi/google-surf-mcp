@@ -16,6 +16,7 @@ export interface ProjectRootInput {
   label: string;
   path: string;
   role?: ProjectDocumentRole;
+  include_paths?: string[];
   manifest?: Array<{ path: string; role: ProjectDocumentRole; aliases?: string[] }>;
 }
 
@@ -260,6 +261,13 @@ function normalizeRoots(inputs: ProjectRootInput[]): ProjectRootInput[] {
       label,
       path: resolve(input.path),
       ...(input.role ? { role: input.role } : {}),
+      ...(input.include_paths !== undefined ? { include_paths: [...new Set(input.include_paths.map(path => {
+        const normalized = path.replace(/\\/g, '/');
+        const absolute = resolve(input.path, path);
+        if (!normalized || /[*?\[\]]/.test(normalized) || relative(resolve(input.path), absolute).startsWith('..')
+          || absolute === resolve(input.path)) throw new Error(`include_paths requires exact files inside root ${label}: ${path}`);
+        return relative(resolve(input.path), absolute).replace(/\\/g, '/');
+      }))] } : {}),
       ...(input.manifest?.length ? {
         manifest: input.manifest.map((item) => ({
           path: item.path.replace(/\\/g, '/'),
@@ -283,7 +291,8 @@ export async function inventoryProject(input: {
   const records: ProjectInventoryRecord[] = [];
   const current = new Map((input.current ?? []).map(record => [`${record.root}\0${record.path}`, record]));
   for (const root of roots) {
-    const entries = [
+    const entries = root.include_paths !== undefined
+      ? root.include_paths.map(path => ({ path: resolve(root.path, path), collection: false })) : [
       ...(await listFiles(root.path)).map((path) => ({ path, collection: false })),
       ...(await listCollectionBoundaries(root.path)).map((path) => ({ path, collection: true })),
     ];
@@ -365,6 +374,9 @@ export async function inventoryProjectIncremental(input: {
     if (path !== rootPath && !path.startsWith(`${rootPath}${sep}`)) {
       throw new Error(`path escapes root ${change.root}: ${change.path}`);
     }
+    if (root.include_paths !== undefined && !root.include_paths.includes(relative(rootPath, path).replace(/\\/g, '/'))) {
+      throw new Error(`path is not in include_paths whitelist: ${change.root}/${change.path}`);
+    }
     return { root, path, relativePath: relative(rootPath, path).replace(/\\/g, '/') };
   };
   for (const change of input.removed_paths) {
@@ -409,4 +421,24 @@ export async function inventoryProjectIncremental(input: {
     records: sorted,
     digest,
   };
+}
+
+export async function previewProjectFiles(inputs: ProjectRootInput[]) {
+  const roots = normalizeRoots(inputs);
+  let files = 0, bytes = 0;
+  const errors: Array<{ root: string; path: string; message: string }> = [];
+  for (const root of roots) {
+    const paths = root.include_paths !== undefined ? root.include_paths.map(path => resolve(root.path, path))
+      : await listFiles(root.path);
+    for (const path of paths) {
+      try {
+        const info = await lstat(path);
+        if (!info.isFile() || info.isSymbolicLink()) throw new Error('expected a regular file, not a directory or symlink');
+        files++; bytes += info.size;
+      } catch (error) { if (errors.length < 20) errors.push({ root: root.label,
+        path: relative(root.path, path), message: String(error).slice(0, 500) }); }
+    }
+  }
+  return { files, bytes, roots: roots.length, explicit_whitelist: roots.every(root => root.include_paths !== undefined),
+    errors, parsed: false, stored: false };
 }

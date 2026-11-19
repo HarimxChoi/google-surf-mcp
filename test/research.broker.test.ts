@@ -239,8 +239,7 @@ describe('research broker', () => {
       expect('process' in stopped).toBe(false);
       expect(() => process.kill(started.process.pid, 0)).toThrow();
     }
-    const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { pid: number };
-    expect(owner.pid).toBe(started.process.pid);
+    await expect(access(ownerPath)).rejects.toThrow();
   }, 20_000);
 
   it('preserves a configuration mismatch in an existing-only diagnostic', async () => {

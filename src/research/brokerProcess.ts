@@ -394,13 +394,26 @@ function scheduleIdle(workCompleted = false): void {
 async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
+  // Native shutdown must not leave a live owner after its listener has closed.
+  const deadline = setTimeout(() => {
+    process.stderr.write('[google-surf-mcp] research broker shutdown exceeded 10s; exiting for stale-owner recovery\n');
+    process.exit(1);
+  }, 10_000);
+  deadline.unref();
   clearTimeout(idleTimer);
   clearInterval(memoryTimer);
-  for (const client of clients) client.destroy();
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-  await service.close().catch(() => {});
-  if (process.platform !== 'win32' && process.platform !== 'linux') await rm(endpoint, { force: true }).catch(() => {});
-  process.exit(0);
+  try {
+    for (const client of clients) client.destroy();
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    await service.close();
+    if (process.platform !== 'win32' && process.platform !== 'linux') await rm(endpoint, { force: true });
+    await releaseOwner(ownership.directory, ownership.owner);
+    clearTimeout(deadline);
+    process.exit(0);
+  } catch (error) {
+    process.stderr.write(`[google-surf-mcp] research broker shutdown failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
 }
 
 const server = createServer((socket) => {

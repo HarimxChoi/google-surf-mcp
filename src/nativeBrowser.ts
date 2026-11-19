@@ -497,18 +497,19 @@ export class NativeChromeBrowser implements NativeBrowserHandle {
     await this.waitForNavigationSlot();
     const child = spawn(
       this.executablePath,
-      buildNativeChromeArgs(this.profileDir, port, targetUrl),
+      buildNativeChromeArgs(this.profileDir, port, 'about:blank'),
       { stdio: 'ignore', windowsHide: true },
     );
     if (child.pid) windowGuard?.stdin?.end(`${child.pid}\n`);
     this.active.add(child);
     let browser: Browser | undefined;
     try {
-      const hostnames = [hostname, 'consent.google.com'];
+      // Commit a local document before CDP attaches; an in-flight first navigation can stall attachment.
+      const hostnames = [''];
       await waitForTarget(port, hostnames, child);
       await new Promise<void>((resolve) => setTimeout(resolve, this.settleMs));
       browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 7_500 });
-      const page = await targetPage(browser, hostnames, targetUrl);
+      const page = await targetPage(browser, hostnames, 'about:blank');
       await this.verifyPageAutomationState(page);
       const session: NativeSession = { child, browser, pages: [page], windowGuard, dead: false };
       child.once('exit', () => { session.dead = true; });

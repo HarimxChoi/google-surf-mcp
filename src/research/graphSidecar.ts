@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
 import { MultiDirectedGraph, UndirectedGraph } from 'graphology';
-import { connectedComponents, stronglyConnectedComponents } from 'graphology-components';
+import { connectedComponents } from 'graphology-components';
 import { bidirectional } from 'graphology-shortest-path';
 import type { GraphAnalysis, GraphEdgeRecord, GraphNodeRecord, GraphProjection } from './contracts.js';
 
@@ -280,17 +280,22 @@ export function rankGraphProjection(
   query: string,
   limit = 20,
   preferredSeeds: string[] = [],
+  eligible?: (node: GraphProjection['nodes'][number]) => boolean,
 ): GraphRankedNode[] {
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const exactQuerySeeds = projection.nodes.filter((node) => (
+  const eligibleNodes = eligible ? projection.nodes.filter(eligible) : projection.nodes;
+  const eligibleIds = new Set(eligibleNodes.map(node => node.node_id));
+  const scopedProjection = eligible ? { ...projection, nodes: eligibleNodes } : projection;
+  const scopedPreferred = preferredSeeds.filter(id => eligibleIds.has(id));
+  const exactQuerySeeds = eligibleNodes.filter((node) => (
     [node.node_id, node.label, node.source_id, node.url]
       .some((value) => value?.trim().toLocaleLowerCase() === normalizedQuery)
   )).map((node) => node.node_id).slice(0, 8);
   const seeds = exactQuerySeeds.length
-    ? [...new Set([...exactQuerySeeds, ...preferredSeeds.slice(0, 8)])].slice(0, 16)
-    : preferredSeeds.length
-      ? [...new Set(preferredSeeds)].slice(0, 16)
-      : graphQuerySeeds(projection, query, 16);
+    ? [...new Set([...exactQuerySeeds, ...scopedPreferred.slice(0, 8)])].slice(0, 16)
+    : scopedPreferred.length
+      ? [...new Set(scopedPreferred)].slice(0, 16)
+      : graphQuerySeeds(scopedProjection, query, 16);
   const ranked = localizedPageRankVector(projection, seeds);
   if (!ranked) return [];
   const cappedLimit = Math.max(1, limit);
@@ -298,7 +303,7 @@ export function rankGraphProjection(
   for (let position = 0; position < ranked.index.node_ids.length; position++) {
     const score = ranked.ranks[position];
     const node = projection.nodes[position];
-    if (score <= 0 || !node || !RETRIEVABLE_NODE_KINDS.has(node.kind)) continue;
+    if (score <= 0 || !node || !RETRIEVABLE_NODE_KINDS.has(node.kind) || (eligible && !eligible(node))) continue;
     const row = { node, score };
     if (top.length < cappedLimit) {
       top.push(row);
@@ -316,6 +321,39 @@ export function rankGraphProjection(
     }
   }
   return top.sort((a, b) => b.score - a.score || a.node.node_id.localeCompare(b.node.node_id));
+}
+
+export function stronglyConnectedCount(graph: MultiDirectedGraph): number {
+  const visited = new Set<string>();
+  const order: string[] = [];
+  // Iterative Kosaraju avoids the dependency's recursive DFS on long lineage chains.
+  for (const root of graph.nodes()) {
+    if (visited.has(root)) continue;
+    visited.add(root);
+    const stack = [{ node: root, neighbors: graph.outboundNeighbors(root), next: 0 }];
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      if (frame.next === frame.neighbors.length) { order.push(frame.node); stack.pop(); continue; }
+      const node = frame.neighbors[frame.next++];
+      if (!visited.has(node)) {
+        visited.add(node); stack.push({ node, neighbors: graph.outboundNeighbors(node), next: 0 });
+      }
+    }
+  }
+  visited.clear();
+  let count = 0;
+  for (let index = order.length - 1; index >= 0; index--) {
+    const root = order[index];
+    if (visited.has(root)) continue;
+    count++;
+    const pending = [root]; visited.add(root);
+    while (pending.length) {
+      for (const node of graph.inboundNeighbors(pending.pop()!)) {
+        if (!visited.has(node)) { visited.add(node); pending.push(node); }
+      }
+    }
+  }
+  return count;
 }
 
 export function analyzeGraphProjection(
@@ -336,7 +374,7 @@ export function analyzeGraphProjection(
     randomWalk: false,
   });
   const componentCount = connectedComponents(undirected).length;
-  const stronglyConnectedComponentCount = stronglyConnectedComponents(directed).length;
+  const stronglyConnectedComponentCount = stronglyConnectedCount(directed);
   const communityCount = new Set(Object.values(communities)).size;
   const ppr = options.seeds?.length
     ? personalizedPageRank(projection, options.seeds)

@@ -18,9 +18,21 @@ function assertPortableToolSchemas(tools) {
     visit(tool.outputSchema, `${tool.name}.outputSchema`);
   }
   const ranges = tools.find(tool => tool.name === 'extract')?.inputSchema.properties.exclude_ranges;
+  const queryDescription = tools.find(tool => tool.name === 'extract')?.inputSchema.properties.query?.description ?? '';
+  if (!queryDescription.includes('identifiers, numeric values, signs, units, and version constraints')) {
+    throw new Error('extract query preservation guidance missing');
+  }
   if (ranges?.maxItems !== 16 || ranges.items?.minItems !== 2 || ranges.items?.maxItems !== 2
     || ranges.items?.items?.type !== 'integer' || ranges.items.items.minimum !== 0) {
     throw new Error('extract compact range schema contract mismatch');
+  }
+  for (const name of ['search', 'search_parallel']) {
+    const output = tools.find(tool => tool.name === name)?.outputSchema;
+    const scope = name === 'search' ? output?.properties?.site_scope
+      : output?.properties?.results?.items?.properties?.site_scope;
+    if (scope?.properties?.path?.type !== 'string' || scope.required?.includes('path')) {
+      throw new Error(`${name} optional site_scope.path schema contract mismatch`);
+    }
   }
 }
 
@@ -170,20 +182,22 @@ try {
     throw new Error(`research-off evidence routing failed: ${JSON.stringify(evidence.structuredContent)}`);
   }
   const scoped = await offClient.callTool({ name: 'search_parallel', arguments: {
-    queries: ['site:example.org booking', 'site:outside.test booking'], limit: 2, extract_mode: 'none',
+    queries: ['site:example.org booking', 'site:outside.test booking', 'site:example.org/docs booking'], limit: 2, extract_mode: 'none',
   } });
   const scopedGroups = scoped.structuredContent?.results;
   if (scoped.isError || scopedGroups?.[0]?.results?.length !== 1
     || scopedGroups?.[1]?.results?.length !== 0
     || scopedGroups?.[1]?.site_scope?.domain !== 'outside.test'
-    || scopedGroups?.[1]?.site_scope?.removed !== 1) {
+    || scopedGroups?.[1]?.site_scope?.removed !== 1
+    || scopedGroups?.[2]?.results?.length !== 0 || scopedGroups?.[2]?.site_scope?.path !== '/docs') {
     throw new Error('search_parallel site_scope output contract mismatch');
   }
   const scopedSingle = await offClient.callTool({ name: 'search', arguments: {
-    query: 'site:outside.test booking', limit: 2, extract_mode: 'none',
+    query: 'site:outside.test/docs booking', limit: 2, extract_mode: 'none',
   } });
   if (scopedSingle.isError || scopedSingle.structuredContent?.results?.length !== 0
     || scopedSingle.structuredContent?.site_scope?.domain !== 'outside.test'
+    || scopedSingle.structuredContent?.site_scope?.path !== '/docs'
     || !scopedSingle.structuredContent?.degraded_reasons?.includes('site_scope_mismatch')) {
     throw new Error('search site_scope output contract mismatch');
   }
@@ -415,6 +429,7 @@ try {
       action: 'rebuild',
       project_id: 'smoke',
       roots: [{ label: 'repo', path: source }],
+      wait_for_completion: true,
     },
   });
   if (indexed.isError || indexed.structuredContent?.index?.added_count !== 1) {
@@ -426,6 +441,7 @@ try {
       action: 'rebuild',
       project_id: 'smoke',
       roots: [{ label: 'repo', path: source }],
+      wait_for_completion: true,
     },
   });
   if (reused.isError || reused.structuredContent?.index?.reused !== true) {

@@ -22,17 +22,19 @@ API 키나 별도 DB 서버 없이 시작하고, 자료와 프로젝트 기록�
 
 ## 검증 결과
 
-### Google AI Mode와 웹 검색 비교
+### GAIA Level 3
 
-SQLite WAL의 동시 쓰기 제약, PyTorch의 `inference_mode()`와 `model.eval()` 차이 등 개발 질문 8개를 비교했습니다. 주제는 Python TaskGroup, SQLite, Kubernetes probe, Fetch, Redis TTL, Docker Compose, PyTorch, Rust입니다.
+**Google Surf와 DeepSeek Flash(`deepseek-flash`)를 연결해 GAIA 레벨 3 공개 검증셋 26문항 중 22문항(84.62%)을 맞혔습니다.** 검색에는 Google Surf를 사용했고, 근거 확인과 최종 제출은 별도 평가 러너에서 처리했습니다.
 
-Google Surf와 함께 사용한 답변 모델은 **[DeepSeek V4.1 Flash (1017)](https://api-docs.deepseek.com/updates/)** (`deepseek-flash`, temperature 0, thinking 비활성화)입니다.
+| 에이전트 | 평가 세트 | 레벨 3 |
+| --- | --- | ---: |
+| **Google Surf + DeepSeek Flash** | [공개 검증셋](https://huggingface.co/datasets/gaia-benchmark/GAIA) | **22/26 (84.62%)** |
+| [Alita · Claude Sonnet 4 + GPT-4o](https://arxiv.org/html/2505.20286) | 공개 검증셋, pass@3 | 20/26 (76.92%) |
+| [xpander.ai · Claude Opus 4.7 → GPT-5.5 Pro](https://github.com/xpander-ai/xpander-gaia-benchmark-results) | 공개 검증셋, pass@2 | 19/26 (73.08%) |
+| [Shadow Harness V8.01](https://gaia-benchmark-leaderboard.hf.space/) | 공식 테스트셋 | 45/49 (91.84%) |
+| [Keen AgenticOS V1.1](https://gaia-benchmark-leaderboard.hf.space/) | 공식 테스트셋 | 44/49 (89.80%) |
 
-| 평가 | Google Surf + DeepSeek | Google AI Mode |
-| --- | ---: | ---: |
-| 결과 | **22/24** | **24/24** |
-
-질문당 필수 확인 항목 3개의 충족 수이며, 답변 전체의 정답률은 아닙니다. 2026-11-07 실행 기록으로, 현재 버전을 새로 측정한 결과는 아닙니다.
+[공식 테스트셋](https://huggingface.co/spaces/gaia-benchmark/leaderboard/blob/main/app.py)은 공개 검증셋과 문항이 다릅니다. Surf가 맞힌 문항 중 두 개는 검색 결과에 공개 풀이가 나왔으며, 두 문항 모두 점수에 포함했습니다.
 
 ### Auto Ontology 비교
 

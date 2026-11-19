@@ -1,8 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { cleanAssertionContext, matchesAssertionContext, renderLiteralAnswer } from './answerEvidence.js';
+import { jobView } from './jobView.js';
+import { hasScope, matchesScope } from './searchFilters.js';
+import { legacyCatalogFields } from './catalogFields.js';
+import { inspectImport, importLines } from './bulkImport.js';
+import type { AssertionContext, EvidenceReference, KnowledgeBundle, LiteralAnswerInput } from './contracts.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createReadStream } from 'node:fs';
 import { createRequire } from 'node:module';
-import { mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { fenceUntrustedContent } from '../response.js';
 import { usableEvidence } from '../extractionQuality.js';
@@ -20,7 +26,7 @@ import type {
   EntityAliasRecord, EntityLinkCandidate, EntityOperationRecord, EntityRecord, EvidenceRecord, FocusedRecordReadback,
   ExperimentRunRecord, ExperimentStatus, GraphAnalysis, GraphArtifact, GraphProjection,
   IntentRevisionRecord,
-  KnowledgeJobRecord, KnowledgeJobStatus, KnowledgeJobSummary, LocalSearchFamilies, LocalSearchHit,
+  KnowledgeJobRecord, KnowledgeJobStatus, KnowledgeJobSummary, KnowledgeJobView, LocalSearchFamilies, LocalSearchHit,
   MemorySessionRecord,
   OntologyTermRecord, PlanRevisionRecord, ProjectDetail, ProjectIndexResult,
   ProjectForgetPreview, ProjectRecord, RecordForgetPreview, ResearchReceipt, RetrievalIndexItem,
@@ -34,7 +40,7 @@ import { compactSourceVectorItems, prunedVectorIds, retrievalGenerationDigest } 
 import { aliasId, entityId, normalizeEntityName, rankEntityCandidates } from './entities.js';
 import { buildGraphProjection, type ProjectGraphSource } from './graphProjection.js';
 import {
-  graphSeedNodes, isRetrievalGraphEdge, rankGraphProjection, runGraphSidecar,
+  graphQuerySeeds, graphSeedNodes, isRetrievalGraphEdge, rankGraphProjection, runGraphSidecar,
 } from './graphSidecar.js';
 import { exportInteractiveGraphVisualization } from './interactiveVisualization.js';
 import { searchableByPolicy } from './inventory.js';
@@ -43,10 +49,10 @@ import {
   type RepositoryClient, type RepositoryDecision, type RepositoryReadMode,
 } from './github.js';
 import {
-  inventoryProject, inventoryProjectIncremental,
+  inventoryProject, inventoryProjectIncremental, previewProjectFiles,
   type ProjectPathChange, type ProjectRootInput,
 } from './projectInventory.js';
-import { ResearchStore, type CodeSourceManifestEntry } from './store.js';
+import { ResearchStore, type CodeSourceManifestEntry, type KnowledgeWriteKey } from './store.js';
 import { queryResponseDeadlineMs, ResearchQueryInterrupted, waitForQuery } from './queryControl.js';
 import {
   exportGraphVisualization, exportNeo4jVisualization,
@@ -304,7 +310,10 @@ interface EvidenceInput {
 }
 
 interface AssertionInput {
+  idempotency_key?: string;
   unit?: string;
+  context?: AssertionContext;
+  evidence_refs?: EvidenceReference[];
   project_id: string;
   subject: string;
   predicate: string;
@@ -336,9 +345,10 @@ interface KnowledgeJobInput {
   schema_version: string;
   algorithm_version: string;
   affected_source_ids?: string[];
+  request?: Record<string, unknown>;
 }
 
-const GRAPH_ALGORITHM_VERSION = 'graphology-v10-local-ppr-no-containment';
+const GRAPH_ALGORITHM_VERSION = 'graphology-v14-assertion-context';
 const CODE_ALGORITHM_VERSION = 'tree-sitter-v8-query-global-linking';
 const RETRIEVAL_ALGORITHM_VERSION = 'exact-bm25-e5-hnsw-v1';
 
@@ -436,8 +446,9 @@ function shortLabel(title: string): string {
 function exactTerms(...values: Array<string | undefined>): string[] {
   return [...new Set(values.flatMap((value) => {
     if (!value) return [];
-    const normalized = normalizeEntityName(value);
-    return normalized ? [normalized] : [];
+    const identifiers = (value.match(/[\p{L}\p{N}][\p{L}\p{N}_.:/-]*/gu) ?? [])
+      .filter(token => /[_:/.-]|\d/.test(token));
+    return [value, ...identifiers].map(normalizeEntityName).filter(Boolean);
   }))];
 }
 
@@ -466,17 +477,9 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-const MEASUREMENT_CONTRACT_FIELDS = [
-  'metric', 'value', 'unit', 'evaluator_contract', 'dataset', 'split', 'tokenizer',
-  'context_length', 'targets', 'carrier_precision', 'source_locator',
-] as const;
-const MEASUREMENT_IDENTITY_FIELDS = MEASUREMENT_CONTRACT_FIELDS.filter((field) => field !== 'value');
-const BYTE_LEDGER_FIELDS = ['byte_components', 'denominator', 'scope'] as const;
-
 function normalizeCatalogFields(
   kind: CatalogAssetKind,
   input: Record<string, unknown> | undefined,
-  missingFields: string[],
 ): Record<string, unknown> {
   const fields = { ...(input ?? {}) };
   if (kind === 'project') {
@@ -491,25 +494,6 @@ function normalizeCatalogFields(
       fields[key] = [...new Set((fields[key] as string[])
         .map((value) => cleanText(value, key.slice(0, -1), limit)))];
     }
-  }
-  const required = kind === 'measurement'
-    ? MEASUREMENT_CONTRACT_FIELDS
-    : kind === 'byte_ledger' ? BYTE_LEDGER_FIELDS : [];
-  const undeclared = required.filter((field) => fields[field] === undefined && !missingFields.includes(field));
-  if (undeclared.length) {
-    throw new Error(
-      `${kind} fields missing: ${undeclared.join(', ')}; provide values or list unknowns in missing_fields`,
-    );
-  }
-  if (kind === 'measurement') {
-    fields.comparison_contract_id = createHash('sha256').update(stableJson(Object.fromEntries(
-      MEASUREMENT_IDENTITY_FIELDS.map((field) => [field, fields[field] ?? null]),
-    ))).digest('hex');
-  }
-  if (kind === 'byte_ledger') {
-    fields.ledger_scope_id = createHash('sha256').update(stableJson(Object.fromEntries(
-      BYTE_LEDGER_FIELDS.map((field) => [field, fields[field] ?? null]),
-    ))).digest('hex');
   }
   return fields;
 }
@@ -614,6 +598,17 @@ async function mapConcurrent<T, R>(
 
 type RetrievalLane = NonNullable<LocalSearchHit['retrieval_family']>;
 
+function retrievalLanes(filters?: ResearchSearchFilters): Set<RetrievalLane> {
+  if (filters?.assertion_context) {
+    if (!cleanAssertionContext(filters.assertion_context)) throw new Error('assertion_context needs at least one field');
+    if (filters.retrieval_lanes && !filters.retrieval_lanes.includes('graph')) {
+      throw new Error('assertion_context requires the graph retrieval lane');
+    }
+    return new Set(['graph']);
+  }
+  return new Set(filters?.retrieval_lanes ?? ['exact', 'bm25', 'vector', 'graph']);
+}
+
 function isResearchQueryTimeout(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /(?:query|transaction).*?(?:exceeded the timeout|timed out|timeout)/i.test(message);
@@ -643,7 +638,9 @@ function fuseRankedGroups(
   for (const rows of groups) {
     rows.forEach((row, index) => {
       const key = row.url || row.document_id;
-      const contribution = 1 / (60 + index + 1);
+      const roleWeight = row.role === 'inventory' ? 0.75
+        : row.role === 'method' || row.role === 'result' ? 1.1 : 1;
+      const contribution = roleWeight / (60 + index + 1);
       const existing = ranked.get(key);
       if (existing) {
         existing.score += contribution;
@@ -832,6 +829,7 @@ export class ResearchService {
   private readonly searchReads = new Map<string, Promise<unknown>>();
   private readonly searchReadLease = new AsyncLocalStorage<{ closed: boolean; reads: Set<Promise<unknown>> }>();
   private readonly scheduledJobIds = new Set<string>();
+  private readonly catalogBatches = new Map<string, Set<string>>();
   private readonly graphTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly embeddings: EmbeddingProvider;
   private readonly repositoryClient: RepositoryClient;
@@ -1055,7 +1053,9 @@ export class ResearchService {
           if (!pendingRebuildProjects.has(project.project_id)) this.scheduleGraph(project.project_id);
         }
         for (const job of pendingJobs) {
-          if (job.kind === 'retrieval_index' && job.schema_version === 'catalog-record-v1') {
+          if (job.kind === 'source_sync' || job.kind === 'bulk_import') {
+            this.scheduleProjectOperation(job);
+          } else if (job.kind === 'retrieval_index' && job.schema_version === 'catalog-record-v1') {
             this.scheduleCatalogIndex(job);
           } else if (job.kind === 'retrieval_index' && job.schema_version === 'capture-index-v1') {
             this.scheduleCaptureIndex(job);
@@ -1164,6 +1164,20 @@ export class ResearchService {
     return await waitForQuery(work, signal);
   }
 
+  private async laneBudget<T>(lane: RetrievalLane, filters: ResearchSearchFilters | undefined,
+    operation: () => Promise<T>): Promise<T> {
+    const budget = filters?.lane_budget_ms?.[lane];
+    if (budget === undefined) return await operation();
+    if (!Number.isFinite(budget) || budget < 50 || budget > 300_000) throw new Error('lane_budget_ms must be between 50 and 300000');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation(), new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`research query ${lane} lane timeout after ${budget}ms`)), budget);
+        timer.unref();
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
   async withSearchReadLease<T>(operation: () => Promise<T>, release: () => void): Promise<T> {
     const lease = { closed: false, reads: new Set<Promise<unknown>>() };
     return await this.store.withRetrievalReadContext(() => this.searchReadLease.run(lease, async () => {
@@ -1242,74 +1256,77 @@ export class ResearchService {
   private scheduleCatalogIndex(job: KnowledgeJobRecord): void {
     if (this.scheduledJobIds.has(job.job_id)) return;
     this.scheduledJobIds.add(job.job_id);
+    const pending = this.catalogBatches.get(job.project_id);
+    if (pending) { pending.add(job.job_id); return; }
+    const queue = new Set([job.job_id]);
+    this.catalogBatches.set(job.project_id, queue);
     this.schedule(async () => {
+      const completed: KnowledgeJobRecord[] = [];
+      const processed = new Set<string>();
       try {
-        let current = await this.store.getKnowledgeJob(job.job_id);
-        if (!current || current.status === 'done' || current.status === 'cancelled') return;
-        if (current.status === 'failed') {
-          current = await this.transitionKnowledgeJob({
-            project_id: current.project_id, job_id: current.job_id, status: 'queued',
-          });
+        // A bulk write publishes retrieval/graph once for the accumulated project batch.
+        await new Promise(resolveDelay => setTimeout(resolveDelay, 25));
+        while (queue.size) {
+          const id = queue.values().next().value!;
+          queue.delete(id);
+          processed.add(id);
+          let current = await this.store.getKnowledgeJob(id);
+          if (!current || ['done', 'cancelled'].includes(current.status)) continue;
+          if (current.status === 'failed') current = await this.transitionKnowledgeJob({
+            project_id: current.project_id, job_id: id, status: 'queued' });
+          if (current.status === 'queued') current = await this.transitionKnowledgeJob({
+            project_id: current.project_id, job_id: id, status: 'running' });
+          let failed = false;
+          let indexed = 0;
+          let failedCount = 0;
+          try {
+            for (let index = 0; index < current.affected_source_ids.length; index++) {
+              if (await this.knowledgeJobCancelled(id)) break;
+              const assetId = current.affected_source_ids[index];
+              await this.updateKnowledgeJobProgress(job.project_id, id, 'indexing', index, current.affected_source_ids.length);
+              try {
+                const record = await this.store.getCatalogRecord(job.project_id, assetId);
+                if (!record) throw new Error('catalog record not found');
+                await this.indexCatalogRecord(record);
+                indexed++;
+              } catch (error) { failed = true; failedCount++; await this.failKnowledgeJob(id, error, assetId); }
+              if (await this.checkpointKnowledgeJobForDrain(job.project_id, id, 'indexing', index + 1,
+                current.affected_source_ids.length)) return;
+            }
+            if (failed) {
+              const latest = (await this.store.getKnowledgeJob(id))!;
+              await this.store.putKnowledgeJob({ ...latest, stage: 'lexical_partial', completed_items: indexed + failedCount,
+                total_items: current.affected_source_ids.length, result_counts: { indexed, failed: failedCount },
+                revision: (latest.revision ?? 1) + 1, updated_at: new Date().toISOString() });
+            }
+            if (!failed && !await this.knowledgeJobCancelled(id)) {
+              await this.updateKnowledgeJobProgress(job.project_id, id, 'lexical_ready', current.affected_source_ids.length,
+                current.affected_source_ids.length);
+              completed.push(current);
+            }
+          } catch (error) { await this.failKnowledgeJob(id, error); }
         }
-        if (current.status === 'queued') {
-          await this.transitionKnowledgeJob({
-            project_id: current.project_id,
-            job_id: current.job_id,
-            status: 'running',
-          });
+        if (!completed.length || this.drainRequested) return;
+        await this.materializeRetrievalIndex(job.project_id, 'document');
+        await this.invalidateGraph(job.project_id, false);
+        await this.materializeGraph([job.project_id]);
+        for (const current of completed) {
+          if (await this.knowledgeJobCancelled(current.job_id)) continue;
+          await this.transitionKnowledgeJob({ project_id: job.project_id, job_id: current.job_id,
+            status: 'done', result_digest: current.source_hash,
+            result_counts: { indexed: current.affected_source_ids.length, failed: 0 } });
+          const receipt = await this.store.getOperationReceiptByJobId(current.job_id);
+          if (receipt) await this.store.updateOperationReceipt({ ...receipt, index_state: 'current' });
         }
-        await this.updateKnowledgeJobProgress(
-          current.project_id, current.job_id, 'indexing', 0, current.affected_source_ids.length,
-        );
-        if (await this.checkpointKnowledgeJobForDrain(
-          current.project_id, current.job_id, 'indexing', 0, current.affected_source_ids.length,
-        )) return;
-        for (let index = 0; index < current.affected_source_ids.length; index++) {
-          const assetId = current.affected_source_ids[index];
-          if (await this.knowledgeJobCancelled(current.job_id)) return;
-          const record = await this.store.getCatalogRecord(current.project_id, assetId);
-          if (record) await this.indexCatalogRecord(record);
-          await this.updateKnowledgeJobProgress(
-            current.project_id, current.job_id, 'indexing', index + 1, current.affected_source_ids.length,
-          );
-          if (await this.checkpointKnowledgeJobForDrain(
-            current.project_id, current.job_id, 'indexing', index + 1,
-            current.affected_source_ids.length,
-          )) return;
-        }
-        if (await this.knowledgeJobCancelled(current.job_id)) return;
-        await this.updateKnowledgeJobProgress(
-          current.project_id, current.job_id, 'retrieval_publish', 0, 1,
-        );
-        await this.materializeRetrievalIndex(current.project_id, 'document');
-        if (await this.checkpointKnowledgeJobForDrain(
-          current.project_id, current.job_id, 'retrieval_publish', 1, 1,
-        )) return;
-        if (await this.knowledgeJobCancelled(current.job_id)) return;
-        await this.invalidateGraph(current.project_id, false);
-        await this.materializeGraph([current.project_id]);
-        if (await this.knowledgeJobCancelled(current.job_id)) return;
-        await this.transitionKnowledgeJob({
-          project_id: current.project_id,
-          job_id: current.job_id,
-          status: 'done',
-          result_digest: current.source_hash,
-        });
-        const receipt = await this.store.getOperationReceiptByJobId(current.job_id);
-        if (receipt) await this.store.updateOperationReceipt({ ...receipt, index_state: 'current' });
       } catch (error) {
-        const current = await this.store.getKnowledgeJob(job.job_id).catch(() => undefined);
-        if (current && current.status !== 'failed' && current.status !== 'done'
-          && current.status !== 'cancelled') {
-          await this.transitionKnowledgeJob({
-            project_id: current.project_id,
-            job_id: current.job_id,
-            status: 'failed',
-            error: error instanceof Error ? error.message : String(error),
-          }).catch(() => {});
-        }
+        for (const current of completed) await this.failKnowledgeJob(current.job_id, error);
       } finally {
-        this.scheduledJobIds.delete(job.job_id);
+        this.catalogBatches.delete(job.project_id);
+        for (const id of [...processed, ...queue]) this.scheduledJobIds.delete(id);
+        for (const id of queue) {
+          const next = await this.store.getKnowledgeJob(id);
+          if (next && !this.drainRequested) this.scheduleCatalogIndex(next);
+        }
       }
     });
   }
@@ -1321,6 +1338,11 @@ export class ResearchService {
       try {
         let current = await this.store.getKnowledgeJob(job.job_id);
         if (!current || current.status === 'done' || current.status === 'cancelled') return;
+        const project = await this.store.getProject(current.project_id);
+        if (project?.active_source_snapshot_id !== current.source_hash) {
+          await this.cancelJob(current.project_id, current.job_id, 'superseded source snapshot; latest snapshot owns derived indexing');
+          return;
+        }
         if (current.status === 'queued') {
           current = await this.transitionKnowledgeJob({
             project_id: current.project_id,
@@ -1582,7 +1604,7 @@ export class ResearchService {
       ...(input.protected_parent_ids !== undefined ? { protected_parent_ids: input.protected_parent_ids } : {}),
     };
     if (!Object.keys(fields).length) throw new Error('project_update requires at least one profile field');
-    const receipt = await this.writeCatalogRecord({
+    const receipt = await this.writeCatalogRecordInternal({
       project_id: project.project_id,
       kind: 'project',
       operation: input.expected_revision === 0 ? 'create' : 'patch',
@@ -1592,7 +1614,7 @@ export class ResearchService {
       fields,
       protected: true,
       access_tier: 'hot',
-    });
+    }, true);
     return { project: await this.ensureProject(project.project_id), receipt };
   }
 
@@ -1702,7 +1724,9 @@ export class ResearchService {
       : proposed.filter((record) => currentRevisionIds.has(record.revision.revision_id));
     for (const record of applicable) {
       const existing = await this.store.getCatalogAsset(project.project_id, record.asset.asset_id);
-      receipts.push(await this.writeCatalogRecord({
+      const restoreProfile = record.asset.kind === 'project' && record.asset.asset_id === project.project_id
+        && record.asset.project_id === project.project_id && payload.project?.project_id === project.project_id;
+      receipts.push(await this.writeCatalogRecordInternal({
         project_id: project.project_id,
         kind: record.asset.kind,
         operation: existing ? 'patch' : 'create',
@@ -1721,7 +1745,7 @@ export class ResearchService {
         effective_at: record.revision.effective_at,
         source_sequence: record.revision.source_sequence,
         source_reference: record.revision.source_reference,
-      }));
+      }, restoreProfile));
     }
     const updated = await this.ensureProject(project.project_id);
     const journalId = createHash('sha256').update(
@@ -1813,6 +1837,10 @@ export class ResearchService {
       content_hash: chunkSetId,
       catalog_asset_id: record.asset.asset_id,
       catalog_revision_id: record.revision.revision_id,
+      exact_terms: exactTerms(record.asset.asset_id, ...['model_id', 'metric', 'evaluator_contract', 'namespace']
+        .flatMap(key => typeof record.revision.fields[key] === 'string' ? [String(record.revision.fields[key])] : [])),
+      role: record.revision.fields.document_role ?? (record.asset.kind === 'method' ? 'method'
+        : record.asset.kind === 'measurement' ? 'result' : undefined),
       updated_at: now,
     }, {
       project_id: record.asset.project_id,
@@ -1824,12 +1852,21 @@ export class ResearchService {
   }
 
   async writeCatalogRecord(input: CatalogWriteInput): Promise<DurableWriteReceipt> {
+    return await this.writeCatalogRecordInternal(input, false);
+  }
+
+  private async writeCatalogRecordInternal(input: CatalogWriteInput, updateProfile: boolean): Promise<DurableWriteReceipt> {
     const project = await this.ensureProject(input.project_id);
+    if (!input.idempotency_key.trim()) throw new Error('idempotency_key required');
+    if (input.kind === 'project' && !updateProfile && (!input.asset_id || input.asset_id === project.project_id)) {
+      throw new Error('root project profile changes require project_update; use kind=track for a subarea');
+    }
+    const previousReceipt = await this.store.getOperationReceipt(project.project_id, input.idempotency_key);
     const assetIdValue = input.asset_id?.trim()
       || (input.kind === 'project' ? project.project_id : undefined)
-      || `${project.project_id}:${input.kind}:${randomUUID()}`;
+      || previousReceipt?.record_id
+      || `${project.project_id}:${input.kind}:${createHash('sha256').update(input.idempotency_key).digest('hex').slice(0, 32)}`;
     if (input.operation !== 'create' && !input.asset_id) throw new Error('asset_id required');
-    if (!input.idempotency_key.trim()) throw new Error('idempotency_key required');
     if (input.body !== undefined && input.body_path) throw new Error('body and body_path cannot be combined');
     if (input.body !== undefined && Buffer.byteLength(input.body, 'utf8') > 64 * 1024 * 1024) {
       throw new Error('body exceeds 67108864 UTF-8 bytes; use body_path for a streamed versioned attachment');
@@ -1858,8 +1895,8 @@ export class ResearchService {
       );
     }
     const missingFields = [...new Set(input.missing_fields ?? [])];
-    const fields = normalizeCatalogFields(input.kind, input.fields, missingFields);
-    const { body_path: _bodyPath, fields: _fields, ...inputWithoutPath } = input;
+    const fields = normalizeCatalogFields(input.kind, input.fields);
+    const { body_path: _bodyPath, fields: _fields, missing_fields: _missingFields, ...inputWithoutPath } = input;
     const normalized = {
       ...inputWithoutPath,
       project_id: project.project_id,
@@ -1868,20 +1905,32 @@ export class ResearchService {
       aliases: [...new Set(input.aliases ?? [])],
       evidence_ids: [...new Set(input.evidence_ids ?? [])],
       artifact_references: input.artifact_references ?? [],
-      missing_fields: missingFields,
+      ...(input.missing_fields !== undefined || input.operation === 'create' ? { missing_fields: missingFields } : {}),
       ...(input.effective_at ? { effective_at: cleanTime(input.effective_at, 'effective_at') } : {}),
       ...(bodyAttachment ? { body_attachment: bodyAttachment } : {}),
     };
+    let requestHash = durableRequestHash(normalized);
+    if (previousReceipt && previousReceipt.request_hash !== requestHash) {
+      const legacyHash = durableRequestHash({ ...normalized, fields: legacyCatalogFields(input.kind, fields),
+        missing_fields: missingFields });
+      if (previousReceipt.request_hash === legacyHash) requestHash = legacyHash;
+    }
     const receipt = await this.store.commitCatalogRevision({
       ...normalized,
       asset_id: assetIdValue,
       idempotency_key: input.idempotency_key,
-      request_hash: durableRequestHash(normalized),
+      request_hash: requestHash,
+      update_project_profile: updateProfile,
     });
-    if (receipt.changed) await this.invalidateGraph(project.project_id, false);
-    if (receipt.index_job_id) {
-      const job = await this.store.getKnowledgeJob(receipt.index_job_id);
-      if (job) this.scheduleCatalogIndex(job);
+    try {
+      if (receipt.changed && receipt.applied_this_request) await this.invalidateGraph(project.project_id, false);
+      if (receipt.index_job_id) {
+        const job = await this.store.getKnowledgeJob(receipt.index_job_id);
+        if (job) this.scheduleCatalogIndex(job);
+      }
+    } catch (error) {
+      return { ...receipt, post_commit_warning: { stage: 'index_scheduling',
+        message: String(error).slice(0, 1000), retry_action: 'job_resume' } };
     }
     return receipt;
   }
@@ -2335,11 +2384,23 @@ export class ResearchService {
     };
   }
 
-  async jobStatus(projectIdValue: string, jobId: string): Promise<KnowledgeJobRecord> {
+  async jobStatus(projectIdValue: string, jobId: string): Promise<KnowledgeJobView> {
     const project = await this.ensureProject(projectIdValue);
     const job = await this.store.getKnowledgeJob(jobId);
     if (!job || job.project_id !== project.project_id) throw new Error('job_id must belong to the project');
-    return job;
+    return jobView(job);
+  }
+
+  async jobSources(projectIdValue: string, jobId: string, offset = 0, limit = 100): Promise<{
+    job_id: string; source_ids: string[]; total: number; next_offset?: number;
+  }> {
+    const project = await this.ensureProject(projectIdValue);
+    const job = await this.store.getKnowledgeJob(jobId);
+    if (!job || job.project_id !== project.project_id) throw new Error('job_id must belong to the project');
+    const start = Math.max(0, Math.floor(offset));
+    const end = start + Math.min(500, Math.max(1, Math.floor(limit)));
+    return { job_id: jobId, source_ids: job.affected_source_ids.slice(start, end), total: job.affected_source_ids.length,
+      ...(end < job.affected_source_ids.length ? { next_offset: end } : {}) };
   }
 
   async waitForJob(
@@ -2347,7 +2408,7 @@ export class ResearchService {
     jobId: string,
     afterRevision = 0,
     timeoutMs = 30_000,
-  ): Promise<{ job: KnowledgeJobRecord; timed_out: boolean }> {
+  ): Promise<{ job: KnowledgeJobView; timed_out: boolean }> {
     const deadline = Date.now() + Math.min(Math.max(timeoutMs, 0), 60_000);
     for (;;) {
       const job = await this.jobStatus(projectIdValue, jobId);
@@ -2365,9 +2426,9 @@ export class ResearchService {
     projectIdValue: string,
     jobId: string,
     reason = 'cancelled by client',
-  ): Promise<KnowledgeJobRecord> {
+  ): Promise<KnowledgeJobView> {
     const project = await this.ensureProject(projectIdValue);
-    return await this.locked(`job-state:${jobId}`, async () => {
+    return jobView(await this.locked(`job-state:${jobId}`, async () => {
       const job = await this.store.getKnowledgeJob(jobId);
       if (!job || job.project_id !== project.project_id) {
         throw new Error('job_id must belong to the project');
@@ -2382,7 +2443,177 @@ export class ResearchService {
         cancel_reason: cleanText(reason, 'cancel_reason', 500),
         updated_at: now,
       });
+    }));
+  }
+
+  async startProjectOperation(projectIdValue: string, request: Record<string, unknown>): Promise<KnowledgeJobView> {
+    const project = await this.ensureProject(projectIdValue);
+    const hash = createHash('sha256').update(stableJson(request))
+      .update(String(request.idempotency_key ?? randomUUID())).digest('hex');
+    const job = await this.queueKnowledgeJob({ project_id: project.project_id,
+      kind: request.operation === 'import' ? 'bulk_import' : 'source_sync', source_hash: hash,
+      schema_version: 'project-operation-v1', algorithm_version: 'v1', request });
+    if (job.status === 'queued') this.scheduleProjectOperation(job);
+    return jobView(job);
+  }
+
+  async importRecords(input: { project_id: string; path: string; dry_run?: boolean; allow_partial?: boolean }) {
+    await this.ensureProject(input.project_id);
+    const path = resolve(input.path);
+    const preview = await inspectImport(path);
+    if (input.dry_run !== false) return { preview };
+    if (preview.invalid && !input.allow_partial) throw new Error(`import preflight found ${preview.invalid} invalid entries; use dry_run to inspect, correct them or explicitly set allow_partial=true`);
+    return { preview, job: await this.startProjectOperation(input.project_id, {
+      operation: 'import', path, sha256: preview.sha256, total: preview.valid + preview.invalid,
+      idempotency_key: `import:${preview.sha256}`,
+      allow_partial: input.allow_partial ?? false }) };
+  }
+
+  async previewProjectImport(roots: ProjectRootInput[]) { return await previewProjectFiles(roots); }
+  async projectReadiness(projectId: string) {
+    const project = await this.ensureProject(projectId);
+    return { ...await this.store.projectReadiness(project.project_id), vector_enabled: this.embeddings.enabled() };
+  }
+
+  private async applyImport(job: KnowledgeJobRecord): Promise<boolean> {
+    const request = job.request!;
+    const path = String(request.path);
+    const preview = await inspectImport(path);
+    if (preview.sha256 !== request.sha256) throw new Error('import file changed; saved resume token cannot be used for different bytes');
+    const directory = join(this.options.root, 'job-imports');
+    await mkdir(directory, { recursive: true });
+    const logPath = join(directory, `${job.job_id}.jsonl`);
+    const counts = { committed: 0, failed: 0, ...(job.result_counts ?? {}) };
+    const afterLine = Number(job.request?.after_line ?? 0);
+    let processed = job.completed_items ?? 0;
+    for await (const row of importLines(path)) {
+      if (row.line <= afterLine) continue;
+      if (await this.knowledgeJobCancelled(job.job_id)) return false;
+      let result: Record<string, unknown>;
+      try {
+        if (!row.entry) throw new Error(row.error);
+        const entry = row.entry;
+        const input = { ...entry.record, project_id: job.project_id };
+        const record = entry.type === 'catalog' ? await this.writeCatalogRecord(input as CatalogWriteInput)
+          : entry.type === 'ontology' ? await this.recordOntologyTerm(input as Parameters<ResearchService['recordOntologyTerm']>[0])
+            : entry.type === 'assertion' ? await this.recordAssertion(input as AssertionInput)
+              : await this.recordEntity(input as Parameters<ResearchService['recordEntity']>[0]);
+        counts.committed++;
+        result = { line: row.line, status: 'committed', record_id: 'record_id' in record ? record.record_id
+          : 'term_id' in record ? record.term_id : 'assertion_id' in record ? record.assertion_id : record.entity_id };
+      } catch (error) {
+        counts.failed++; result = { line: row.line, status: 'failed', error: String(error).slice(0, 2000) };
+      }
+      await appendFile(logPath, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+      processed++;
+      const current = (await this.store.getKnowledgeJob(job.job_id))!;
+      await this.store.putKnowledgeJob({ ...current, completed_items: processed, total_items: Number(request.total),
+        result_counts: counts, request: { ...current.request, after_line: row.line },
+        revision: (current.revision ?? 1) + 1, updated_at: new Date().toISOString() });
+      if (await this.checkpointKnowledgeJobForDrain(job.project_id, job.job_id, 'import', processed, Number(request.total))) return false;
+    }
+    if (counts.failed) throw new Error(`import saved ${counts.committed} entries; ${counts.failed} failed. Full per-line receipts: ${logPath}`);
+    return true;
+  }
+
+  async resumeJob(projectIdValue: string, jobId: string): Promise<KnowledgeJobView> {
+    const project = await this.ensureProject(projectIdValue);
+    let job = await this.store.getKnowledgeJob(jobId);
+    if (!job || job.project_id !== project.project_id) throw new Error('job_id must belong to the project');
+    if (!job.request && job.kind !== 'rebuild'
+      && !(job.kind === 'retrieval_index' && ['catalog-record-v1', 'capture-index-v1'].includes(job.schema_version))) {
+      throw new Error('job has no resumable request; retry the original sync/rebuild command');
+    }
+    if (job.status === 'failed' || job.status === 'cancelled' || job.status === 'done') {
+      job = await this.transitionKnowledgeJob({ project_id: project.project_id, job_id: jobId, status: 'queued' });
+    }
+    if (job.request) this.scheduleProjectOperation(job);
+    else if (job.kind === 'rebuild') this.scheduleSourceIndex(job);
+    else if (job.schema_version === 'catalog-record-v1') this.scheduleCatalogIndex(job);
+    else this.scheduleCaptureIndex(job);
+    return jobView(job);
+  }
+
+  private scheduleProjectOperation(job: KnowledgeJobRecord): void {
+    if (this.scheduledJobIds.has(job.job_id)) return;
+    this.scheduledJobIds.add(job.job_id);
+    this.schedule(async () => {
+      try {
+        let current = await this.store.getKnowledgeJob(job.job_id);
+        if (!current || ['done', 'cancelled'].includes(current.status) || this.drainRequested) return;
+        if (current.status === 'running') current = await this.transitionKnowledgeJob({
+          project_id: job.project_id, job_id: job.job_id, status: 'failed', error: 'interrupted; resuming saved request' });
+        if (current.status === 'failed') current = await this.transitionKnowledgeJob({
+          project_id: job.project_id, job_id: job.job_id, status: 'queued' });
+        await this.transitionKnowledgeJob({ project_id: job.project_id, job_id: job.job_id, status: 'running' });
+        const request = current.request!;
+        await this.updateKnowledgeJobProgress(job.project_id, job.job_id, String(request.operation),
+          current.completed_items ?? 0, Number(request.total ?? 1));
+        if (request.operation === 'rebuild') await this.rebuildDerivedState(job.project_id);
+        else if (request.operation === 'sync') {
+          const index = await this.syncProjectOperation(current);
+          if (!index) return;
+          const parent = (await this.store.getKnowledgeJob(job.job_id))!;
+          await this.store.putKnowledgeJob({ ...parent, child_job_ids: [index.job_id],
+            result_counts: { stored_files: index.file_count, stored_bytes: index.total_bytes } });
+        }
+        else if (request.operation === 'import') { if (!await this.applyImport(current)) return; }
+        else throw new Error(`unsupported project operation: ${request.operation}`);
+        if (await this.knowledgeJobCancelled(job.job_id)) return;
+        const latest = (await this.store.getKnowledgeJob(job.job_id))!;
+        const total = latest.total_items ?? Number(request.total ?? 1);
+        await this.updateKnowledgeJobProgress(job.project_id, job.job_id,
+          request.operation === 'sync' ? 'stored' : 'complete', total, total);
+        await this.transitionKnowledgeJob({ project_id: job.project_id, job_id: job.job_id, status: 'done' });
+      } catch (error) {
+        await this.failKnowledgeJob(job.job_id, error);
+      } finally { this.scheduledJobIds.delete(job.job_id); }
     });
+  }
+
+  private async syncProjectOperation(job: KnowledgeJobRecord): Promise<ProjectIndexResult | undefined> {
+    const input = { ...job.request, project_id: job.project_id } as ProjectIndexInput;
+    const paths = input.roots?.flatMap(root => (root.include_paths ?? []).map(path => ({ root: root.label, path }))) ?? [];
+    const project = await this.ensureProject(job.project_id);
+    const chunked = paths.length > 100 && input.roots!.every(root => root.include_paths !== undefined)
+      && !input.changed_paths?.length && !input.removed_paths?.length
+      && (!project.active_source_snapshot_id || (input.root_mode ?? 'merge') === 'merge');
+    if (!chunked) return await this.indexProject(input);
+    if (!project.active_source_snapshot_id) await this.indexProject({ project_id: job.project_id,
+      roots: input.roots!.map(root => ({ ...root, include_paths: [] })), git_root: input.git_root });
+    let result: ProjectIndexResult | undefined;
+    for (let offset = Number(job.request?.source_offset ?? 0); offset < paths.length; offset += 100) {
+      if (await this.knowledgeJobCancelled(job.job_id)) return undefined;
+      const batch = paths.slice(offset, offset + 100);
+      await this.updateKnowledgeJobProgress(job.project_id, job.job_id, 'source_batch', offset, paths.length);
+      result = await this.indexProject({ ...input, root_mode: 'merge', changed_paths: batch });
+      const current = (await this.store.getKnowledgeJob(job.job_id))!;
+      const completed = offset + batch.length;
+      await this.store.putKnowledgeJob({ ...current, completed_items: completed, total_items: paths.length,
+        child_job_ids: [result.job_id], request: { ...current.request, source_offset: completed },
+        revision: (current.revision ?? 1) + 1, updated_at: new Date().toISOString() });
+      if (await this.checkpointKnowledgeJobForDrain(job.project_id, job.job_id, 'source_batch', completed, paths.length)) return undefined;
+    }
+    if (!result && job.child_job_ids?.length) {
+      // All source chunks were committed before interruption; the final checkpoint owns derived indexing.
+      return await this.indexProject({ ...input, changed_paths: paths.slice(-1), root_mode: 'merge' });
+    }
+    return result;
+  }
+
+  private async failKnowledgeJob(jobId: string, error: unknown, sourceId?: string): Promise<void> {
+    const job = await this.store.getKnowledgeJob(jobId);
+    if (!job || job.status === 'cancelled' || job.status === 'done') return;
+    const message = error instanceof Error ? error.message : String(error);
+    const traceId = randomUUID();
+    const directory = join(this.options.root, 'job-errors');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, `${traceId}.json`), JSON.stringify({ job_id: jobId, stage: job.stage,
+      source_id: sourceId, message, stack: error instanceof Error ? error.stack : undefined }), { mode: 0o600 });
+    await this.store.putKnowledgeJob({ ...job, status: 'failed', error: message.slice(0, 2000),
+      failures: [...(job.failures ?? []), { stage: job.stage ?? 'unknown', source_id: sourceId,
+        message: message.slice(0, 500), trace_id: traceId }].slice(-20),
+      revision: (job.revision ?? 1) + 1, updated_at: new Date().toISOString() });
   }
 
   private async knowledgeJobCancelled(jobId: string): Promise<boolean> {
@@ -3139,6 +3370,7 @@ export class ResearchService {
   }
 
   async recordOntologyTerm(input: {
+    idempotency_key?: string;
     review?: { actor: string; method: 'human' | 'model' | 'rule' | 'host_unspecified'; reviewed_at?: string };
     domain?: string[];
     range?: string[];
@@ -3154,6 +3386,14 @@ export class ResearchService {
     supersedes_term_id?: string;
   }): Promise<OntologyTermRecord> {
     if (input.project_id) await this.ensureProject(input.project_id);
+    const writeKey = this.knowledgeWriteKey(input);
+    if (writeKey) {
+      const previous = await this.store.getKnowledgeWrite(input.project_id ?? 'core', 'ontology', writeKey);
+      if (previous) {
+        if (input.project_id) await this.invalidateGraph(input.project_id);
+        return previous as OntologyTermRecord;
+      }
+    }
     const name = cleanText(input.name, 'name', 200);
     let prior: OntologyTermRecord | undefined;
     if (input.supersedes_term_id) {
@@ -3213,14 +3453,15 @@ export class ResearchService {
       if (stableJson({ evidence_ids: [], review_status: 'draft', ...oldValue }) !== stableJson(newValue)) {
         throw new Error('ontology revision already exists; use supersedes_term_id to record a new definition or review');
       }
+      if (writeKey) await this.store.putOntologyRevision(undefined, existing, writeKey);
       return existing;
     }
-    await this.store.putOntologyRevision(prior, term);
+    const stored = await this.store.putOntologyRevision(prior, term, writeKey);
     const projects = input.project_id
       ? [input.project_id]
       : (await this.store.listProjects()).map((project) => project.project_id);
     await Promise.all(projects.map(async (projectId) => await this.invalidateGraph(projectId)));
-    return term;
+    return stored;
   }
 
   async getOntologyTerm(termId: string): Promise<OntologyTermRecord | undefined> {
@@ -3489,8 +3730,115 @@ export class ResearchService {
     });
   }
 
+  private async resolveEvidenceReference(projectId: string, input: EvidenceReference): Promise<EvidenceRecord> {
+    const recordId = cleanText(input.record_id, 'record_id', 500);
+    if (typeof input.quote !== 'string' || !input.quote.trim() || input.quote.length > 5_000) {
+      throw new Error('evidence_refs.quote requires an exact nonempty source quote of at most 5000 characters');
+    }
+    const offset = input.body_offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('evidence_refs.body_offset must be a nonnegative integer byte offset');
+    const record = await this.getCatalogRecord(projectId, recordId, input.revision, offset, 64 * 1024, 0, 1);
+    if (input.revision !== undefined && !('asset' in record)) {
+      throw new Error('revision applies only to versioned catalog records; omit it for captured documents and local sources');
+    }
+    const body = record.body ?? ('record' in record && record.record ? stableJson(record.record) : '');
+    const match = body.indexOf(input.quote);
+    if (match < 0) throw new Error('quote not found in the stored record page; copy an exact quote and set body_offset for later pages');
+    const start = (record.body_span?.start ?? offset) + Buffer.byteLength(body.slice(0, match), 'utf8');
+    const sourceType = 'asset' in record ? 'catalog' : 'source' in record ? 'source'
+      : 'document' in record ? 'document' : 'record_type' in record
+        && (record.record_type === 'experiment' || record.record_type === 'decision') ? record.record_type : undefined;
+    if (!sourceType) throw new Error('evidence_refs requires a stored document, local source, catalog body, experiment, or decision');
+    return {
+      evidence_id: randomUUID(), project_id: projectId, source_type: sourceType, source_id: recordId,
+      locator: `bytes:${start}-${start + Buffer.byteLength(input.quote, 'utf8')}`,
+      quote: input.quote, quote_hash: createHash('sha256').update(input.quote).digest('hex'),
+      source_read_hash: createHash('sha256').update(body).digest('hex'),
+      ...('revision' in record ? { source_revision: record.revision.revision } : {}),
+      body_span: { start, end: start + Buffer.byteLength(input.quote, 'utf8') },
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  async resolveLiteralAnswer(projectId: string, input: LiteralAnswerInput) {
+    await this.ensureProject(projectId);
+    const evidence = await this.resolveEvidenceReference(projectId, input);
+    const selection = input.selection ?? evidence.quote!;
+    if (!selection.trim() || !evidence.quote!.includes(selection)) {
+      throw new Error('answer.selection must be a nonempty exact substring of the verified quote; do not include labels or paraphrase it');
+    }
+    const answer = renderLiteralAnswer(selection, input.transforms);
+    const start = evidence.body_span!.start
+      + Buffer.byteLength(evidence.quote!.slice(0, evidence.quote!.indexOf(selection)), 'utf8');
+    return { answer, source: { record_id: evidence.source_id, revision: evidence.source_revision,
+      body_span: { start, end: start + Buffer.byteLength(selection, 'utf8') }, quote_hash: evidence.quote_hash,
+      selection_hash: createHash('sha256').update(selection).digest('hex') }, transforms: input.transforms ?? [],
+      verification: { status: 'exact_source_quote' as const, factual_correctness: 'not_checked' as const } };
+  }
+
+  private knowledgeWriteKey(input: { idempotency_key?: string }): KnowledgeWriteKey | undefined {
+    if (input.idempotency_key === undefined) return undefined;
+    const { idempotency_key, ...content } = input;
+    return { key: cleanText(idempotency_key, 'idempotency_key', 500),
+      request_hash: createHash('sha256').update(stableJson(JSON.parse(JSON.stringify(content)))).digest('hex') };
+  }
+
+  async recordKnowledge(input: { project_id: string; idempotency_key: string; knowledge: KnowledgeBundle;
+    query: string; limit?: number; request_id?: string; response_deadline_ms?: number }) {
+    const project = await this.ensureProject(input.project_id);
+    const batchKey = cleanText(input.idempotency_key, 'idempotency_key', 500);
+    const query = cleanText(input.query, 'query', 400);
+    const terms = input.knowledge.ontology_terms ?? [];
+    const facts = input.knowledge.assertions;
+    if (terms.length > 20 || !facts.length || facts.length > 20) {
+      throw new Error('knowledge accepts at most 20 ontology_terms and 1-20 assertions per call');
+    }
+    for (const entries of [terms, facts]) {
+      const keys = entries.map(entry => cleanText(entry.key, 'knowledge entry key', 100));
+      if (new Set(keys).size !== keys.length) throw new Error('knowledge entry keys must be unique within each record kind');
+    }
+    const records: Array<{ key: string; record_type: 'ontology' | 'assertion'; record_id: string; evidence_ids?: string[] }> = [];
+    const errors: Array<{ key: string; record_type: 'ontology' | 'assertion'; message: string }> = [];
+    const key = (kind: string, entry: string) => createHash('sha256').update(`${batchKey}\0${kind}\0${entry}`).digest('hex');
+    for (const term of terms) {
+      try {
+        const stored = await this.recordOntologyTerm({ project_id: project.project_id, kind: term.kind,
+          name: term.name, definition: term.definition, idempotency_key: key('ontology', term.key) });
+        records.push({ key: term.key, record_type: 'ontology', record_id: stored.term_id });
+      } catch (error) {
+        errors.push({ key: term.key, record_type: 'ontology', message: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
+      }
+    }
+    for (const fact of facts) {
+      try {
+        if (!fact.evidence_refs?.length) throw new Error('each knowledge assertion requires at least one exact source evidence_ref');
+        const { key: entryKey, ...content } = fact;
+        const stored = await this.recordAssertion({ ...content, project_id: project.project_id, source: 'explicit',
+          idempotency_key: key('assertion', entryKey) });
+        records.push({ key: fact.key, record_type: 'assertion', record_id: stored.assertion_id, evidence_ids: stored.evidence_ids });
+      } catch (error) {
+        errors.push({ key: fact.key, record_type: 'assertion', message: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
+      }
+    }
+    const subjects = [...new Set(facts.map(fact => fact.subject.trim().slice(0, 400)))]
+      .filter(subject => subject && subject !== query).slice(0, 19);
+    const search = await this.searchBatch(project.project_id, query, subjects, input.limit ?? 10, [], undefined,
+      { retrieval_lanes: ['graph'], kinds: ['assertion'] }, true, false, input.request_id, input.response_deadline_ms);
+    const storedIds = new Set(records.filter(record => record.record_type === 'assertion').map(record => record.record_id));
+    return { status: errors.length ? records.length ? 'partial' : 'failed' : 'ready', records, errors,
+      idempotency_scope: 'per_record', retrieved_assertion_ids: search.results.filter(hit => storedIds.has(hit.document_id)).map(hit => hit.document_id), search };
+  }
+
   async recordAssertion(input: AssertionInput): Promise<AssertionRecord> {
     const project = await this.ensureProject(input.project_id);
+    const writeKey = this.knowledgeWriteKey(input);
+    if (writeKey) {
+      const previous = await this.store.getKnowledgeWrite(project.project_id, 'assertion', writeKey);
+      if (previous) {
+        await this.invalidateGraph(project.project_id);
+        return previous as AssertionRecord;
+      }
+    }
     const target = cleanAssertionTarget(input);
     const status = input.status ?? 'suggested';
     if (input.source === 'sidecar' && status !== 'suggested') {
@@ -3503,27 +3851,38 @@ export class ResearchService {
     const evidenceIds = [...new Set(input.evidence_ids ?? [])];
     const evidence = await Promise.all(evidenceIds.map((id) => this.store.getEvidence(id)));
     if (evidence.some((row) => !row || row.project_id !== project.project_id)) {
-      throw new Error('evidence_ids must belong to the project');
+      throw new Error('evidence_ids must belong to the project and identify EvidenceRecord.evidence_id values, not document_id or record_id. Use existing evidence IDs; do not substitute or invent them.');
     }
     const validFrom = cleanTime(input.valid_from, 'valid_from');
     const validTo = cleanTime(input.valid_to, 'valid_to');
     if (validFrom && validTo && validFrom > validTo) throw new Error('valid_from must precede valid_to');
+    const context = cleanAssertionContext(input.context);
+    if ((input.evidence_refs?.length ?? 0) > 20) throw new Error('evidence_refs accepts at most 20 source quotes');
+    const resolved: EvidenceRecord[] = [];
+    const seenRefs = new Set<string>();
+    for (const ref of input.evidence_refs ?? []) {
+      const key = stableJson(ref);
+      if (seenRefs.has(key)) continue;
+      seenRefs.add(key);
+      resolved.push(await this.resolveEvidenceReference(project.project_id, ref));
+    }
     const stored = await this.store.putAssertion({
       assertion_id: randomUUID(),
       project_id: project.project_id,
       subject: cleanText(input.subject, 'subject', 2_000),
       predicate: cleanText(input.predicate, 'predicate', 200),
       ...(input.unit ? { unit: cleanText(input.unit, 'unit', 80) } : {}),
+      ...(context ? { context } : {}),
       ...target,
       status,
       source: input.source,
       ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
-      evidence_ids: evidenceIds,
+      evidence_ids: [...evidenceIds, ...resolved.map(row => row.evidence_id)],
       ontology_version: input.ontology_version ?? 1,
       ...(validFrom ? { valid_from: validFrom } : {}),
       ...(validTo ? { valid_to: validTo } : {}),
       recorded_at: new Date().toISOString(),
-    });
+    }, resolved, writeKey);
     await this.invalidateGraph(project.project_id);
     return stored;
   }
@@ -3532,8 +3891,13 @@ export class ResearchService {
     if (!projectIds.length) throw new Error('at least one project is required');
     for (const id of projectIds) await this.ensureProject(id);
     if (!['count', 'min', 'max', 'sum', 'mean'].includes(input.operation)) throw new Error('unsupported aggregate operation');
+    if (input.subjects && (input.subject || !input.subjects.length || input.subjects.length > 500)) {
+      throw new Error('subjects needs 1-500 members and cannot be combined with subject');
+    }
     const normalized = { ...input, ...(input.predicate ? { predicate: cleanText(input.predicate, 'predicate', 200) } : {}),
       ...(input.subject ? { subject: cleanText(input.subject, 'subject', 2000) } : {}),
+      ...(input.subjects ? { subjects: [...new Set(input.subjects.map(subject => cleanText(subject, 'subject', 2000)))].sort() } : {}),
+      context: cleanAssertionContext(input.context),
       ...(input.unit ? { unit: cleanText(input.unit, 'unit', 80) } : {}),
       valid_at: cleanTime(input.valid_at, 'valid_at'), recorded_as_of: cleanTime(input.recorded_as_of, 'recorded_as_of') };
     return await this.store.aggregateAssertions([...new Set(projectIds)].sort(), normalized);
@@ -3574,6 +3938,7 @@ export class ResearchService {
     const now = new Date().toISOString();
     const replacement: AssertionRecord = {
       ...(target.unit ? { unit: target.unit } : {}),
+      ...(target.context ? { context: target.context } : {}),
       assertion_id: randomUUID(),
       project_id: project.project_id,
       subject: target.subject,
@@ -3641,6 +4006,7 @@ export class ResearchService {
         schema_version: schemaVersion,
         algorithm_version: algorithmVersion,
         affected_source_ids: [...new Set(input.affected_source_ids ?? [])],
+        ...(input.request ? { request: input.request } : {}),
         attempts: 0,
         revision: 1,
         created_at: now,
@@ -3830,7 +4196,8 @@ export class ResearchService {
         title: document.title,
         url: document.url,
         content_hash: chunk.content_hash,
-        exact_terms: exactTerms(document.title, document.url, document.scholar_id),
+        exact_terms: exactTerms(document.title, document.url, document.scholar_id, ...(document.exact_terms ?? [])),
+        role: document.role,
         text: chunk.text,
       }];
     });
@@ -4278,7 +4645,14 @@ export class ResearchService {
     if (!projectIds.length) throw new Error('at least one project_id required');
     const key = projectIds.join('\0');
     const cached = this.graphCache.get(key);
-    if (cached) return this.rememberGraphProjection(key, cached);
+    if (cached) {
+      const versions = await Promise.all(projectIds.map(async (projectId) => {
+        const project = await this.ensureProject(projectId);
+        return cached.source_versions[projectId] === (project.graph_dirty_at ?? project.updated_at);
+      }));
+      if (versions.every(Boolean)) return this.rememberGraphProjection(key, cached);
+      this.graphCache.delete(key);
+    }
     const sources = await Promise.all(projectIds.map(async (projectId): Promise<ProjectGraphSource> => {
       const project = await this.ensureProject(projectId);
       const [
@@ -4641,16 +5015,23 @@ export class ResearchService {
     query: string,
     limit: number,
     seedHits: LocalSearchHit[] = [],
+    queryVariants: string[] = [],
+    filters?: ResearchSearchFilters,
   ): Promise<LocalSearchHit[]> {
-    const current = await this.store.currentGraph(project.project_id);
-    if (!current.current || !current.projection_id) return [];
-    const artifact = this.graphArtifacts.get(current.projection_id)
-      ?? await this.store.loadGraphArtifact(current.projection_id);
+    const [current, latest] = await Promise.all([this.store.currentGraph(project.project_id),
+      this.store.latestKnowledgeJob(project.project_id, 'graph_projection')]);
+    const projectionId = current.current && current.projection_id
+      && latest?.algorithm_version === GRAPH_ALGORITHM_VERSION && latest.result_digest === current.projection_id
+      ? current.projection_id
+      : (await this.materializeGraph([project.project_id])).projection.projection_id;
+    const artifact = this.graphArtifacts.get(projectionId)
+      ?? await this.store.loadGraphArtifact(projectionId);
     if (!artifact) return [];
-    const remembered = this.rememberGraphArtifact(current.projection_id, artifact);
-    const seeds = graphSeedNodes(remembered.projection, seedHits.flatMap((hit) => (
-      [hit.document_id, hit.url]
-    )));
+    const remembered = this.rememberGraphArtifact(projectionId, artifact);
+    const seeds = [...new Set([
+      ...queryVariants.flatMap(value => graphQuerySeeds(remembered.projection, value, 2)),
+      ...graphSeedNodes(remembered.projection, seedHits.flatMap(hit => [hit.document_id, hit.url])),
+    ])];
     return this.graphSearchHits(
       remembered.projection,
       query,
@@ -4658,6 +5039,7 @@ export class ResearchService {
       new Set([project.project_id]),
       remembered.analysis.pagerank,
       seeds,
+      filters,
     );
   }
 
@@ -4668,9 +5050,13 @@ export class ResearchService {
     projectIds: Set<string>,
     pagerank: Record<string, number> = {},
     seeds: string[] = [],
+    filters?: ResearchSearchFilters,
   ): LocalSearchHit[] {
-    return rankGraphProjection(projection, query, limit * 5, seeds)
-      .filter(({ node }) => projectIds.has(node.project_id))
+    const assertionContext = cleanAssertionContext(filters?.assertion_context);
+    return rankGraphProjection(projection, query, limit * 5, seeds, node => projectIds.has(node.project_id)
+      && matchesScope(filters, `${node.source_id ?? ''} ${node.record_id ?? ''} ${node.label} ${node.text ?? ''}`, node.search_scope)
+      && (!assertionContext || (node.kind === 'assertion' && matchesAssertionContext(node.assertion_context, assertionContext)))
+      && (!filters?.kinds?.length || filters.kinds.includes(node.kind)))
       .slice(0, limit)
       .map(({ node, score }) => ({
         document_id: node.source_id ?? node.node_id,
@@ -4695,11 +5081,14 @@ export class ResearchService {
     query: string,
     limit: number,
     seedHits: LocalSearchHit[] = [],
+    queryVariants: string[] = [],
+    filters?: ResearchSearchFilters,
   ): Promise<LocalSearchHit[]> {
     const projectIds = projects.map((project) => project.project_id);
     const projection = await this.exportGraphProjection(projectIds);
-    const seeds = graphSeedNodes(projection, seedHits.flatMap((hit) => [hit.document_id, hit.url]));
-    return this.graphSearchHits(projection, query, limit, new Set(projectIds), {}, seeds);
+    const seeds = [...new Set([...queryVariants.flatMap(value => graphQuerySeeds(projection, value, 2)),
+      ...graphSeedNodes(projection, seedHits.flatMap(hit => [hit.document_id, hit.url]))])];
+    return this.graphSearchHits(projection, query, limit, new Set(projectIds), {}, seeds, filters);
   }
 
   async searchFamilies(
@@ -4721,7 +5110,10 @@ export class ResearchService {
     )));
     const cleanedQuery = cleanText(query, 'query', 400);
     const cappedLimit = Math.min(Math.max(limit, 1), 20);
-    const lanes = new Set(filters?.retrieval_lanes ?? ['exact', 'bm25', 'vector', 'graph']);
+    const lanes = retrievalLanes(filters);
+    const scopes = new Map(await Promise.all(projects.map(async project => [project.project_id,
+      hasScope(filters) ? await this.searchRead(['scope', project.project_id, filters],
+        () => this.store.retrievalScope(project.project_id, filters!), signal) : undefined] as const)));
     const collect = async (
       lane: RetrievalLane,
       operation: (project: ProjectRecord) => Promise<LocalSearchHit[]>,
@@ -4733,9 +5125,9 @@ export class ResearchService {
         ensureNotAborted(signal);
         groups[index] = await runRetrievalLane(lane, degradedLanes, async () => {
           try {
-            return await this.searchRead(
-              [lane, project, cleanedQuery, cappedLimit, context], () => operation(project), signal,
-            );
+            return await this.laneBudget(lane, filters, () => this.searchRead(
+              [lane, project, cleanedQuery, cappedLimit, context, filters], () => operation(project), signal,
+            ));
           } catch (error) {
             ensureNotAborted(signal);
             if (lane !== 'vector') throw error;
@@ -4771,7 +5163,7 @@ export class ResearchService {
         return [];
       }
       return await collect('vector', (project) => this.store.searchProjectVector(
-        project.project_id, model, queryVector, cappedLimit,
+        project.project_id, model, queryVector, cappedLimit, scopes.get(project.project_id),
       ), [model, queryVector]);
     };
     let sourceRanks: ReturnType<ResearchStore['searchSourceRanks']> | undefined;
@@ -4781,12 +5173,18 @@ export class ResearchService {
     );
     const [exactGroups, bm25Groups, vectorGroups] = await Promise.all([
       lanes.has('exact') ? collect('exact', (project) => this.store.searchProjectExact(
-        project.project_id, normalizeEntityName(cleanedQuery), cappedLimit,
+        project.project_id, normalizeEntityName(cleanedQuery), cappedLimit, scopes.get(project.project_id),
       )) : Promise.resolve([]),
       lanes.has('bm25') ? collect('bm25', (project) => this.store.searchProjectBm25(
-        project.project_id, cleanedQuery, cappedLimit, projects.length > 1 ? sharedSourceRanks : undefined,
+        project.project_id, cleanedQuery, cappedLimit, projects.length > 1 && !hasScope(filters) ? sharedSourceRanks : undefined,
+        scopes.get(project.project_id),
       )) : Promise.resolve([]),
-      vector(),
+      this.laneBudget('vector', filters, vector).catch(error => {
+        if (!isResearchQueryTimeout(error)) throw error;
+        degradedLanes.add('vector');
+        onLane?.('vector', [], true, true);
+        return [];
+      }),
     ]);
     ensureNotAborted(signal);
     const seedGroups = projects.map((_project, index) => fuseRankedGroups([
@@ -4798,16 +5196,16 @@ export class ResearchService {
       ? [await runRetrievalLane(
         'graph',
         degradedLanes,
-        async () => await this.searchRead(['graph', projects, cleanedQuery, cappedLimit,
+        async () => await this.searchRead(['graph', projects, cleanedQuery, cappedLimit, filters,
           seedGroups.map((group) => group.map((hit) => [hit.document_id, hit.url]))],
-          () => this.searchCombinedGraph(projects, cleanedQuery, cappedLimit, seedGroups.flat()), signal),
+          () => this.searchCombinedGraph(projects, cleanedQuery, cappedLimit, seedGroups.flat(), [], filters), signal),
       )]
       : await mapConcurrent(projects, 1, async (project, index) => await runRetrievalLane(
         'graph',
         degradedLanes,
-        async () => await this.searchRead(['graph', project, cleanedQuery, cappedLimit,
+        async () => await this.searchRead(['graph', project, cleanedQuery, cappedLimit, filters,
           seedGroups[index].map((hit) => [hit.document_id, hit.url])],
-          () => this.searchMaterializedGraph(project, cleanedQuery, cappedLimit, seedGroups[index]), signal),
+          () => this.searchMaterializedGraph(project, cleanedQuery, cappedLimit, seedGroups[index], [], filters), signal),
       ));
     ensureNotAborted(signal);
     return {
@@ -4877,7 +5275,7 @@ export class ResearchService {
     const candidateLimit = Math.min(40, cappedLimit * 3);
     const queries = tuneLocalQueries(query, queryVariants);
     const candidateCounts = { exact: 0, bm25: 0, vector: 0, graph: 0, fused: 0 };
-    const lanes = new Set<RetrievalLane>(filters?.retrieval_lanes ?? ['exact', 'bm25', 'vector', 'graph']);
+    const lanes = retrievalLanes(filters);
     const baseLanes = [...lanes].filter((lane) => lane !== 'graph'
       && (lane !== 'vector' || this.embeddings.enabled()));
     const laneRows = queries.map(() => new Map<RetrievalLane, LocalSearchHit[]>());
@@ -4943,7 +5341,7 @@ export class ResearchService {
       ...(deadlineMs !== undefined ? { deadline_ms: deadlineMs } : {}),
     });
     const publishLane = (index: number, lane: RetrievalLane, rows: LocalSearchHit[], complete: boolean, degraded: boolean) => {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || this.queryStates.get(requestId)?.status !== 'running') return;
       laneRows[index].set(lane, rows);
       if (complete) finishedLanes[index].add(lane);
       if (degraded) degradedLanes.add(lane);
@@ -5023,7 +5421,9 @@ export class ResearchService {
     let projects: ProjectRecord[] = [];
     let graph: LocalSearchHit[] = [];
     if (lanes.has('graph')) try {
+      await this.laneBudget('graph', filters, async () => {
       const seededProjects = new Set(baseFused.flatMap((row) => row.project_ids));
+      if (projectIds.length === 1) seededProjects.add(projectIds[0]);
       if (!seededProjects.size) {
         await this.searchRead(['graph-indexes', projectIds], () => this.store.ensureGraphSearchIndexes(projectIds), controller.signal, false);
         const graphSeeds = await this.searchRead(['graph-seeds', projectIds, queries, candidateLimit],
@@ -5047,11 +5447,12 @@ export class ResearchService {
         ['project', projectId], () => this.ensureProject(projectId), controller.signal, false,
       )));
       graphProjectCount = projects.length;
-      graph = !projects.length ? [] : await this.searchRead(['batch-graph', projects, query, candidateLimit,
+      graph = !projects.length ? [] : await this.searchRead(['batch-graph', projects, queries, candidateLimit, filters,
         boundedBaseFused.map((hit) => [hit.document_id, hit.url])],
         () => projects.length > 1
-          ? this.searchCombinedGraph(projects, query, candidateLimit, boundedBaseFused)
-          : this.searchMaterializedGraph(projects[0], query, candidateLimit, boundedBaseFused), controller.signal);
+          ? this.searchCombinedGraph(projects, query, candidateLimit, boundedBaseFused, queries.slice(1), filters)
+          : this.searchMaterializedGraph(projects[0], query, candidateLimit, boundedBaseFused, queries.slice(1), filters), controller.signal);
+      });
     } catch (error) {
       if (!isResearchQueryTimeout(error)) throw error;
       degradedLanes.add('graph');
@@ -5101,7 +5502,7 @@ export class ResearchService {
       results,
       reranker,
       ...(includePreRerank ? { pre_rerank_results: fused.slice(0, cappedLimit) } : {}),
-      partial: false,
+      partial: degradedLanes.size > 0,
       completed_lanes: completedLanes,
       graph_project_count: projects.length,
       degraded_lanes: [...degradedLanes].sort(),
@@ -5110,7 +5511,7 @@ export class ResearchService {
     };
     this.setQueryState({
       ...this.queryStates.get(requestId)!,
-      status: 'completed',
+      status: degradedLanes.size > 0 ? 'partial' : 'completed',
       phase: 'complete',
       completed_lanes: completedLanes,
       degraded_lanes: [...degradedLanes].sort(),

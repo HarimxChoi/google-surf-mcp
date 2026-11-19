@@ -4,7 +4,8 @@ import { ResearchQueryInterrupted } from './queryControl.js';
 import { adaptiveResponseBudget } from '../responseBudget.js';
 import { compactRankedResults } from './integration.js';
 import type {
-  ArtifactReference, AssertionAggregateInput, AssertionValue, CatalogAccessTier, CatalogAssetKind, CatalogWriteOperation,
+  ArtifactReference, AssertionAggregateInput, AssertionContext, AssertionValue, EvidenceReference, KnowledgeBundle, LiteralAnswerInput,
+  CatalogAccessTier, CatalogAssetKind, CatalogWriteOperation,
   ExperimentStatus, ProjectDocumentRole,
   ResearchSearchFilters,
 } from './contracts.js';
@@ -27,10 +28,19 @@ export interface ProjectMemorySearchInput {
 
 export interface ProjectMemoryInput extends ProjectMemorySearchInput {
   action: 'create' | 'project_update' | 'show' | 'search' | 'record' | 'record_batch' | 'get' | 'get_batch'
-    | 'context' | 'timeline' | 'diff' | 'sync' | 'job_status' | 'job_wait' | 'job_cancel'
+    | 'context' | 'timeline' | 'diff' | 'sync' | 'job_status' | 'job_wait' | 'job_cancel' | 'job_sources' | 'job_resume'
     | 'query_status' | 'query_cancel' | 'verify'
     | 'current' | 'snapshot' | 'snapshot_import' | 'snapshot_rollback'
-    | 'doctor' | 'aggregate' | 'rebuild' | 'export' | 'forget';
+    | 'doctor' | 'readiness' | 'aggregate' | 'answer' | 'record_knowledge' | 'import_records' | 'rebuild' | 'export' | 'forget';
+  knowledge?: KnowledgeBundle;
+  wait_for_completion?: boolean;
+  offset?: number;
+  page_limit?: number;
+  import_path?: string;
+  allow_partial?: boolean;
+  answer?: LiteralAnswerInput;
+  context?: AssertionContext;
+  evidence_refs?: EvidenceReference[];
   aggregate?: AssertionAggregateInput;
   expected_value?: number;
   subject?: string;
@@ -66,6 +76,7 @@ export interface ProjectMemoryInput extends ProjectMemorySearchInput {
     label: string;
     path: string;
     role?: ProjectDocumentRole;
+    include_paths?: string[];
     manifest?: Array<{ path: string; role: ProjectDocumentRole; aliases?: string[] }>;
   }>;
   changed_paths?: Array<{ root: string; path: string }>;
@@ -459,6 +470,28 @@ export async function projectMemoryTool(
       });
     }
 
+    if (input.action === 'record_knowledge') {
+      if (!input.knowledge || !input.query || !input.idempotency_key) throw new Error('record_knowledge requires knowledge, query and idempotency_key');
+      const started = Date.now();
+      const { search, ...knowledge } = await service.recordKnowledge({ project_id: requireProject(input), knowledge: input.knowledge,
+        query: input.query, idempotency_key: input.idempotency_key, limit: input.limit,
+        request_id: input.request_id, response_deadline_ms: input.response_deadline_ms });
+      const compact = compactRankedResults(input.query, search.results.map(hit => ({ title: hit.title, url: hit.url,
+        document_id: hit.document_id, record_id: hit.record_id, description: hit.description, content: hit.content,
+        source_family: hit.source_family, project_ids: hit.project_ids, score: hit.score })));
+      const budgeted = budgetRankedResults(compact, input.response_budget_bytes ?? adaptiveResponseBudget(compact.length, 1, 1));
+      return formatToolResponse({ knowledge, query: input.query, results: budgeted.rows, elapsed_ms: Date.now() - started,
+        meta: { provider: 'local', fusion: 'rrf', reranker: search.reranker, partial: search.partial,
+          timings: search.timings, omitted_results: budgeted.omitted, truncated: budgeted.truncated,
+          response_result_bytes: budgeted.bytes, verification: 'stored_assertion_graph_retrieval',
+          live_web_used: false, browser_used: false } });
+    }
+
+    if (input.action === 'answer') {
+      if (!input.answer) throw new Error('answer requires record_id and an exact source quote');
+      return formatToolResponse(await service.resolveLiteralAnswer(requireProject(input), input.answer));
+    }
+
     if (input.action === 'get') {
       const projectId = requireProject(input);
       const recordId = input.record_id ?? input.target_id;
@@ -550,6 +583,13 @@ export async function projectMemoryTool(
       });
     }
 
+    if (input.action === 'job_sources' || input.action === 'job_resume') {
+      const projectId = requireProject(input);
+      if (!input.job_id) throw new Error('job_id required');
+      return formatToolResponse({ job: input.action === 'job_sources'
+        ? await service.jobSources(projectId, input.job_id, input.offset, input.page_limit)
+        : await service.resumeJob(projectId, input.job_id), memory: `Project: ${projectId} | Job: ${input.job_id}` });
+    }
     if (input.action === 'job_status' || input.action === 'job_wait' || input.action === 'job_cancel') {
       const projectId = requireProject(input);
       if (!input.job_id) throw new Error('job_id required');
@@ -609,25 +649,37 @@ export async function projectMemoryTool(
       });
     }
 
+    if (input.action === 'readiness') return formatToolResponse({ readiness: await service.projectReadiness(requireProject(input)),
+      memory: 'Project storage, lexical/vector inventory and queue by stage' });
+    if (input.action === 'import_records') {
+      if (!input.import_path) throw new Error('import_path required');
+      const imported = await service.importRecords({ project_id: requireProject(input), path: input.import_path,
+        dry_run: input.dry_run, allow_partial: input.allow_partial });
+      return formatToolResponse({ imported, memory: `Import: ${input.dry_run === false ? 'queued' : 'preview'}` });
+    }
     if (input.action === 'record_batch') {
       const projectId = requireProject(input);
       if (!input.records?.length) throw new Error('records required');
       if (input.records.length > 100) throw new Error('records accepts at most 100 entries');
-      const results: Array<{ index: number; receipt?: unknown; error?: string }> = [];
+      const results: Array<{ index: number; status: 'committed' | 'replayed' | 'failed';
+        idempotency_key: string; receipt?: unknown; error?: string }> = [];
       for (let index = 0; index < input.records.length; index++) {
+        const key = input.records[index].idempotency_key;
         try {
+          const receipt = await service.writeCatalogRecord({ ...input.records[index], project_id: projectId });
           results.push({
-            index,
-            receipt: await service.writeCatalogRecord({ ...input.records[index], project_id: projectId }),
+            index, idempotency_key: key,
+            status: receipt.idempotent_replay ? 'replayed' : 'committed', receipt,
           });
         } catch (error) {
-          results.push({ index, error: error instanceof Error ? error.message : String(error) });
+          results.push({ index, idempotency_key: key, status: 'failed', error: error instanceof Error ? error.message : String(error) });
         }
       }
       const committed = results.filter((result) => result.receipt).length;
       return formatToolResponse({
         results,
         committed,
+        replayed: results.filter(result => result.status === 'replayed').length,
         failed: results.length - committed,
         partial: committed !== results.length,
         memory: `Project: ${projectId} | Durable writes: ${committed}/${results.length} | Status: ${committed === results.length ? 'committed' : 'partial'}`,
@@ -748,6 +800,17 @@ export async function projectMemoryTool(
     }
 
     if (input.action === 'rebuild' || input.action === 'sync') {
+      if (input.dry_run && input.roots) return formatToolResponse({
+        index: await service.previewProjectImport(input.roots), memory: 'Source import preview; no files parsed or stored' });
+      if (!input.wait_for_completion) {
+        const operation = !input.roots?.length && !input.changed_paths?.length && !input.removed_paths?.length
+          ? 'rebuild' : 'sync';
+        const job = await service.startProjectOperation(projectId, { operation,
+          idempotency_key: input.idempotency_key,
+          roots: input.roots, git_root: input.git_root, root_mode: input.root_mode,
+          changed_paths: input.changed_paths, removed_paths: input.removed_paths });
+        return formatToolResponse({ job, memory: `Project: ${projectId} | Job: ${job.job_id} | Status: ${job.status}` });
+      }
       if (!input.roots?.length && !input.changed_paths?.length && !input.removed_paths?.length) {
         const derived = await service.rebuildDerivedState(projectId);
         return formatToolResponse({
@@ -766,7 +829,10 @@ export async function projectMemoryTool(
       return formatToolResponse({ index, memory: `${index.summary} | Status: ready` });
     }
 
-    if (input.asset_kind || input.operation || input.idempotency_key) {
+    if (input.record_type && (input.asset_kind || input.operation)) {
+      throw new Error('record_type cannot be combined with asset_kind or operation. For ontology/assertion records omit catalog fields; for a catalog document omit record_type.');
+    }
+    if (!input.record_type && (input.asset_kind || input.operation || input.idempotency_key)) {
       if (!input.asset_kind || !input.operation || !input.idempotency_key) {
         throw new Error('asset_kind, operation and idempotency_key required for typed record writes');
       }
@@ -903,13 +969,15 @@ export async function projectMemoryTool(
       if (!input.subject || !input.predicate) throw new Error('subject and predicate required');
       const assertion = await service.recordAssertion({ project_id: projectId, subject: input.subject, predicate: input.predicate,
         object: input.object, value: input.value, unit: input.unit, source: 'explicit', status: input.assertion_status,
-        evidence_ids: input.evidence_ids, valid_from: input.valid_from, valid_to: input.valid_to });
+        evidence_ids: input.evidence_ids, evidence_refs: input.evidence_refs, context: input.context,
+        valid_from: input.valid_from, valid_to: input.valid_to, idempotency_key: input.idempotency_key });
       return formatToolResponse({ record: { record_type: 'assertion', record_id: assertion.assertion_id, project_id: projectId,
         knowledge_layer: 'instance', status: assertion.status, evidence_ids: assertion.evidence_ids }, memory: `Project: ${projectId} | Assertion recorded` });
     }
     if (input.record_type === 'ontology') {
       if (!input.name || !input.ontology_kind) throw new Error('name and ontology_kind required');
       const term = await service.recordOntologyTerm({
+        idempotency_key: input.idempotency_key,
         project_id: projectId,
         kind: input.ontology_kind,
         name: input.name,

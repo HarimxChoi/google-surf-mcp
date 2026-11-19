@@ -15,9 +15,12 @@ import type {
   LocalSearchHit, MemorySessionRecord, OntologyTermRecord, PlanRevisionRecord,
   ProjectDocumentChunkRecord, ProjectDocumentRecord, ProjectDocumentRole, ProjectRecord,
   ProjectSourceEntryRecord, ProjectSourceSnapshot,
-  RetrievalIndexItem, SearchEventRecord, SourceRecordReadback,
+  RetrievalIndexItem, ResearchSearchFilters, SearchEventRecord, SourceRecordReadback,
 } from './contracts.js';
 import { DEFAULT_RESEARCH_QUERY_TIMEOUT_MS } from './limits.js';
+import { ASSERTION_CONTEXT_FIELDS } from './answerEvidence.js';
+import { validateCatalogFields } from './catalogFields.js';
+import { matchesScope } from './searchFilters.js';
 import { cosineSimilarity, validateEmbeddingBatch } from './dense.js';
 import { summarizeAssertionAggregate, type NumericGroup } from './aggregate.js';
 import { applyEmbeddedStorageDefaults } from './resources.js';
@@ -25,6 +28,9 @@ import { RetrievalReadCache, retrievalBodyBytes } from './retrievalReadCache.js'
 import { readExtractionProvenance } from '../extractionProvenance.js';
 import { documentSourceRefs, readDocumentSourceMap, sliceDocumentSourceMaps,
   type DocumentSourceMap, type DocumentSourceRefs } from '../documentSourceMap.js';
+
+const AGGREGATE_CONTEXT_FIELDS = ASSERTION_CONTEXT_FIELDS.filter(field => field !== 'source_observed_at' && field !== 'media')
+  .map(field => `context.${field}`).join(', ');
 
 const SCHEMA = `
 DEFINE TABLE IF NOT EXISTS project SCHEMALESS;
@@ -38,6 +44,7 @@ DEFINE TABLE IF NOT EXISTS artifact_manifest SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS artifact_record SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS artifact_location_observation SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS operation_receipt SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS knowledge_write_receipt SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS catalog_migration_journal SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS catalog_alias SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS memory_session SCHEMALESS;
@@ -154,6 +161,7 @@ export interface GraphSearchSeed {
 
 const GRAPH_SEARCH_KINDS = new Set([
   'plan', 'experiment', 'decision', 'assertion',
+  'document', 'task', 'method', 'attempt', 'arm', 'measurement', 'byte_ledger', 'artifact', 'entity',
 ]);
 
 const CORE_ONTOLOGY: OntologyTermRecord[] = [
@@ -257,7 +265,10 @@ export interface RetrievalDeltaPlan extends RetrievalDeltaResult {
   previous_items: RetrievalItemState[];
 }
 
+export interface RetrievalScope { document_ids: string[]; source_ids: string[]; content_hashes: string[] }
+
 export interface CommitCatalogRevisionInput {
+  update_project_profile?: boolean;
   project_id: string;
   asset_id: string;
   kind: CatalogAssetKind;
@@ -288,6 +299,15 @@ function withoutId<T extends object>(record: RecordWithId<T>): T {
 
 function catalogRecordId(table: string, value: string): RecordId {
   return new RecordId(table, createHash('sha256').update(value).digest('hex'));
+}
+
+export interface KnowledgeWriteKey { key: string; request_hash: string }
+type KnowledgeWriteKind = 'assertion' | 'ontology';
+interface KnowledgeWriteReceipt {
+  project_id: string;
+  kind: KnowledgeWriteKind;
+  record_id: string;
+  request_hash: string;
 }
 
 function stableJson(value: unknown): string {
@@ -655,6 +675,14 @@ export class ResearchStore {
       const previous = prior
         ? withoutId(prior as RecordWithId<CatalogRevisionRecord>)
         : undefined;
+      if (input.operation === 'relocate') {
+        const locationFields = new Set(['source_locator', 'path', 'location', 'current_location',
+          'historical_locations', 'available', 'verification']);
+        const changedConditions = Object.keys(input.fields ?? {}).filter(key => !locationFields.has(key)
+          && stableJson(input.fields![key]) !== stableJson(previous?.fields[key]));
+        if (changedConditions.length) throw new Error(`relocate only changes locations, not evaluation conditions: ${changedConditions.join(', ')}; use patch or correct`);
+        if (input.body !== undefined || input.body_attachment) throw new Error('relocate cannot replace record content; use patch or correct');
+      }
       let previousArtifactReferences = previous?.artifact_references ?? [];
       if (previous?.artifact_manifest_id && !previousArtifactReferences.length) {
         const manifest = await tx.select<{ references?: ArtifactReference[] }>(
@@ -673,12 +701,24 @@ export class ResearchStore {
       const fields = input.operation === 'create' && !currentAsset
         ? { ...(input.fields ?? {}) }
         : { ...(previous?.fields ?? {}), ...(input.fields ?? {}) };
+      validateCatalogFields(input.kind, fields, input.missing_fields ?? previous?.missing_fields ?? [],
+        previous?.fields, input.operation === 'relocate');
       const evidenceIds = [...new Set([
         ...(previous?.evidence_ids ?? []),
         ...(input.evidence_ids ?? []),
       ])];
+      const relocatingIds = new Set(input.operation === 'relocate'
+        ? (input.artifact_references ?? []).map(reference => reference.artifact_id) : []);
+      if (input.operation === 'relocate') {
+        for (const reference of input.artifact_references ?? []) {
+          const prior = previousArtifactReferences.find(row => row.artifact_id === reference.artifact_id);
+          if (prior?.content_hash && reference.content_hash && prior.content_hash !== reference.content_hash) {
+            throw new Error('relocate cannot change artifact content_hash; use a new artifact ID or a correction');
+          }
+        }
+      }
       const artifactReferences = uniqueArtifacts([
-        ...previousArtifactReferences,
+        ...previousArtifactReferences.filter(reference => !relocatingIds.has(reference.artifact_id)),
         ...(input.artifact_references ?? []),
       ]);
       const artifactManifestId = artifactReferences.length
@@ -848,7 +888,8 @@ export class ResearchStore {
         if (project) {
           await tx.update(projectId).merge({
             catalog_generation: Number(project.catalog_generation ?? 0) + 1,
-            ...(input.kind === 'project' ? {
+            graph_dirty_at: committedAt,
+            ...(input.kind === 'project' && input.update_project_profile && input.asset_id === input.project_id ? {
               project_profile_asset_id: input.asset_id,
               project_profile_revision_id: revisionId,
               ...(typeof fields.name === 'string' ? { name: fields.name } : {}),
@@ -1309,11 +1350,30 @@ export class ResearchStore {
   async putOntologyRevision(
     prior: OntologyTermRecord | undefined,
     term: OntologyTermRecord,
-  ): Promise<void> {
+    key?: KnowledgeWriteKey,
+  ): Promise<OntologyTermRecord> {
     const db = await this.open();
+    if (key) {
+      return await this.transaction(db, async tx => {
+        const existing = await this.knowledgeWriteReplay(tx, term.project_id ?? 'core', 'ontology', key);
+        if (existing) return existing as OntologyTermRecord;
+        const current = await tx.select<OntologyTermRecord>(new RecordId('ontology_term', term.term_id));
+        if (current) {
+          const { created_at: _currentTime, ...currentContent } = withoutId(current as RecordWithId<OntologyTermRecord>);
+          const { created_at: _nextTime, ...nextContent } = term;
+          if (stableJson(currentContent) !== stableJson(nextContent)) {
+            throw new Error('ontology revision already exists; use supersedes_term_id to record a new definition or review');
+          }
+        }
+        if (prior) await tx.update(new RecordId('ontology_term', prior.term_id)).merge({ status: 'superseded' });
+        if (!current) await tx.create(new RecordId('ontology_term', term.term_id)).content(term as unknown as Record<string, unknown>);
+        await this.putKnowledgeWriteReceipt(tx, term.project_id ?? 'core', 'ontology', term.term_id, key);
+        return current ? withoutId(current as RecordWithId<OntologyTermRecord>) : term;
+      });
+    }
     if (!prior) {
       await this.putOntologyTerm(term);
-      return;
+      return term;
     }
     await db.query(
       `BEGIN TRANSACTION;
@@ -1327,6 +1387,7 @@ export class ResearchStore {
         term_data: term,
       },
     ).collect();
+    return term;
   }
 
   async putEntity(entity: EntityRecord): Promise<EntityRecord> {
@@ -1444,6 +1505,7 @@ export class ResearchStore {
     sourceId: string,
   ): Promise<boolean> {
     if (sourceType === 'manual') return true;
+    if (sourceType === 'catalog') return Boolean(await this.getCatalogRecord(projectId, sourceId, undefined, 0, 0));
     const db = await this.open();
     if (sourceType === 'document') {
       return Boolean(await db.select(new RecordId('project_document', `${projectId}_${sourceId}`)));
@@ -1461,8 +1523,49 @@ export class ResearchStore {
     return rows.length > 0;
   }
 
-  async putAssertion(assertion: AssertionRecord): Promise<AssertionRecord> {
+  private async knowledgeWriteReplay(
+    db: Surreal | SurrealTransaction, projectId: string, kind: KnowledgeWriteKind, key: KnowledgeWriteKey,
+  ): Promise<AssertionRecord | OntologyTermRecord | undefined> {
+    const receipt = await db.select<KnowledgeWriteReceipt>(
+      catalogRecordId('knowledge_write_receipt', `${projectId}\0${kind}\0${key.key}`));
+    if (!receipt) return undefined;
+    if (receipt.project_id !== projectId || receipt.kind !== kind || receipt.request_hash !== key.request_hash) {
+      throw new Error('idempotency key conflict: the key was already committed with different content');
+    }
+    const row = await db.select<AssertionRecord | OntologyTermRecord>(
+      new RecordId(kind === 'assertion' ? 'assertion' : 'ontology_term', receipt.record_id));
+    if (!row) throw new Error('idempotency receipt points to a missing knowledge record');
+    return withoutId(row as RecordWithId<AssertionRecord | OntologyTermRecord>);
+  }
+
+  private async putKnowledgeWriteReceipt(
+    tx: SurrealTransaction, projectId: string, kind: KnowledgeWriteKind, recordId: string, key: KnowledgeWriteKey,
+  ): Promise<void> {
+    await tx.create(catalogRecordId('knowledge_write_receipt', `${projectId}\0${kind}\0${key.key}`))
+      .content({ project_id: projectId, kind, record_id: recordId, request_hash: key.request_hash });
+  }
+
+  async getKnowledgeWrite(projectId: string, kind: KnowledgeWriteKind, key: KnowledgeWriteKey) {
+    return await this.knowledgeWriteReplay(await this.open(), projectId, kind, key);
+  }
+
+  async putAssertion(assertion: AssertionRecord, evidence: EvidenceRecord[] = [], key?: KnowledgeWriteKey): Promise<AssertionRecord> {
     const db = await this.open();
+    if (evidence.length || key) {
+      return await this.transaction(db, async tx => {
+        if (key) {
+          const existing = await this.knowledgeWriteReplay(tx, assertion.project_id, 'assertion', key);
+          if (existing) return existing as AssertionRecord;
+        }
+        for (const row of evidence) {
+          await tx.create(new RecordId('evidence', row.evidence_id)).content(row as unknown as Record<string, unknown>);
+        }
+        const value = await tx.create<AssertionRecord>(new RecordId('assertion', assertion.assertion_id))
+          .content(assertion as unknown as Record<string, unknown>);
+        if (key) await this.putKnowledgeWriteReceipt(tx, assertion.project_id, 'assertion', assertion.assertion_id, key);
+        return withoutId(value as RecordWithId<AssertionRecord>);
+      });
+    }
     const value = await db.create<AssertionRecord>(
       new RecordId('assertion', assertion.assertion_id),
     ).content(assertion as unknown as Record<string, unknown>);
@@ -1694,6 +1797,7 @@ export class ResearchStore {
       project_id: node.project_id,
       node_id: node.node_id,
       kind: node.kind,
+      index_version: 'catalog-v2',
       text: `${node.label}\n${node.text?.slice(0, 2_000) ?? ''}\n${node.source_id ?? ''}`,
     }));
     for (let index = 0; index < rows.length; index += 1_000) {
@@ -1897,7 +2001,7 @@ export class ResearchStore {
     let indexed = 0;
     for (const projectionId of projectionIds) {
       const [counts] = await db.query<[Array<{ count: number }>]>(
-        'SELECT count() AS count FROM graph_search_node WHERE projection_id = $projection_id GROUP ALL',
+          "SELECT count() AS count FROM graph_search_node WHERE projection_id = $projection_id AND index_version = 'catalog-v2' GROUP ALL",
         { projection_id: projectionId },
       ).collect();
       if (Number(counts[0]?.count ?? 0) > 0) continue;
@@ -2590,11 +2694,17 @@ export class ResearchStore {
     if (!existingSnapshot) {
       await db.create(snapshotId).content(pendingSnapshot as unknown as Record<string, unknown>);
     }
-    for (let index = 0; index < input.bodies.length; index += 250) {
-      const batch = input.bodies.slice(index, index + 250).map((body) => ({
-        id: new RecordId('source_body', body.content_hash),
-        ...body,
-      }));
+    for (let index = 0; index < input.bodies.length;) {
+      const batch: Array<Record<string, unknown> & { id: RecordId }> = [];
+      let bytes = 0;
+      while (index < input.bodies.length && batch.length < 250) {
+        const body = input.bodies[index];
+        const size = Buffer.byteLength(body.text);
+        if (batch.length && bytes + size > 4 * 1024 * 1024) break;
+        batch.push({ id: new RecordId('source_body', body.content_hash), ...body });
+        bytes += size;
+        index++;
+      }
       await db.insert(new Table('source_body'), batch).ignore();
     }
     const activatedAt = new Date().toISOString();
@@ -2901,6 +3011,8 @@ export class ResearchStore {
     const db = await this.open();
     const [rows] = await db.query<[Array<ProjectDocumentRecord & { active_chunk_set_id?: string }>]>(
       `SELECT project_id, document_id, state, active_chunk_set_id,
+        (SELECT VALUE exact_terms FROM ONLY type::record('document', $parent.document_id)) AS exact_terms,
+        (SELECT VALUE role FROM ONLY type::record('document', $parent.document_id)) AS role,
         (SELECT VALUE title FROM ONLY type::record('document', $parent.document_id)) AS title,
         (SELECT VALUE canonical_url FROM ONLY type::record('document', $parent.document_id)) AS url,
         (SELECT VALUE scholar_id FROM ONLY type::record('document', $parent.document_id)) AS scholar_id
@@ -3074,29 +3186,59 @@ export class ResearchStore {
   async aggregateAssertions(projectIds: string[], input: AssertionAggregateInput) {
     const db = await this.open();
     const observedAt = new Date().toISOString();
-    const where = `project_id IN $project_ids AND ($predicate = NONE OR predicate = $predicate)
+    const selectors = ASSERTION_CONTEXT_FIELDS.filter(field => input.context?.[field] !== undefined);
+    const scope = `project_id IN $project_ids AND ($predicate = NONE OR predicate = $predicate)
       AND ($subject = NONE OR subject = $subject)
-      AND (status = $status OR ($historical = true AND status = 'superseded' AND superseded_from_status = $status))
-      AND recorded_at <= $recorded_as_of AND (recorded_until = NONE OR recorded_until > $recorded_as_of)
+      ${input.subjects ? 'AND subject IN $subjects' : ''}
+      ${selectors.map(field => `AND context.${field} = $context.${field}`).join(' ')}
       AND (valid_from = NONE OR valid_from <= $valid_at) AND (valid_to = NONE OR valid_to > $valid_at)`;
-    const params = { project_ids: projectIds, predicate: input.predicate, subject: input.subject, status: input.status ?? 'confirmed',
+    const where = `${scope}
+      AND (status = $status OR ($historical = true AND status = 'superseded' AND superseded_from_status = $status))
+      AND recorded_at <= $recorded_as_of AND (recorded_until = NONE OR recorded_until > $recorded_as_of)`;
+    const params = { project_ids: projectIds, predicate: input.predicate, subject: input.subject, subjects: input.subjects,
+      context: input.context, status: input.status ?? 'confirmed',
       historical: Boolean(input.recorded_as_of), recorded_as_of: input.recorded_as_of ?? observedAt, valid_at: input.valid_at ?? observedAt };
     const data = await this.transaction(db, async tx => {
       if (input.recorded_as_of) {
-        const [unknown] = await tx.query<[Array<{ count: number }>]>(`SELECT count() AS count FROM assertion WHERE project_id IN $project_ids
-          AND ($predicate = NONE OR predicate = $predicate) AND ($subject = NONE OR subject = $subject)
+        const [unknown] = await tx.query<[Array<{ count: number }>]>(`SELECT count() AS count FROM assertion WHERE ${scope}
           AND recorded_at <= $recorded_as_of AND (recorded_until = NONE OR recorded_until > $recorded_as_of)
           AND (status = 'forgotten' OR (status = 'superseded' AND superseded_from_status = NONE)) GROUP ALL`,params).collect();
         if (unknown[0]?.count) throw new Error('historical assertion status is unavailable for legacy or forgotten records; inspect their revisions instead of treating an incomplete population as complete');
       }
       const [counts] = await tx.query<[Array<{ matched:number }>]>(`SELECT count() AS matched FROM assertion WHERE ${where} GROUP ALL`,params).collect();
-      if (input.operation === 'count') return summarizeAssertionAggregate(input,counts[0]?.matched ?? 0,[]);
+      const matched = counts[0]?.matched ?? 0;
+      if (matched > 1 && !input.allow_mixed_contexts) {
+        const [scopes] = await tx.query<[unknown[]]>(`SELECT ${AGGREGATE_CONTEXT_FIELDS} FROM assertion
+          WHERE ${where} GROUP BY ${AGGREGATE_CONTEXT_FIELDS} LIMIT 2`, params).collect();
+        if (scopes.length > 1) return summarizeAssertionAggregate(input, matched, [], 'mixed_contexts');
+      }
+      if (input.subjects) {
+        const [cohort] = await tx.query<[Array<{ subject: string; matches: number }>]>(`SELECT subject, count() AS matches
+          FROM assertion WHERE ${where} GROUP BY subject`, params).collect();
+        const covered = new Map(cohort.map(row => [row.subject, row.matches]));
+        const missing = input.subjects.filter(subject => !covered.has(subject));
+        const duplicates = cohort.filter(row => row.matches > 1).map(row => row.subject);
+        if (missing.length || duplicates.length) {
+          return { ...summarizeAssertionAggregate(input, matched, [], 'incomplete_cohort'),
+            cohort_gaps: { missing: missing.length, duplicates: duplicates.length,
+              missing_examples: missing.slice(0, 5), duplicate_examples: duplicates.slice(0, 5) } };
+        }
+      }
+      if (input.require_complete_candidates) {
+        const [incomplete] = await tx.query<[Array<{ matched: number }>]>(`SELECT count() AS matched FROM assertion
+          WHERE ${where} AND (context.candidate_scope.coverage = NONE OR context.candidate_scope.coverage != 'complete') GROUP ALL`, params).collect();
+        if (!matched || incomplete[0]?.matched) return summarizeAssertionAggregate(input, matched, [], 'incomplete_candidates');
+      }
+      if (input.operation === 'count') return summarizeAssertionAggregate(input, matched, []);
       const [groups] = await tx.query<[NumericGroup[]]>(`SELECT unit, count() AS numeric_count, math::sum(value) AS sum, math::min(value) AS min, math::max(value) AS max
          FROM assertion WHERE ${where} AND type::is_number(value) GROUP BY unit LIMIT 101`,params).collect();
-      return summarizeAssertionAggregate(input, counts[0]?.matched ?? 0, groups);
+      return summarizeAssertionAggregate(input, matched, groups);
     });
-    return { ...data, population: { scope: 'all_matching_assertions', complete: true, project_ids: projectIds,
+    return { ...data, population: { scope: 'all_matching_assertions',
+      complete: !['mixed_contexts', 'incomplete_cohort', 'incomplete_candidates'].includes(data.status), project_ids: projectIds,
       predicate: input.predicate ?? null, subject: input.subject ?? null, status: input.status ?? 'confirmed',
+      ...(input.subjects ? { requested_subject_count: input.subjects.length } : {}),
+      ...(input.context ? { context: input.context } : {}),
       recorded_as_of: params.recorded_as_of, valid_at: params.valid_at }, observed_at: observedAt, source: 'database_aggregate', top_k_used: false };
   }
 
@@ -3199,10 +3341,11 @@ export class ResearchStore {
         updated_at?: string;
         catalog_asset_id?: string;
         catalog_revision_id?: string;
+        role?: ProjectDocumentRole;
       }>]>(
-        `SELECT document_id, kind, updated_at, catalog_asset_id, catalog_revision_id
-         FROM document WHERE document_id IN $document_ids`,
-        { document_ids: documentIds },
+        `SELECT record::id(id) AS document_id, kind, updated_at, catalog_asset_id, catalog_revision_id, role
+         FROM $document_records WHERE id != NONE`,
+        { document_records: documentIds.map(id => new RecordId('document', id)) },
       ).collect()
       : [[]];
     const [sourceEntries] = sourceIds.length
@@ -3251,6 +3394,7 @@ export class ResearchStore {
           source_family: 'document' as const,
           retrieval_family: retrievalFamily,
           kind: document?.kind,
+          role: document?.role,
           recorded_at: document?.updated_at,
         }];
       }
@@ -3286,10 +3430,55 @@ export class ResearchStore {
     )) === index);
   }
 
+  async projectReadiness(projectId: string) {
+    const db = await this.open();
+    const [catalog, lexical, vectors, queue, latest] = await db.query<[
+      Array<{ count: number }>, Array<{ count: number }>, Array<{ count: number }>,
+      Array<{ kind: string; stage?: string; status: string; count: number }>, Array<{ updated_at: string; stage?: string }>,
+    ]>(`SELECT count() AS count FROM catalog_asset WHERE project_id = $project_id GROUP ALL;
+      SELECT count() AS count FROM project_document WHERE project_id = $project_id AND state = 'lexical_active' GROUP ALL;
+      SELECT count() AS count FROM retrieval_vector WHERE project_id = $project_id GROUP ALL;
+      SELECT kind, stage, status, count() AS count FROM knowledge_job WHERE project_id = $project_id
+        AND status IN ['queued', 'running', 'failed'] GROUP BY kind, stage, status;
+      SELECT updated_at, stage FROM knowledge_job WHERE project_id = $project_id ORDER BY updated_at DESC LIMIT 1;`,
+    { project_id: projectId }).collect();
+    return { project_id: projectId, durable_records: catalog[0]?.count ?? 0,
+      lexical_documents: lexical[0]?.count ?? 0, vector_items: vectors[0]?.count ?? 0,
+      vector_enabled: this.vectorBackend !== undefined, queue,
+      last_progress_at: latest[0]?.updated_at, last_stage: latest[0]?.stage,
+      note: 'Durable records, lexical documents and vector chunks have different units; counts are not coverage percentages.' };
+  }
+
+  async retrievalScope(projectId: string, filters: ResearchSearchFilters): Promise<RetrievalScope> {
+    const db = await this.open();
+    const [catalog, sources, documents] = await db.query<[
+      Array<{ asset_id: string; kind: string; namespace?: string; sport?: string; folder?: string; model_id?: string }>,
+      Array<{ entry_id: string; root: string; path: string; content_hash: string; role?: string }>,
+      Array<{ document_id: string; title?: string; url?: string }>,
+    ]>(`SELECT asset_id, kind, fields.namespace AS namespace, fields.sport AS sport,
+        fields.folder AS folder, fields.model_id AS model_id FROM catalog_revision
+        WHERE project_id = $project_id AND revision_id IN (SELECT VALUE current_revision_id FROM catalog_asset WHERE project_id = $project_id);
+      SELECT entry_id, root, path, content_hash, role FROM project_source_entry
+        WHERE project_id = $project_id AND active = true AND searchable = true;
+      SELECT document_id, title, url FROM project_document WHERE project_id = $project_id AND state = 'lexical_active';`,
+    { project_id: projectId }).collect();
+    const catalogDocuments = new Map(catalog.map(row => [`catalog-${createHash('sha256').update(row.asset_id).digest('hex').slice(0, 32)}`, row]));
+    const selectedSources = sources.filter(row => matchesScope(filters, `${row.root}/${row.path}`, row)
+      && (!filters.roles?.length || filters.roles.includes(row.role as ProjectDocumentRole))
+      && (!filters.kinds?.length || filters.kinds.includes('source')));
+    return { document_ids: documents.filter(row => {
+      const record = catalogDocuments.get(row.document_id);
+      return matchesScope(filters, `${record?.asset_id ?? ''} ${row.title ?? ''} ${row.url ?? ''}`, record)
+        && (!filters.kinds?.length || filters.kinds.includes(record?.kind ?? 'document'));
+    }).map(row => row.document_id), source_ids: selectedSources.map(row => row.entry_id),
+    content_hashes: [...new Set(selectedSources.map(row => row.content_hash))] };
+  }
+
   async searchProjectExact(
     projectId: string,
     normalizedQuery: string,
     limit: number,
+    scope?: RetrievalScope,
   ): Promise<LocalSearchHit[]> {
     const db = await this.open();
     const candidateLimit = Math.min(100, Math.max(limit * 4, limit));
@@ -3298,8 +3487,10 @@ export class ResearchStore {
          span_start, span_end, role,
          1 AS score FROM retrieval_exact
        WHERE project_id = $project_id AND normalized_term = $normalized_query
+         AND ($unscoped OR (source_family = 'document' AND source_id IN $document_ids) OR (source_family = 'code' AND source_id IN $source_ids))
        ORDER BY title ASC LIMIT $limit`,
-      { project_id: projectId, normalized_query: normalizedQuery, limit: candidateLimit },
+      { project_id: projectId, normalized_query: normalizedQuery, limit: candidateLimit,
+        unscoped: !scope, document_ids: scope?.document_ids ?? [], source_ids: scope?.source_ids ?? [] },
     ).collect();
     const distinct = rows.filter((row, index) => rows.findIndex((candidate) => (
       candidate.project_id === row.project_id
@@ -3314,9 +3505,12 @@ export class ResearchStore {
     embeddingModel: string,
     embedding: number[],
     limit: number,
+    scope?: RetrievalScope,
   ): Promise<LocalSearchHit[]> {
     validateEmbeddingBatch([embedding], 1);
     const db = await this.open();
+    const scopeClause = ` AND ($unscoped OR (source_family = 'document' AND source_id IN $document_ids) OR (source_family = 'code' AND source_id IN $source_ids))`;
+    const scopeParams = { unscoped: !scope, document_ids: scope?.document_ids ?? [], source_ids: scope?.source_ids ?? [] };
     const assertFingerprint = async () => {
       const [models] = await db.query<[Array<{ embedding_model: string }>]>(
         'SELECT embedding_model FROM retrieval_vector WHERE project_id = $project_id GROUP BY embedding_model',
@@ -3331,8 +3525,8 @@ export class ResearchStore {
       const [scope] = await db.query<[Array<Omit<RetrievalReference, 'score'> & { embedding: number[] }>]>(
         `SELECT item_id, project_id, source_family, source_id, title, url, content_hash,
            span_start, span_end, role, embedding FROM retrieval_vector
-         WHERE project_id = $project_id AND embedding_model = $embedding_model LIMIT $scope_limit`,
-        { project_id: projectId, embedding_model: embeddingModel, scope_limit: 1_025 },
+         WHERE project_id = $project_id AND embedding_model = $embedding_model ${scopeClause} LIMIT $scope_limit`,
+        { project_id: projectId, embedding_model: embeddingModel, scope_limit: 1_025, ...scopeParams },
       ).collect();
       if (scope.length <= 1_024) {
         if (!scope.length) await assertFingerprint();
@@ -3346,7 +3540,7 @@ export class ResearchStore {
         return await this.hydrateRetrieval(references, 'vector');
       }
     }
-    if (this.vectorBackend === 'exhaustive') {
+    if (this.vectorBackend === 'exhaustive' || scope) {
       const ranked: Array<RetrievalReference & { embedding?: number[] }> = [];
       const pageSize = 500;
       const maxRows = 100_000;
@@ -3355,9 +3549,9 @@ export class ResearchStore {
           `SELECT item_id, project_id, source_family, source_id, title, url, content_hash,
              span_start, span_end, role, embedding
            FROM retrieval_vector
-           WHERE project_id = $project_id AND embedding_model = $embedding_model
+           WHERE project_id = $project_id AND embedding_model = $embedding_model ${scopeClause}
            ORDER BY item_id ASC LIMIT $page_size START $offset`,
-          { project_id: projectId, embedding_model: embeddingModel, page_size: pageSize, offset },
+          { project_id: projectId, embedding_model: embeddingModel, page_size: pageSize, offset, ...scopeParams },
         ).collect();
         for (const row of page) ranked.push({ ...row, score: cosineSimilarity(row.embedding, embedding) });
         if (page.length < pageSize) break;
@@ -3413,13 +3607,13 @@ export class ResearchStore {
     return await this.hydrateRetrieval(references, 'vector');
   }
 
-  async searchSourceRanks(query: string, limit: number): Promise<Array<{ content_hash: string; score: number }>> {
+  async searchSourceRanks(query: string, limit: number, scope?: RetrievalScope): Promise<Array<{ content_hash: string; score: number }>> {
     const db = await this.open();
     const [rows] = await db.query<[Array<{ content_hash: string; score: number }>]>(
       `SELECT content_hash, search::score(0) AS score
-       FROM source_body WHERE text @0@ $query
+       FROM source_body WHERE text @0@ $query AND ($unscoped OR content_hash IN $hashes)
        ORDER BY score DESC, content_hash ASC LIMIT $limit`,
-      { query, limit: Math.min(Math.max(limit * 20, 100), 500) },
+      { query, limit: Math.min(Math.max(limit * 20, 100), 500), unscoped: !scope, hashes: scope?.content_hashes ?? [] },
     ).collect();
     return rows;
   }
@@ -3430,10 +3624,11 @@ export class ResearchStore {
     query: string,
     limit: number,
     preparedRanks?: () => ReturnType<ResearchStore['searchSourceRanks']>,
+    scope?: RetrievalScope,
   ): Promise<LocalSearchHit[]> {
     if (!snapshotId) return [];
     const db = await this.open();
-    const rows = await (preparedRanks ? preparedRanks() : this.searchSourceRanks(query, limit));
+    const rows = await (preparedRanks ? preparedRanks() : this.searchSourceRanks(query, limit, scope));
     if (!rows.length) return [];
     const hashes = rows.map((row) => row.content_hash);
     const [entries] = await db.query<[Array<{
@@ -3447,8 +3642,9 @@ export class ResearchStore {
       `SELECT entry_id, root, path, content_hash, role, source_map_id FROM project_source_entry
        WHERE project_id = $project_id
          AND active = true AND searchable = true AND content_hash IN $hashes
+         AND ($unscoped OR entry_id IN $source_ids)
        ORDER BY path ASC`,
-      { project_id: projectId, hashes },
+      { project_id: projectId, hashes, unscoped: !scope, source_ids: scope?.source_ids ?? [] },
     ).collect();
     const firstPath = new Map<string, {
       entry_id: string; root: string; path: string; role?: ProjectDocumentRole; source_map_id?: string;
@@ -3487,13 +3683,14 @@ export class ResearchStore {
   async searchProjectBm25(
     projectId: string, query: string, limit: number,
     preparedSourceRanks?: () => ReturnType<ResearchStore['searchSourceRanks']>,
+    scope?: RetrievalScope,
   ): Promise<LocalSearchHit[]> {
     const db = await this.open();
     const project = await this.getProject(projectId);
     const [memberships] = await db.query<[Array<{ document_id: string; active_chunk_set_id?: string }>]>(
       `SELECT document_id, active_chunk_set_id FROM project_document
-       WHERE project_id = $project_id AND state = 'lexical_active'`,
-      { project_id: projectId },
+       WHERE project_id = $project_id AND state = 'lexical_active' AND ($unscoped OR document_id IN $document_ids)`,
+      { project_id: projectId, unscoped: !scope, document_ids: scope?.document_ids ?? [] },
     ).collect();
     const [rows] = memberships.length ? await db.query<[Array<{
       document_id: string;
@@ -3532,6 +3729,7 @@ export class ResearchStore {
       query,
       limit,
       preparedSourceRanks,
+      scope,
     );
     const fused = [...documents.map((row, index) => ({ row, score: 1 / (60 + index + 1) })),
       ...sources.map((row, index) => ({ row, score: 1 / (60 + index + 1) }))];

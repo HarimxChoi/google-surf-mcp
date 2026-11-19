@@ -24,9 +24,34 @@ describe('explicit search site scope', () => {
 
   it.each(['ordinary search', '"site:example.org" examples', '-site:example.org examples',
     'site:example.org OR other', '(site:example.org other)', 'site:example.org site:another.test',
-    'site:example.org/docs reference', 'site:example.org:8080 reference'])('does not reinterpret an unsupported query: %s', query => {
+    'site:example.org:8080 reference'])('does not reinterpret an unsupported query: %s', query => {
     const response = formatToolResponse({ query, results: rows });
     expect(enforceSearchSiteScope(response)).toBe(response);
+  });
+
+  it('enforces path-qualified site operators before extraction', () => {
+    const response = enforceSearchSiteScope(formatToolResponse({
+      query: 'site:redis.io/docs/latest/commands/set/ expiration options version',
+      results: [
+        { url: 'https://redis.io/docs/latest/commands/set/', title: 'SET' },
+        { url: 'https://redis.io/docs/latest/commands/set', title: 'SET canonical alias' },
+        { url: 'https://redis.io/docs/latest/commands/ttl/', title: 'TTL' },
+        { url: 'https://finance.test/options-expiration', title: 'Stock options' },
+      ],
+    }));
+    expect(response.structuredContent?.results).toEqual([
+      { url: 'https://redis.io/docs/latest/commands/set/', title: 'SET' },
+      { url: 'https://redis.io/docs/latest/commands/set', title: 'SET canonical alias' },
+    ]);
+    expect(response.structuredContent?.meta).toMatchObject({ site_scope: [{ domain: 'redis.io', path: '/docs/latest/commands/set/', removed: 2 }] });
+  });
+
+  it('recovers only explicit references inside the requested path', () => {
+    const response = enforceSearchSiteScope(formatToolResponse({
+      query: 'site:redis.io/docs/latest/commands/set/ expiration',
+      results: [{ url: 'https://other.test', description: 'https://redis.io/docs/latest/commands/ttl/ https://redis.io/docs/latest/commands/set/' }],
+    }));
+    expect((response.structuredContent?.results as Array<{url:string}>).map(row => row.url)).toEqual(['https://redis.io/docs/latest/commands/set/']);
   });
 
   it('normalizes case, trailing dots and international domain names', () => {

@@ -18,6 +18,30 @@ describe('research project memory', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('retrieves a newly recorded assertion before the deferred graph refresh', async () => {
+    await service.createProject('Immediate ontology', 'immediate-ontology');
+    await service.createProject('Other ontology', 'other-ontology');
+    await service.recordOntologyTerm({ project_id: 'immediate-ontology', kind: 'relation',
+      name: 'probe_colour', definition: 'The synthetic colour of an entity.' });
+    await service.recordAssertion({ project_id: 'immediate-ontology', subject: 'SYNTHETIC_SCOPE_TEST_72815',
+      predicate: 'probe_colour', value: 'amber', source: 'explicit' });
+    const result = await service.searchBatch('immediate-ontology', 'SYNTHETIC_SCOPE_TEST_72815', [], 10);
+    expect(result.results.some(row => row.content.includes('amber') || row.title.includes('SYNTHETIC_SCOPE_TEST_72815'))).toBe(true);
+    const other = await service.searchBatch('other-ontology', 'SYNTHETIC_SCOPE_TEST_72815', [], 10);
+    expect(other.results.some(row => row.content.includes('amber') || row.title.includes('SYNTHETIC_SCOPE_TEST_72815'))).toBe(false);
+    expect(result.degraded_lanes).toEqual([]);
+  });
+
+  it('rejects a cached projection completed before a newer assertion write', async () => {
+    await service.createProject('Stale ontology', 'stale-ontology');
+    const before = await service.exportGraphProjection(['stale-ontology']);
+    await service.recordAssertion({ project_id: 'stale-ontology', subject: 'UNIQUE_GRAPH_ENTITY_4921',
+      predicate: 'probe_colour', value: 'copper', source: 'explicit' });
+    service['graphCache'].set('stale-ontology', before);
+    const result = await service.searchBatch('stale-ontology', 'UNIQUE_GRAPH_ENTITY_4921', [], 10);
+    expect(result.results.some(row => row.content.includes('copper') || row.title.includes('UNIQUE_GRAPH_ENTITY_4921'))).toBe(true);
+  });
+
   it('captures and retrieves a source whose title starts with a Markdown heading', async () => {
     await service.createProject('Document capture', 'document-capture');
     const capture = await service.capture({ tool: 'extract', project_id: 'document-capture', payload: {
@@ -729,6 +753,10 @@ describe('research project memory', () => {
       source: 'sidecar',
       evidence_ids: [evidence.evidence_id],
     })).rejects.toThrow('evidence_ids must belong to the project');
+    await expect(service.recordAssertion({
+      project_id: 'assertion-a', subject: 'paper:a', predicate: 'supports', object: 'claim:a',
+      source: 'explicit', evidence_ids: ['document-not-an-evidence-record'],
+    })).rejects.toThrow('not document_id or record_id');
   });
 
   it('versions ontology terms without losing the prior term', async () => {

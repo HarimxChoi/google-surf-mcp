@@ -14,6 +14,31 @@ describe('durable research catalog', () => {
     if (root) await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   });
 
+  it('reuses generated document IDs for sequential and concurrent idempotent retries', async () => {
+    root = await mkdtemp(join(tmpdir(), 'surf-catalog-auto-id-'));
+    service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel: '' });
+    await service.createProject('Auto IDs', 'auto-ids');
+    const input = { project_id: 'auto-ids', kind: 'document' as const, operation: 'create' as const,
+      idempotency_key: 'generated-document', body: 'Exact source evidence', fields: { title: 'Source' } };
+    const first = await service.writeCatalogRecord(input);
+    const retry = await service.writeCatalogRecord(input);
+    expect(retry).toMatchObject({ record_id: first.record_id, revision: 1, idempotent_replay: true });
+    const concurrent = await Promise.all([1, 2].map(() => service!.writeCatalogRecord({ ...input,
+      idempotency_key: 'concurrent-document' })));
+    expect(new Set(concurrent.map(row => row.record_id)).size).toBe(1);
+    await expect(service.writeCatalogRecord({ ...input, body: 'Changed evidence' })).rejects.toThrow('idempotency key conflict');
+  });
+
+  it('replays a previously generated document identity without an explicit asset ID', async () => {
+    root = await mkdtemp(join(tmpdir(), 'surf-catalog-legacy-id-'));
+    service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel: '' });
+    await service.createProject('Legacy IDs', 'legacy-ids');
+    const input = { project_id: 'legacy-ids', kind: 'document' as const, operation: 'create' as const,
+      idempotency_key: 'prior-document', body: 'Prior source evidence', fields: { title: 'Source' } };
+    await service.writeCatalogRecord({ ...input, asset_id: 'prior-generated-random-id' });
+    expect(await service.writeCatalogRecord(input)).toMatchObject({ record_id: 'prior-generated-random-id', idempotent_replay: true });
+  });
+
   it('round-trips full bodies, manifests, revisions, aliases, and idempotency after restart', async () => {
     root = await mkdtemp(join(tmpdir(), 'surf-catalog-'));
     service = new ResearchService({ enabled: true, root, endpoint: 'mem://', vectorModel: '' });
@@ -342,6 +367,8 @@ describe('durable research catalog', () => {
       },
     });
     const snapshot = await service.exportCatalogSnapshot('rollback');
+    const renamed = await service.updateProjectContext({ project_id: 'rollback', name: 'After snapshot' });
+    expect(renamed.name).toBe('After snapshot');
     await service.writeCatalogRecord({
       project_id: 'rollback', kind: 'plan', operation: 'patch', asset_id: 'main-plan',
       expected_revision: 1, idempotency_key: 'plan-v2', body: 'Changed plan',
@@ -364,6 +391,7 @@ describe('durable research catalog', () => {
     expect(applied).toMatchObject({
       dry_run: false, mode: 'rollback', preserved_post_snapshot_assets: true,
     });
+    expect((await service.getProject('rollback')).project.name).toBe('Rollback');
     const currentPlan = await service.getCatalogRecord('rollback', 'main-plan');
     if ('legacy' in currentPlan) throw new Error('unexpected legacy plan');
     expect(currentPlan.body).toBe('Original plan');

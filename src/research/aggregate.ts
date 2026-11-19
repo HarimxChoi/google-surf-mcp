@@ -4,7 +4,12 @@ import type { AssertionAggregateInput } from './contracts.js';
 export interface NumericGroup { unit?: string; numeric_count: number; sum: number; min: number; max: number }
 const BYTE_UNITS: Record<string, number> = { B: 1, KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, TiB: 1024 ** 4 };
 
-export function summarizeAssertionAggregate(input: AssertionAggregateInput, matched: number, groups: NumericGroup[]) {
+export function summarizeAssertionAggregate(input: AssertionAggregateInput, matched: number, groups: NumericGroup[],
+  incomplete?: 'mixed_contexts' | 'incomplete_cohort' | 'incomplete_candidates') {
+  if (incomplete) {
+    const result = { operation: input.operation, status: incomplete, value: null, matched_count: matched };
+    return { ...result, result_hash: createHash('sha256').update(JSON.stringify({ input, result })).digest('hex') };
+  }
   const numericCount = groups.reduce((n, g) => n + g.numeric_count, 0);
   const units = [...new Set(groups.map(g => g.unit ?? ''))];
   const unit = input.unit ?? (units.length === 1 ? units[0] : undefined);

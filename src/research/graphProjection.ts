@@ -517,6 +517,11 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
       });
       addEdge(projectId, projectNode, node, 'HAS_CATALOG_RECORD', 1);
     }
+    for (const evidence of source.evidence ?? []) {
+      const target = evidence.source_type === 'catalog' ? catalogAssetNodes.get(evidence.source_id) : undefined;
+      const node = evidenceNodes.get(evidence.evidence_id);
+      if (target && node) addEdge(projectId, node, target, 'DERIVED_FROM', 2);
+    }
     for (const revision of source.catalog_revisions ?? []) {
       const node = graphId('catalog_revision', projectId, revision.revision_id);
       catalogRevisionNodes.set(revision.revision_id, node);
@@ -529,6 +534,8 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
         source_id: revision.revision_id,
         record_id: revision.asset_id,
         revision_id: revision.revision_id,
+        search_scope: Object.fromEntries(['namespace', 'sport', 'folder', 'model_id']
+          .filter(key => revision.fields[key] !== undefined).map(key => [key, revision.fields[key]])),
       });
       addInstanceOf(projectId, node, revision.kind);
     }
@@ -557,6 +564,9 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
       ['experiment_id', 'BELONGS_TO_EXPERIMENT'], ['attempt_id', 'OBSERVED_IN_ATTEMPT'],
       ['arm_id', 'MEASURES_ARM'], ['parent_arm_id', 'DERIVED_FROM_ARM'],
       ['control_arm_id', 'COMPARES_TO_ARM'], ['parent_ids', 'DERIVED_FROM_PARENT'],
+      ['model_id', 'MEASURES_MODEL'], ['feature_ids', 'USES_FEATURE'],
+      ['training_period_id', 'TRAINED_DURING'], ['evaluation_policy_id', 'EVALUATED_UNDER'],
+      ['checkpoint_id', 'HAS_CHECKPOINT'],
     ];
     for (const revision of source.catalog_revisions ?? []) {
       const revisionNode = catalogRevisionNodes.get(revision.revision_id)!;
@@ -712,8 +722,11 @@ export function buildGraphProjection(sources: ProjectGraphSource[]): GraphProjec
         project_id: projectId,
         kind: 'assertion',
         label: assertion.predicate,
-        text: assertion.value === undefined ? undefined : String(assertion.value),
+        text: [assertion.subject, assertion.predicate, assertion.object,
+          assertion.value === undefined ? '' : String(assertion.value), assertion.unit,
+          assertion.context ? JSON.stringify(assertion.context) : ''].filter(Boolean).join(' ') || undefined,
         source_id: assertion.assertion_id,
+        ...(assertion.context ? { assertion_context: assertion.context } : {}),
       });
       addInstanceOf(projectId, node, 'assertion');
       addEdge(projectId, resolveEntityNode(assertion.subject), node, 'ASSERTS', 2, {

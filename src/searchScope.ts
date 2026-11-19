@@ -1,30 +1,37 @@
 import { formatToolResponse, type CallToolResult } from './response.js';
 
-function siteDomain(query: string): string | undefined {
+function siteScope(query: string): { domain: string; path?: string } | undefined {
   const tokens = query.match(/"(?:[^"\\]|\\.)*"|\S+/g) ?? [];
   if (tokens.some(token => /^(?:OR|NOT|\|)$/i.test(token) || /[()]/.test(token))) return;
   const sites = tokens.filter(token => /^site:/i.test(token));
   if (sites.length !== 1) return;
-  const match = sites[0].slice(5).match(/^(?:https?:\/\/)?([^/?#:\s]+)\/?$/i);
+  const match = sites[0].slice(5).match(/^(?:https?:\/\/)?([^/?#:\s]+)(\/[^?#\s]*)?$/i);
   if (!match || !/^[\p{L}\p{N}.-]+$/u.test(match[1])) return;
-  try { return new URL(`https://${match[1]}`).hostname.toLowerCase().replace(/\.$/, ''); } catch { return; }
+  try {
+    const url = new URL(`https://${match[1]}${match[2] ?? ''}`);
+    return { domain: url.hostname.toLowerCase().replace(/\.$/, ''),
+      ...(url.pathname !== '/' ? { path: url.pathname } : {}) };
+  } catch { return; }
 }
 
 export function enforceSearchSiteScope(response: CallToolResult): CallToolResult {
   if (response.isError || !response.structuredContent) return response;
-  const scopes: Array<{ domain: string; removed: number; recovered_references?: number }> = [];
+  const scopes: Array<{ domain: string; path?: string; removed: number; recovered_references?: number }> = [];
   const visit = (value: Record<string, unknown>): Record<string, unknown> => {
     if (!Array.isArray(value.results)) return value;
     if (typeof value.query !== 'string') return { ...value, results: value.results.map(visit) };
-    const domain = siteDomain(value.query);
-    if (!domain) return value;
-    const matchesDomain = (value: string) => {
+    const requested = siteScope(value.query);
+    if (!requested) return value;
+    const { domain, path } = requested;
+    const matchesScope = (value: string) => {
       try {
         const url = new URL(value), host = url.hostname.toLowerCase().replace(/\.$/, '');
-        return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password && (host === domain || host.endsWith(`.${domain}`));
+        return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password
+          && (host === domain || host.endsWith(`.${domain}`))
+          && (!path || url.pathname.startsWith(path) || path.endsWith('/') && url.pathname === path.slice(0, -1));
       } catch { return false; }
     };
-    const results = value.results.filter((row: { url?: string }) => matchesDomain(row.url ?? ''));
+    const results = value.results.filter((row: { url?: string }) => matchesScope(row.url ?? ''));
     const removed = value.results.length - results.length;
     if (!removed) return value;
     let recovered = 0;
@@ -36,7 +43,7 @@ export function enforceSearchSiteScope(response: CallToolResult): CallToolResult
         for (const reference of references) {
           if (!reference || reference.length > 2000) continue;
           const url = reference.replace(/[.,;!?]+$/, '');
-          if (!matchesDomain(url) || seen.has(url)) continue;
+          if (!matchesScope(url) || seen.has(url)) continue;
           seen.add(url); recovered++;
           results.push({ title: `Referenced source: ${new URL(url).pathname}`, url, description:'', discovery:'serp_reference', discovered_from:row.url });
           if (results.length >= Math.min(4,value.results.length)) break;
@@ -44,7 +51,7 @@ export function enforceSearchSiteScope(response: CallToolResult): CallToolResult
         if (results.length >= Math.min(4,value.results.length)) break;
       }
     }
-    const scope = { domain, removed, ...(recovered ? { recovered_references:recovered } : {}) };
+    const scope = { ...requested, removed, ...(recovered ? { recovered_references:recovered } : {}) };
     scopes.push(scope);
     return { ...value, results, site_scope: scope,
       degraded_reasons: [...new Set([...(Array.isArray(value.degraded_reasons) ? value.degraded_reasons : []), 'site_scope_mismatch'])] };

@@ -295,11 +295,8 @@ export async function runCodeStructureBatchStream(
   if (process.env.VITEST || import.meta.url.endsWith('/src/research/codeStructure.js')) {
     for await (const batch of batches) {
       const result = extractCodeStructure(batch);
-      symbols.push(...result.symbols);
-      relations.push(...result.relations.map((relation) => ({
-        ...relation,
-        target_symbol_id: undefined,
-      })));
+      for (const symbol of result.symbols) symbols.push(symbol);
+      for (const relation of result.relations) relations.push({ ...relation, target_symbol_id: undefined });
     }
   } else {
     const iterator = batches[Symbol.asyncIterator]();
@@ -323,11 +320,8 @@ export async function runCodeStructureBatchStream(
         );
         try {
           const result = await runWorkerBatch(worker, batch.value);
-          symbols.push(...result.symbols);
-          relations.push(...result.relations.map((relation) => ({
-            ...relation,
-            target_symbol_id: undefined,
-          })));
+          for (const symbol of result.symbols) symbols.push(symbol);
+          for (const relation of result.relations) relations.push({ ...relation, target_symbol_id: undefined });
         } finally {
           await worker.terminate();
         }

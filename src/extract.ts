@@ -175,6 +175,7 @@ interface FetchResp { status: number; ct: string; buf: Buffer; finalUrl: string 
 interface DiscoveryResult {
   result: ExtractResult | null;
   metadata?: DocumentMetadata;
+  finalUrl?: string;
 }
 
 class SourceSizeError extends Error {}
@@ -304,7 +305,7 @@ async function discoverViaFetch(
   if (!r) return { result: null };
   if (r.status >= 400) return mode === 'metadata'
     ? { result: { url: r.finalUrl, error: `http ${r.status}`, extraction_quality: 'blocked', quality_reason: `http_${r.status}` } }
-    : { result: null };
+    : { result: null, finalUrl: r.finalUrl };
 
   if (isPdfContentType(r.ct) || isPdfMagic(r.buf)) {
     try {
@@ -417,7 +418,7 @@ async function discoverViaFetch(
     } };
   }
 
-  return { result: null, metadata };
+  return { result: null, metadata, finalUrl: r.finalUrl };
 }
 
 export async function extract(
@@ -459,7 +460,7 @@ export async function extract(
     const context = typeof ctx === 'function' ? await ctx() : ctx;
     page = await context.newPage();
 
-    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
+    const resp = await page.goto(discovery.finalUrl ?? url, { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
 
     // page.goto follows server-side redirects unchecked; a public URL can 30x
     // into a private address (e.g. cloud metadata). Re-verify the landed URL.

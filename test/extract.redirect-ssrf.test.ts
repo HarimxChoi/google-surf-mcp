@@ -77,4 +77,23 @@ describe('extract: redirect SSRF guard', () => {
 
     expect(calls).toEqual([PUBLIC_URL, PRIVATE_TARGET]);
   });
+
+  it('navigates directly to the validated final HTML URL', async () => {
+    process.env.SURF_ALLOW_PRIVATE = 'true';
+    const finalUrl = 'https://example.com/final-document';
+    global.fetch = vi.fn(async (url: any) => url.toString() === PUBLIC_URL
+      ? new Response('', { status: 308, headers: { location: finalUrl } })
+      : new Response('<html><body>Public documentation</body></html>', {
+        status: 200, headers: { 'content-type': 'text/html' },
+      })) as typeof global.fetch;
+    const goto = vi.fn(async () => ({ status: () => 200, url: () => finalUrl }));
+    const page = {
+      goto, url: () => finalUrl, waitForTimeout: async () => {},
+      addScriptTag: async () => {}, close: async () => {},
+      evaluate: async () => ({ title: 'Documentation', content: '<p>Public documentation content.</p>',
+        textContent: 'Public documentation content.', linkRatio: 0 }),
+    };
+    await extract({ newPage: async () => page } as any, PUBLIC_URL, { mode: 'full' });
+    expect(goto).toHaveBeenCalledWith(finalUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+  });
 });
